@@ -7,6 +7,7 @@ from constitutional_swarm.bittensor.compliance_certificate import (
     AuditPeriod,
     CertificateIssuer,
     ComplianceSnapshot,
+    HashCommitmentProver,
     HMACProver,
     ProofType,
     ZKPStubProver,
@@ -261,3 +262,70 @@ class TestCertificateIssuer:
         )
         cert = issuer.issue("e1", _period(), snapshot, threshold=0.997)
         assert cert.attests_compliance is True
+
+
+# ---------------------------------------------------------------------------
+# HashCommitmentProver
+# ---------------------------------------------------------------------------
+
+
+class TestHashCommitmentProver:
+    def test_prove_returns_commitment_prefix(self):
+        prover = HashCommitmentProver(secret_key="test-secret")
+        snapshot = _good_snapshot()
+        proof = prover.prove(snapshot, 0.997, CONST_HASH)
+        assert proof.startswith("commitment:")
+        assert len(proof) > len("commitment:")
+
+    def test_verify_valid_proof(self):
+        prover = HashCommitmentProver(secret_key="test-secret")
+        snapshot = _good_snapshot()
+        proof = prover.prove(snapshot, 0.997, CONST_HASH)
+        assert prover.verify(proof, snapshot, 0.997, CONST_HASH)
+
+    def test_verify_rejects_tampered_proof(self):
+        prover = HashCommitmentProver(secret_key="test-secret")
+        snapshot = _good_snapshot()
+        proof = prover.prove(snapshot, 0.997, CONST_HASH)
+        tampered = proof[:-4] + "dead"
+        assert not prover.verify(tampered, snapshot, 0.997, CONST_HASH)
+
+    def test_verify_rejects_wrong_threshold(self):
+        prover = HashCommitmentProver(secret_key="test-secret")
+        snapshot = _good_snapshot()
+        proof = prover.prove(snapshot, 0.997, CONST_HASH)
+        assert not prover.verify(proof, snapshot, 0.900, CONST_HASH)
+
+    def test_verify_rejects_wrong_hash(self):
+        prover = HashCommitmentProver(secret_key="test-secret")
+        snapshot = _good_snapshot()
+        proof = prover.prove(snapshot, 0.997, CONST_HASH)
+        assert not prover.verify(proof, snapshot, 0.997, "wrong_hash")
+
+    def test_deterministic(self):
+        prover = HashCommitmentProver(secret_key="test-secret")
+        snapshot = _good_snapshot()
+        p1 = prover.prove(snapshot, 0.997, CONST_HASH)
+        p2 = prover.prove(snapshot, 0.997, CONST_HASH)
+        assert p1 == p2
+
+    def test_different_secrets_different_proofs(self):
+        p1 = HashCommitmentProver(secret_key="secret-a")
+        p2 = HashCommitmentProver(secret_key="secret-b")
+        snapshot = _good_snapshot()
+        assert p1.prove(snapshot, 0.997, CONST_HASH) != p2.prove(snapshot, 0.997, CONST_HASH)
+
+    def test_includes_all_snapshot_fields(self):
+        """Changing escalated_decisions changes the proof (all fields are committed)."""
+        prover = HashCommitmentProver(secret_key="test-secret")
+        s1 = ComplianceSnapshot(
+            total_decisions=100, passed_decisions=99,
+            escalated_decisions=1, auto_resolved_decisions=0,
+            constitutional_hash=CONST_HASH,
+        )
+        s2 = ComplianceSnapshot(
+            total_decisions=100, passed_decisions=99,
+            escalated_decisions=5, auto_resolved_decisions=0,
+            constitutional_hash=CONST_HASH,
+        )
+        assert prover.prove(s1, 0.99, CONST_HASH) != prover.prove(s2, 0.99, CONST_HASH)

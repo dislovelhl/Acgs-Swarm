@@ -181,17 +181,20 @@ class EmissionCalculator:
         min_weight_fraction: float = 0.01,
         max_weight_fraction: float = 0.40,
         minimum_tier: MinerTier = MinerTier.APPRENTICE,
+        registered_miners: set[str] | None = None,
     ) -> None:
         self._weights = weights
         self._min_frac = min_weight_fraction
         self._max_frac = max_weight_fraction
         self._min_tier = minimum_tier
         self._min_tier_order = _TIER_ORDER[minimum_tier]
+        self._registered: set[str] | None = registered_miners
 
     def compute(self, inputs: list[MinerEmissionInput]) -> EmissionCycle:
         """Compute emission weights for all miners.
 
         Steps:
+          0. Filter unregistered miners → zero weight (Sybil resistance)
           1. Filter inactive + below-minimum-tier miners → zero weight
           2. Normalize each signal dimension to [0, 1]
           3. Apply formula weights → raw_score per miner
@@ -203,7 +206,11 @@ class EmissionCalculator:
         Returns EmissionCycle with all MinerEmission records.
         """
         active = [
-            inp for inp in inputs if inp.is_active and _TIER_ORDER[inp.tier] >= self._min_tier_order
+            inp
+            for inp in inputs
+            if inp.is_active
+            and _TIER_ORDER[inp.tier] >= self._min_tier_order
+            and (self._registered is None or inp.miner_uid in self._registered)
         ]
 
         if not active:

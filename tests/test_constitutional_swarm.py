@@ -813,3 +813,56 @@ class TestRiskScoring:
         assert _risk_level(0.79) == "high"
         assert _risk_level(0.8) == "critical"
         assert _risk_level(1.0) == "critical"
+
+
+# ---------------------------------------------------------------------------
+# Byzantine Attack: majority-reject via ConstitutionalMesh
+# ---------------------------------------------------------------------------
+
+
+class TestByzantineMajorityReject:
+    """Byzantine majority (3 of 5) rejects content via manual vote submission."""
+
+    def test_byzantine_majority_rejects(self) -> None:
+        from constitutional_swarm.mesh import ConstitutionalMesh
+
+        constitution = Constitution.default()
+        # 5 agents, producer excluded → 4 peers assigned.
+        # quorum=2 means rejection triggers at votes_against > (4-2) = >2, i.e. 3 rejects.
+        mesh = ConstitutionalMesh(
+            constitution,
+            peers_per_validation=4,
+            quorum=2,
+            seed=42,
+        )
+
+        # Register 5 agents
+        for name in ("agent-a", "agent-b", "agent-c", "agent-d", "agent-e"):
+            mesh.register_agent(name)
+
+        # Producer agent-a requests validation for safe content
+        assignment = mesh.request_validation(
+            producer_id="agent-a",
+            content="analyze code quality",
+            artifact_id="art-001",
+        )
+
+        # 3 of the 4 assigned peers vote to reject (Byzantine majority).
+        # After 3 rejects the mesh auto-settles (quorum reached), so
+        # we submit exactly 3 votes — the 4th would raise AssignmentSettledError.
+        for peer_id in assignment.peers[:3]:
+            mesh.submit_vote(
+                assignment.assignment_id,
+                peer_id,
+                approved=False,
+                reason="byzantine reject",
+            )
+
+        result = mesh.get_result(assignment.assignment_id)
+
+        # The content should be rejected because 3 peers voted against
+        assert result.accepted is False
+        assert result.quorum_met is True
+        assert result.proof is not None
+        assert result.proof.verify() is True
+        assert result.votes_against >= 3

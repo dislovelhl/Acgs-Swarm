@@ -362,6 +362,127 @@ class TestArweaveAuditLogger:
         assert s["total_flushed"] == 1
         assert s["batches_stored"] == 1
 
+    def test_flush_preserves_pending_on_chain_failure(self):
+        """Two-phase commit: if chain submitter raises, entries remain pending."""
+
+        class FailingSubmitter:
+            def submit(
+                self, batch_root: str, constitutional_hash: str, proof_count: int
+            ) -> int:
+                raise RuntimeError("chain unavailable")
+
+        arweave = InMemoryArweaveClient()
+        logger = ArweaveAuditLogger(
+            constitutional_hash=CONST_HASH,
+            arweave_client=arweave,
+            chain_submitter=FailingSubmitter(),
+            batch_size=100,
+        )
+        for i in range(3):
+            logger.add_entry(_entry(f"keep-{i}"))
+
+        with pytest.raises(RuntimeError, match="chain unavailable"):
+            logger.flush()
+
+        # Entries must still be pending — nothing was lost.
+        assert logger.pending_count == 3
+
+    def test_retry_reuses_arweave_upload_no_ghost(self):
+        """Chain failure then retry reuses the same Arweave upload, not a new one."""
+        call_count = 0
+
+        class FailOnceThenSucceedSubmitter:
+            def submit(
+                self, batch_root: str, constitutional_hash: str, proof_count: int
+            ) -> int:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise RuntimeError("chain unavailable")
+                return 42
+
+        arweave = InMemoryArweaveClient()
+        logger = ArweaveAuditLogger(
+            constitutional_hash=CONST_HASH,
+            arweave_client=arweave,
+            chain_submitter=FailOnceThenSucceedSubmitter(),
+            batch_size=100,
+        )
+        for i in range(3):
+            logger.add_entry(_entry(f"retry-{i}"))
+
+        # First flush: Arweave upload succeeds, chain fails
+        uploads_before = arweave.transaction_count
+        with pytest.raises(RuntimeError, match="chain unavailable"):
+            logger.flush()
+        uploads_after_fail = arweave.transaction_count
+        assert uploads_after_fail == uploads_before + 1  # one upload happened
+
+        # Second flush (retry): should reuse cached upload, not create a new one
+        receipt = logger.flush()
+        uploads_after_retry = arweave.transaction_count
+        assert uploads_after_retry == uploads_after_fail  # NO new upload
+        assert receipt is not None
+        assert receipt.block_height == 42
+        assert receipt.entry_count == 3
+        assert logger.pending_count == 0
+
+    def test_flush_preserves_pending_on_arweave_failure(self):
+        """Two-phase commit: if Arweave upload raises, entries remain pending."""
+
+        class FailingArweave:
+            def upload(self, data: bytes, tags: dict[str, str] | None = None) -> str:
+                raise RuntimeError("arweave unavailable")
+
+            def fetch(self, tx_id: str) -> bytes:
+                raise KeyError(tx_id)
+
+        logger = ArweaveAuditLogger(
+            constitutional_hash=CONST_HASH,
+            arweave_client=FailingArweave(),  # type: ignore[arg-type]
+            batch_size=100,
+        )
+        logger.add_entry(_entry("keep-me"))
+        with pytest.raises(RuntimeError, match="arweave unavailable"):
+            logger.flush()
+        assert logger.pending_count == 1
+
+    def test_replay_protection_rejects_wrong_batch_id(self):
+        """verify_merkle_path rejects a proof replayed from a different batch."""
+        entries_a = [_entry(f"a-{i}") for i in range(3)]
+        batch_a = AuditBatch("batch-AAA", CONST_HASH, entries_a)
+
+        entries_b = [_entry(f"b-{i}") for i in range(3)]
+        batch_b = AuditBatch("batch-BBB", CONST_HASH, entries_b)
+
+        # Valid proof within batch A
+        path = batch_a.merkle_path_for("a-0")
+        leaf = entries_a[0].leaf_hash()
+        assert verify_merkle_path(leaf, path, batch_a.batch_root)
+
+        # Same proof + root but claimed against batch B's ID → rejected
+        assert not verify_merkle_path(
+            leaf,
+            path,
+            batch_a.batch_root,
+            batch_id="batch-AAA",
+            expected_batch_id="batch-BBB",
+        )
+
+    def test_replay_protection_accepts_matching_batch_id(self):
+        """verify_merkle_path accepts proof when batch IDs match."""
+        entries = [_entry(f"ok-{i}") for i in range(3)]
+        batch = AuditBatch("batch-OK", CONST_HASH, entries)
+        path = batch.merkle_path_for("ok-1")
+        leaf = entries[1].leaf_hash()
+        assert verify_merkle_path(
+            leaf,
+            path,
+            batch.batch_root,
+            batch_id="batch-OK",
+            expected_batch_id="batch-OK",
+        )
+
     def test_auditor_end_to_end_verification(self):
         """Full auditor workflow: chain anchor → fetch → verify membership."""
         from constitutional_swarm.bittensor.chain_anchor import InMemorySubmitter

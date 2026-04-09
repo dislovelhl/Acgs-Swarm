@@ -26,6 +26,7 @@ Q&A reference:    07-subnet-concept-qa-responses.md § 5
 from __future__ import annotations
 
 import math
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -252,12 +253,15 @@ class PrecedentStore:
         constitutional_hash: str,
         auto_resolve_threshold: float = 0.85,
         min_votes_for_precedent: int = 2,
+        min_total_validators: int = 0,
     ) -> None:
         self._constitutional_hash = constitutional_hash
         self._auto_resolve_threshold = auto_resolve_threshold
         self._min_votes = min_votes_for_precedent
+        self._min_total_validators = min_total_validators
         self._records: dict[str, PrecedentRecord] = {}
         self._revocation_log: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Core operations
@@ -280,6 +284,9 @@ class PrecedentStore:
     def add(self, record: PrecedentRecord) -> None:
         """Add a validated precedent record.
 
+        Thread-safe: holds ``_lock`` for validation + insert to prevent
+        TOCTOU races on duplicate-ID checks.
+
         Validates:
           • Constitutional hash match
           • Minimum validator votes
@@ -296,13 +303,20 @@ class PrecedentStore:
                 f"Precedent {record.precedent_id} was not accepted by validators. "
                 "Only accepted judgments may be stored."
             )
+        total_votes = record.votes_for + record.votes_against
+        if total_votes < self._min_total_validators:
+            raise ValueError(
+                f"Insufficient total validators: got={total_votes} "
+                f"required={self._min_total_validators}"
+            )
         if record.votes_for < self._min_votes:
             raise ValueError(
                 f"Insufficient validator votes: got={record.votes_for} required={self._min_votes}"
             )
-        if record.precedent_id in self._records:
-            raise ValueError(f"Precedent {record.precedent_id} already stored.")
-        self._records[record.precedent_id] = record
+        with self._lock:
+            if record.precedent_id in self._records:
+                raise ValueError(f"Precedent {record.precedent_id} already stored.")
+            self._records[record.precedent_id] = record
 
     def retrieve(
         self,
@@ -376,23 +390,24 @@ class PrecedentStore:
 
         Raises KeyError if the precedent_id is not found.
         """
-        if precedent_id not in self._records:
-            raise KeyError(f"Precedent {precedent_id!r} not found.")
+        with self._lock:
+            if precedent_id not in self._records:
+                raise KeyError(f"Precedent {precedent_id!r} not found.")
 
-        record = self._records[precedent_id]
-        # Replace with an inactive copy (PrecedentRecord is frozen)
-        import dataclasses
+            record = self._records[precedent_id]
+            # Replace with an inactive copy (PrecedentRecord is frozen)
+            import dataclasses
 
-        inactive = dataclasses.replace(record, is_active=False)
-        self._records[precedent_id] = inactive
+            inactive = dataclasses.replace(record, is_active=False)
+            self._records[precedent_id] = inactive
 
-        self._revocation_log.append(
-            {
-                "precedent_id": precedent_id,
-                "revoked_at": time.time(),
-                "reason": reason,
-            }
-        )
+            self._revocation_log.append(
+                {
+                    "precedent_id": precedent_id,
+                    "revoked_at": time.time(),
+                    "reason": reason,
+                }
+            )
 
     # ------------------------------------------------------------------
     # Statistics and reporting

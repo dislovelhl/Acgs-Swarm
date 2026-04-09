@@ -204,3 +204,43 @@ class TestScaling:
         assert s["num_agents"] == 10
         assert s["is_stable"] is True
         assert "spectral_bound" in s
+
+
+class TestManifoldCompositionDoublyStochastic:
+    """Verify that composing two manifolds produces a doubly stochastic result."""
+
+    def test_composed_matrix_is_doubly_stochastic_with_spectral_bound(self) -> None:
+        n = 3
+
+        # Create two manifolds and record interactions
+        g1 = GovernanceManifold(n)
+        g2 = GovernanceManifold(n)
+
+        g1.update_trust(0, 1, 2.0)
+        g1.update_trust(1, 2, 1.5)
+        g1.update_trust(2, 0, 3.0)
+
+        g2.update_trust(0, 2, 4.0)
+        g2.update_trust(1, 0, 2.0)
+        g2.update_trust(2, 1, 1.0)
+
+        # Project both
+        g1.project()
+        g2.project()
+
+        # Compose
+        composed = g1.compose(g2)
+        matrix = composed.trust_matrix
+
+        # Verify doubly stochastic: row sums ≈ 1.0
+        for i in range(n):
+            row_sum = sum(matrix[i])
+            assert abs(row_sum - 1.0) < 0.01, f"Row {i} sum = {row_sum}"
+
+        # Verify doubly stochastic: column sums ≈ 1.0
+        for j in range(n):
+            col_sum = sum(matrix[i][j] for i in range(n))
+            assert abs(col_sum - 1.0) < 0.01, f"Col {j} sum = {col_sum}"
+
+        # Verify spectral bound ≤ 1.0 + 0.01
+        assert composed.spectral_bound <= 1.0 + 0.01

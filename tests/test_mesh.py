@@ -78,7 +78,9 @@ class TestAgentManagement:
         with pytest.raises(KeyError):
             mesh.get_reputation("nonexistent")
 
-    def test_summary_reports_no_settlement_storage_by_default(self, mesh: ConstitutionalMesh) -> None:
+    def test_summary_reports_no_settlement_storage_by_default(
+        self, mesh: ConstitutionalMesh
+    ) -> None:
         summary = mesh.summary()
         assert summary["settlement_storage"] == {"enabled": False, "backend": None}
 
@@ -366,7 +368,9 @@ class TestCryptographicProof:
 
     def test_restart_rejects_mismatched_constitution_hash(self, tmp_path) -> None:
         store_path = tmp_path / "mesh-settlements.jsonl"
-        writer = ConstitutionalMesh(Constitution.default(), seed=42, settlement_store_path=store_path)
+        writer = ConstitutionalMesh(
+            Constitution.default(), seed=42, settlement_store_path=store_path
+        )
         for i in range(5):
             writer.register_agent(f"agent-{i:02d}")
         writer.full_validation("agent-00", "restart-safe output", "art-13g")

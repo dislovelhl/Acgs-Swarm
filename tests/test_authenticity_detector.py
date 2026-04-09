@@ -371,3 +371,72 @@ class TestEndToEnd:
     def test_threshold_default(self):
         det = AuthenticityDetector()
         assert det._threshold == 0.55
+
+
+# ---------------------------------------------------------------------------
+# Manifold override
+# ---------------------------------------------------------------------------
+
+
+class TestManifoldOverride:
+    def test_manifold_override_false_by_default(self):
+        """AuthenticityScore defaults to manifold_override=False."""
+        det = AuthenticityDetector()
+        score = det.score("short")
+        assert score.manifold_override is False
+
+    def test_manifold_override_makes_effective_authentic_true(self):
+        """Low authenticity + manifold_override → effective_authentic is True."""
+        score = AuthenticityScore(
+            overall=0.2,
+            dimension_scores=(),
+            judgment_word_count=5,
+            is_authentic=False,
+            threshold=0.55,
+            flags=(),
+            manifold_override=True,
+        )
+        assert not score.is_authentic
+        assert score.manifold_override
+        assert score.effective_authentic
+
+    def test_high_authentic_no_override_still_effective(self):
+        """High authenticity without override → effective_authentic is True."""
+        score = AuthenticityScore(
+            overall=0.8,
+            dimension_scores=(),
+            judgment_word_count=100,
+            is_authentic=True,
+            threshold=0.55,
+            flags=(),
+            manifold_override=False,
+        )
+        assert score.effective_authentic
+
+    def test_low_authentic_no_override_not_effective(self):
+        """Low authenticity without override → effective_authentic is False."""
+        score = AuthenticityScore(
+            overall=0.2,
+            dimension_scores=(),
+            judgment_word_count=5,
+            is_authentic=False,
+            threshold=0.55,
+            flags=(),
+            manifold_override=False,
+        )
+        assert not score.effective_authentic
+
+    def test_as_dict_includes_manifold_fields(self):
+        """as_dict exposes manifold_override and effective_authentic."""
+        score = AuthenticityScore(
+            overall=0.3,
+            dimension_scores=(),
+            judgment_word_count=10,
+            is_authentic=False,
+            threshold=0.55,
+            flags=(),
+            manifold_override=True,
+        )
+        d = score.as_dict
+        assert d["manifold_override"] is True
+        assert d["effective_authentic"] is True

@@ -459,3 +459,186 @@ class TestPrecedentStoreStatistics:
         assert s["total_stored"] == 1
         assert s["revoked"] == 1
         assert s["revocation_log_entries"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Super-majority validation (3/5 quorum)
+# ---------------------------------------------------------------------------
+
+
+class TestSuperMajorityValidation:
+    def test_insufficient_total_validators_rejected(self):
+        """Precedent with too few total validators is rejected."""
+        store = PrecedentStore(
+            CONST_HASH,
+            min_votes_for_precedent=3,
+            min_total_validators=5,
+        )
+        # 3 votes for, 0 against = only 3 total validators (need 5)
+        r = _make_record(votes_for=3, votes_against=0)
+        with pytest.raises(ValueError, match="Insufficient total validators"):
+            store.add(r)
+
+    def test_insufficient_votes_for_with_enough_validators(self):
+        """Enough validators but not enough approvals is rejected."""
+        store = PrecedentStore(
+            CONST_HASH,
+            min_votes_for_precedent=3,
+            min_total_validators=5,
+        )
+        # 2 for, 3 against = 5 total validators but only 2 approvals (need 3)
+        r = _make_record(votes_for=2, votes_against=3)
+        with pytest.raises(ValueError, match="Insufficient validator votes"):
+            store.add(r)
+
+    def test_3_of_5_super_majority_accepted(self):
+        """3/5 super-majority passes validation."""
+        store = PrecedentStore(
+            CONST_HASH,
+            min_votes_for_precedent=3,
+            min_total_validators=5,
+        )
+        r = _make_record(votes_for=3, votes_against=2)
+        store.add(r)
+        assert store.size == 1
+
+    def test_5_of_5_unanimous_accepted(self):
+        """Unanimous 5/5 accepted."""
+        store = PrecedentStore(
+            CONST_HASH,
+            min_votes_for_precedent=3,
+            min_total_validators=5,
+        )
+        r = _make_record(votes_for=5, votes_against=0)
+        store.add(r)
+        assert store.size == 1
+
+    def test_default_no_total_validator_check(self):
+        """Default min_total_validators=0 means no total validator check."""
+        store = PrecedentStore(CONST_HASH)
+        r = _make_record(votes_for=2, votes_against=0)  # only 2 total
+        store.add(r)
+        assert store.size == 1
+
+
+# ---------------------------------------------------------------------------
+# Concurrent PrecedentStore — thread safety
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentPrecedentStore:
+    """Verify PrecedentStore handles concurrent adds without data loss."""
+
+    def test_20_threads_add_unique_precedents(self):
+        import threading
+
+        store = PrecedentStore(
+            CONST_HASH,
+            min_votes_for_precedent=1,
+            min_total_validators=0,
+        )
+
+        errors: list[Exception] = []
+
+        def add_precedent(idx: int) -> None:
+            try:
+                record = _make_record(
+                    case_id=f"concurrent-{idx}",
+                    miner_uid=f"miner-{idx}",
+                    judgment=f"Judgment for case {idx}",
+                )
+                store.add(record)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=add_precedent, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"Exceptions during concurrent add: {errors}"
+        assert store.size == 20
+
+
+# ---------------------------------------------------------------------------
+# 10K precedent k-NN scale test
+# ---------------------------------------------------------------------------
+
+
+class TestPrecedentStoreScale:
+    """Scale test: 10,000 precedents with k-NN retrieval performance check."""
+
+    @pytest.mark.slow
+    def test_10k_precedent_knn_retrieval(self):
+        """Insert 10K synthetic precedents and verify k-NN retrieval
+        completes in <2000ms with correctly ranked results."""
+        import random
+        import time as _time
+
+        random.seed(42)
+
+        dims = (
+            "safety", "security", "privacy", "fairness",
+            "reliability", "transparency", "efficiency",
+        )
+        esc_types = list(EscalationType)
+
+        store = PrecedentStore(
+            constitutional_hash=CONST_HASH,
+            min_votes_for_precedent=1,
+            min_total_validators=0,
+            auto_resolve_threshold=0.99,  # high to avoid auto-resolve noise
+        )
+
+        # Generate and insert 10,000 precedents with random 7-vectors
+        for i in range(10_000):
+            vec = {d: random.random() for d in dims}
+            rec = PrecedentRecord(
+                precedent_id=f"scale-{i:05d}",
+                case_id=f"case-{i:05d}",
+                task_id=f"task-{i:05d}",
+                miner_uid=f"miner-{i % 100:03d}",
+                judgment=f"Judgment for case {i}",
+                reasoning=f"Reasoning {i}",
+                validation_accepted=True,
+                votes_for=2,
+                votes_against=0,
+                proof_root_hash=f"hash-{i}",
+                validator_grade=1.0,
+                escalation_type=esc_types[i % len(esc_types)],
+                impact_vector=vec,
+                ambiguous_dimensions=(),
+                constitutional_hash=CONST_HASH,
+                recorded_at=_time.time(),
+                is_active=True,
+            )
+            store.add(rec)
+
+        assert store.size == 10_000
+
+        # Query with a known vector (biased toward privacy)
+        query_vector = {
+            "safety": 0.1, "security": 0.1, "privacy": 0.95,
+            "fairness": 0.1, "reliability": 0.1, "transparency": 0.1, "efficiency": 0.1,
+        }
+
+        start = _time.monotonic()
+        result = store.retrieve(query_vector, k=10)
+        elapsed_ms = (_time.monotonic() - start) * 1000
+
+        # Performance: must complete in <2000ms (generous for CI)
+        assert elapsed_ms < 2000, f"Retrieval took {elapsed_ms:.1f}ms, expected <2000ms"
+
+        # Must return results
+        assert len(result.matches) == 10
+
+        # Top match must have positive similarity
+        assert result.top_match is not None
+        assert result.top_match.similarity > 0.0
+
+        # Results must be ranked by descending similarity
+        sims = [m.similarity for m in result.matches]
+        assert sims == sorted(sims, reverse=True), (
+            f"Results not ranked by descending similarity: {sims}"
+        )

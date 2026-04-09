@@ -313,3 +313,57 @@ class TestEmissionCycle:
         inputs = [MinerEmissionInput("m", tier=MinerTier.MASTER)]
         cycle = calc.compute(inputs)
         assert cycle.max_weight == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Sybil resistance (registered_miners gate)
+# ---------------------------------------------------------------------------
+
+
+class TestSybilResistance:
+    def test_unregistered_miner_gets_zero_weight(self):
+        """Miners not in the registered set receive zero emission weight."""
+        calc = EmissionCalculator(registered_miners={"miner-01", "miner-02"})
+        inputs = [
+            MinerEmissionInput("miner-01", tier=MinerTier.MASTER, reputation=1.5),
+            MinerEmissionInput("miner-02", tier=MinerTier.JOURNEYMAN, reputation=1.2),
+            MinerEmissionInput("sybil-03", tier=MinerTier.MASTER, reputation=1.5),
+        ]
+        cycle = calc.compute(inputs)
+        weights = cycle.as_weight_dict()
+        assert weights["sybil-03"] == 0.0
+        assert weights["miner-01"] > 0.0
+        assert weights["miner-02"] > 0.0
+
+    def test_registered_none_disables_gate(self):
+        """When registered_miners is None (default), all miners are eligible."""
+        calc = EmissionCalculator()
+        inputs = [
+            MinerEmissionInput("miner-01", tier=MinerTier.MASTER, reputation=1.5),
+            MinerEmissionInput("miner-02", tier=MinerTier.JOURNEYMAN, reputation=1.2),
+        ]
+        cycle = calc.compute(inputs)
+        assert all(e.emission_weight > 0.0 for e in cycle.emissions)
+
+    def test_all_unregistered_yields_zero(self):
+        """All miners unregistered → all zero weight, no division errors."""
+        calc = EmissionCalculator(registered_miners=set())
+        inputs = [
+            MinerEmissionInput("m1", tier=MinerTier.MASTER),
+            MinerEmissionInput("m2", tier=MinerTier.MASTER),
+        ]
+        cycle = calc.compute(inputs)
+        assert cycle.active_miners == 0
+        assert all(e.emission_weight == 0.0 for e in cycle.emissions)
+
+    def test_sybil_weight_redistributed(self):
+        """Sybil's share is redistributed to registered miners (sum still 1.0)."""
+        calc = EmissionCalculator(registered_miners={"legit"})
+        inputs = [
+            MinerEmissionInput("legit", tier=MinerTier.MASTER, reputation=1.5),
+            MinerEmissionInput("sybil", tier=MinerTier.MASTER, reputation=1.5),
+        ]
+        cycle = calc.compute(inputs)
+        weights = cycle.as_weight_dict()
+        assert weights["legit"] == pytest.approx(1.0)
+        assert weights["sybil"] == 0.0

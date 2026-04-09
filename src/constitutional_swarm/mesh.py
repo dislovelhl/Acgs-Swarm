@@ -354,7 +354,7 @@ class ConstitutionalMesh:
                 raise InsufficientPeersError(
                     f"Need {self._quorum} peers for quorum, only {needed} available"
                 )
-            peers = tuple(self._rng.sample(available, k=needed))
+            peers = tuple(self._select_peers(available, needed, producer_id))
 
             # Step 3: Create assignment with content hash
             content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
@@ -583,6 +583,96 @@ class ConstitutionalMesh:
                 return None
             return self._manifold.summary()
 
+    def _select_peers(
+        self,
+        available: list[str],
+        needed: int,
+        producer_id: str,
+    ) -> list[str]:
+        """Select peers, optionally weighted by manifold trust.
+
+        When ``_use_manifold`` is True and the manifold is converged,
+        peer selection is weighted by the manifold trust vector from the
+        producer to each candidate.  One slot is always filled by random
+        selection (exploration) to prevent permanent exclusion of
+        low-trust peers.
+
+        Falls back to uniform random sampling when the manifold is
+        disabled, not yet converged, or the producer is not indexed.
+        """
+        if (
+            not self._use_manifold
+            or self._manifold is None
+            or producer_id not in self._agent_indices
+        ):
+            return list(self._rng.sample(available, k=needed))
+
+        proj = self._manifold.project()
+        if not proj.converged:
+            return list(self._rng.sample(available, k=needed))
+
+        producer_idx = self._agent_indices[producer_id]
+        trust_row = proj.matrix[producer_idx]
+
+        # Build {agent_id: weight} dict — O(1) lookup, no index() calls
+        weight_map: dict[str, float] = {}
+        for aid in available:
+            idx = self._agent_indices.get(aid)
+            w = trust_row[idx] if idx is not None else 0.01
+            weight_map[aid] = max(w, 0.01)  # floor to prevent zero-weight exclusion
+
+        if needed >= len(available):
+            return list(available)
+
+        # Single-peer case: use weighted selection directly (no exploration slot)
+        if needed == 1:
+            return [self._weighted_pick(available, [weight_map[a] for a in available])]
+
+        # Reserve 1 slot for pure random (exploration) to prevent
+        # permanent exclusion of low-trust peers.
+        random_pick = self._rng.choice(available)
+        selected = {random_pick}
+
+        # Fill remaining slots via weighted sampling (without replacement)
+        remaining_needed = needed - 1
+        remaining_pool = [a for a in available if a not in selected]
+        remaining_weights = [weight_map[a] for a in remaining_pool]
+
+        for _ in range(remaining_needed):
+            if not remaining_pool:
+                break
+            total = sum(remaining_weights)
+            if total <= 0:
+                pick = self._rng.choice(remaining_pool)
+            else:
+                r = self._rng.random() * total
+                cumulative = 0.0
+                pick = remaining_pool[-1]
+                for j, w in enumerate(remaining_weights):
+                    cumulative += w
+                    if cumulative >= r:
+                        pick = remaining_pool[j]
+                        break
+            selected.add(pick)
+            idx_in_pool = remaining_pool.index(pick)
+            remaining_pool.pop(idx_in_pool)
+            remaining_weights.pop(idx_in_pool)
+
+        return list(selected)
+
+    def _weighted_pick(self, pool: list[str], weights: list[float]) -> str:
+        """Pick one item from pool with probability proportional to weights."""
+        total = sum(weights)
+        if total <= 0:
+            return self._rng.choice(pool)
+        r = self._rng.random() * total
+        cumulative = 0.0
+        for j, w in enumerate(weights):
+            cumulative += w
+            if cumulative >= r:
+                return pool[j]
+        return pool[-1]
+
     def _rebuild_manifold(self) -> None:
         """Rebuild the manifold with the current number of agents."""
         n = len(self._agent_indices)
@@ -808,9 +898,7 @@ class ConstitutionalMesh:
             constitutional_hash=str(data["constitutional_hash"]),
             proof=self._deserialize_proof(data.get("proof")),
             settled=bool(data.get("settled", False)),
-            settled_at=(
-                float(data["settled_at"]) if data.get("settled_at") is not None else None
-            ),
+            settled_at=(float(data["settled_at"]) if data.get("settled_at") is not None else None),
         )
 
 

@@ -415,6 +415,10 @@ class ArweaveAuditLogger:
         self._batch_size = batch_size
         self._pending: list[AuditLogEntry] = []
         self._receipts: list[AuditLogReceipt] = []
+        # Retry state: if Phase 1 (Arweave upload) succeeded but Phase 2
+        # (chain submit) failed, we cache the batch + tx_id to reuse on
+        # retry instead of creating a ghost orphaned upload on Arweave.
+        self._retry_state: tuple[AuditBatch, str] | None = None
 
     @property
     def pending_count(self) -> int:
@@ -443,31 +447,45 @@ class ArweaveAuditLogger:
     def flush(self) -> AuditLogReceipt | None:
         """Flush pending entries → Arweave upload + optional chain anchor.
 
+        Two-phase commit: pending entries are preserved until BOTH the
+        Arweave upload AND chain submission succeed.  If either fails,
+        entries remain in ``_pending`` so the caller can retry.
+
         Returns AuditLogReceipt, or None if no pending entries.
         """
         if not self._pending:
             return None
 
-        batch = AuditBatch(
-            batch_id=uuid.uuid4().hex[:12],
-            constitutional_hash=self._constitutional_hash,
-            entries=list(self._pending),
-        )
-        self._pending = []
+        # Reuse a previous successful Arweave upload when retrying after
+        # a chain submission failure.  This prevents ghost orphaned uploads
+        # accumulating on Arweave with no corresponding chain anchor.
+        if self._retry_state is not None:
+            batch, tx_id = self._retry_state
+        else:
+            batch = AuditBatch(
+                batch_id=uuid.uuid4().hex[:12],
+                constitutional_hash=self._constitutional_hash,
+                entries=list(self._pending),
+            )
 
-        # Upload full batch JSON to Arweave
-        batch_json = json.dumps(batch.to_dict()).encode()
-        tx_id = self._arweave.upload(
-            batch_json,
-            tags={
-                "constitutional_hash": self._constitutional_hash,
-                "batch_id": batch.batch_id,
-                "batch_root": batch.batch_root,
-                "App-Name": "ACGS-constitutional-swarm",
-            },
-        )
+            # Phase 1: Upload full batch JSON to Arweave.
+            # On failure the entries stay in _pending for retry.
+            batch_json = json.dumps(batch.to_dict()).encode()
+            tx_id = self._arweave.upload(
+                batch_json,
+                tags={
+                    "constitutional_hash": self._constitutional_hash,
+                    "batch_id": batch.batch_id,
+                    "batch_root": batch.batch_root,
+                    "App-Name": "ACGS-constitutional-swarm",
+                },
+            )
+            # Phase 1 succeeded — cache for potential Phase 2 retry.
+            self._retry_state = (batch, tx_id)
 
-        # Anchor batch_root on-chain (optional)
+        # Phase 2: Anchor batch_root on-chain (optional).
+        # On failure the entries stay in _pending and _retry_state is
+        # preserved so the next flush() reuses the same batch + tx_id.
         block_height: int | None = None
         if self._chain_submitter is not None:
             block_height = self._chain_submitter.submit(
@@ -475,6 +493,10 @@ class ArweaveAuditLogger:
                 constitutional_hash=self._constitutional_hash,
                 proof_count=batch.entry_count,
             )
+
+        # Both phases succeeded — clear pending entries and retry state.
+        self._pending = []
+        self._retry_state = None
 
         receipt = AuditLogReceipt(
             receipt_id=uuid.uuid4().hex[:8],
@@ -583,16 +605,30 @@ def verify_merkle_path(
     leaf_hash: str,
     path: list[tuple[str, str]],
     expected_root: str,
+    *,
+    batch_id: str | None = None,
+    expected_batch_id: str | None = None,
 ) -> bool:
     """Verify a Merkle path against an expected root.
 
     Args:
-        leaf_hash:     SHA-256 hash of the entry (AuditLogEntry.leaf_hash())
-        path:          proof path from _merkle_path_for_index()
-        expected_root: the batch_root anchored on-chain
+        leaf_hash:         SHA-256 hash of the entry (AuditLogEntry.leaf_hash())
+        path:              proof path from _merkle_path_for_index()
+        expected_root:     the batch_root anchored on-chain
+        batch_id:          batch_id from the proof source (replay protection)
+        expected_batch_id: batch_id from the on-chain anchor record
+
+    When both ``batch_id`` and ``expected_batch_id`` are provided the
+    function rejects proofs replayed from a different batch — even if
+    the Merkle root happens to match.
 
     Returns True if the path proves leaf_hash is included in expected_root.
     """
+    # Replay protection: reject proof from a different batch.
+    if batch_id is not None and expected_batch_id is not None:
+        if batch_id != expected_batch_id:
+            return False
+
     current = leaf_hash
     for sibling_hash, position in path:
         if position == "right":

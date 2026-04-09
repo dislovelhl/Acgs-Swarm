@@ -336,3 +336,189 @@ class TestApprovalWorkflow:
         codifier.propose_rules([_make_cluster(size=5, agreement=0.91)])
         codifier.propose_rules([_make_cluster(size=5, agreement=0.92)])
         assert len(codifier.pending_candidates) == 2
+
+
+# ---------------------------------------------------------------------------
+# E2E: full codification pipeline from precedents to active rule
+# ---------------------------------------------------------------------------
+
+
+class TestRuleCodificationE2E:
+    """End-to-end test: create clustered precedents, find clusters,
+    propose rules, approve, activate, and verify state transitions."""
+
+    # Three distinct 7-vector profiles
+    _PRIVACY_VEC = {
+        "safety": 0.10, "security": 0.15, "privacy": 0.92,
+        "fairness": 0.25, "reliability": 0.10, "transparency": 0.60, "efficiency": 0.08,
+    }
+    _SECURITY_VEC = {
+        "safety": 0.85, "security": 0.90, "privacy": 0.15,
+        "fairness": 0.10, "reliability": 0.72, "transparency": 0.25, "efficiency": 0.45,
+    }
+    _FAIRNESS_VEC = {
+        "safety": 0.18, "security": 0.12, "privacy": 0.28,
+        "fairness": 0.93, "reliability": 0.20, "transparency": 0.70, "efficiency": 0.15,
+    }
+
+    @staticmethod
+    def _make_prec(
+        case_id: str,
+        vector: dict[str, float],
+        judgment: str = "Default judgment",
+        grade: float = 0.95,
+    ) -> PrecedentRecord:
+        return PrecedentRecord.create(
+            case_id=case_id,
+            task_id="t-e2e",
+            miner_uid="miner-e2e",
+            judgment=judgment,
+            reasoning="e2e rationale",
+            votes_for=3,
+            votes_against=0,
+            proof_root_hash="e2ehash",
+            escalation_type=EscalationType.CONSTITUTIONAL_CONFLICT,
+            impact_vector=vector,
+            constitutional_hash=CONST_HASH,
+        )
+
+    def _build_precedents(self) -> list[PrecedentRecord]:
+        """Build 15+ precedents: 5 privacy-heavy, 5 security-heavy, 5 fairness-heavy."""
+        recs: list[PrecedentRecord] = []
+        for i in range(5):
+            recs.append(self._make_prec(f"priv-{i}", self._PRIVACY_VEC, judgment="Privacy wins"))
+        for i in range(5):
+            recs.append(self._make_prec(f"sec-{i}", self._SECURITY_VEC, judgment="Security wins"))
+        for i in range(5):
+            recs.append(self._make_prec(f"fair-{i}", self._FAIRNESS_VEC, judgment="Fairness wins"))
+        return recs
+
+    def test_e2e_codification_pipeline(self):
+        """Full pipeline: cluster -> propose -> approve -> activate."""
+        precedents = self._build_precedents()
+        assert len(precedents) >= 15
+
+        # Configure codifier with low thresholds for testing
+        codifier = RuleCodifier(
+            constitutional_hash=CONST_HASH,
+            min_cluster_size=5,
+            min_validator_agreement=0.70,
+            similarity_threshold=0.80,
+        )
+
+        # Step 1: Find clusters
+        clusters = codifier.find_clusters(precedents, domain="e2e-test")
+        assert len(clusters) >= 2, f"Expected >=2 clusters, got {len(clusters)}"
+
+        # All clusters should have >=1 member
+        for cl in clusters:
+            assert cl.size >= 1
+            assert cl.validator_agreement > 0.0
+            assert isinstance(cl.dominant_dimensions, list)
+
+        # Step 2: Propose rules from qualifying clusters (size >= 5)
+        candidates = codifier.propose_rules(clusters)
+        assert len(candidates) >= 1, "At least one cluster should qualify for proposal"
+
+        # All candidates start PENDING
+        for c in candidates:
+            assert c.status == RuleCandidateStatus.PENDING
+            assert c.proposed_at > 0.0
+            assert c.approved_at is None
+            assert c.activated_at is None
+            assert len(c.source_precedent_ids) >= 5
+
+        # Step 3: Governor approves the first candidate
+        target = candidates[0]
+        approved = codifier.approve(target.candidate_id)
+        assert approved.status == RuleCandidateStatus.APPROVED
+        assert approved.approved_at is not None
+
+        # Step 4: Activate — append to constitution YAML
+        activated, new_yaml = codifier.activate(target.candidate_id, SIMPLE_CONSTITUTION)
+
+        # Verify state: ACTIVE
+        assert activated.status == RuleCandidateStatus.ACTIVE
+        assert activated.activated_at is not None
+        assert activated.constitutional_hash_before == CONST_HASH
+        assert activated.constitutional_hash_after != CONST_HASH
+        assert activated.constitutional_hash_after == codifier.constitutional_hash
+
+        # Verify YAML contains both original and new rule
+        assert "safety-01" in new_yaml
+        assert activated.rule_id in new_yaml
+        assert "precedent_codification" in new_yaml
+
+        # Active rules list updated
+        assert len(codifier.active_rules) == 1
+        assert codifier.active_rules[0].candidate_id == target.candidate_id
+
+    def test_e2e_state_transitions(self):
+        """Verify PENDING -> APPROVED -> ACTIVE state chain in detail."""
+        precedents = self._build_precedents()
+        codifier = RuleCodifier(
+            constitutional_hash=CONST_HASH,
+            min_cluster_size=5,
+            min_validator_agreement=0.70,
+            similarity_threshold=0.80,
+        )
+
+        clusters = codifier.find_clusters(precedents)
+        candidates = codifier.propose_rules(clusters)
+        assert len(candidates) >= 1
+
+        cid = candidates[0].candidate_id
+
+        # PENDING state
+        all_cands = codifier.all_candidates()
+        pending = [c for c in all_cands if c.candidate_id == cid]
+        assert pending[0].status == RuleCandidateStatus.PENDING
+
+        # Transition to APPROVED
+        codifier.approve(cid)
+        approved = [c for c in codifier.all_candidates() if c.candidate_id == cid][0]
+        assert approved.status == RuleCandidateStatus.APPROVED
+
+        # Transition to ACTIVE
+        codifier.activate(cid, SIMPLE_CONSTITUTION)
+        active = [c for c in codifier.all_candidates() if c.candidate_id == cid][0]
+        assert active.status == RuleCandidateStatus.ACTIVE
+
+    def test_e2e_reject_path(self):
+        """Verify PENDING -> REJECTED is also valid."""
+        precedents = self._build_precedents()
+        codifier = RuleCodifier(
+            constitutional_hash=CONST_HASH,
+            min_cluster_size=5,
+            min_validator_agreement=0.70,
+            similarity_threshold=0.80,
+        )
+        clusters = codifier.find_clusters(precedents)
+        candidates = codifier.propose_rules(clusters)
+        assert len(candidates) >= 1
+
+        rejected = codifier.reject(candidates[0].candidate_id, reason="does not meet standards")
+        assert rejected.status == RuleCandidateStatus.REJECTED
+        assert "does not meet standards" in rejected.rejection_reason
+
+    def test_e2e_revoke_active_rule(self):
+        """Full cycle: propose -> approve -> activate -> revoke."""
+        precedents = self._build_precedents()
+        codifier = RuleCodifier(
+            constitutional_hash=CONST_HASH,
+            min_cluster_size=5,
+            min_validator_agreement=0.70,
+            similarity_threshold=0.80,
+        )
+        clusters = codifier.find_clusters(precedents)
+        candidates = codifier.propose_rules(clusters)
+        assert len(candidates) >= 1
+
+        cid = candidates[0].candidate_id
+        codifier.approve(cid)
+        codifier.activate(cid, SIMPLE_CONSTITUTION)
+        assert len(codifier.active_rules) == 1
+
+        revoked = codifier.revoke(cid, reason="superseded by newer rule")
+        assert revoked.status == RuleCandidateStatus.REVOKED
+        assert codifier.active_rules == []

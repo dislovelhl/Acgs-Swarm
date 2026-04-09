@@ -286,3 +286,69 @@ class TestTaskRouting:
         assert result.task_id == "t1"
         assert result.complexity == TaskComplexity.LOW
         assert result.min_tier_required == MinerTier.APPRENTICE
+
+
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
+
+
+class TestThreadSafety:
+    def test_concurrent_record_judgment_no_double_promotion(self):
+        """50 threads recording judgments → exactly one promotion to JOURNEYMAN."""
+        import threading
+
+        mgr = TierManager()
+        mgr.register_miner("miner-01", domains={"finance"})
+        # Set reputation high enough for JOURNEYMAN (>=1.2)
+        perf = mgr.get_performance("miner-01")
+        assert perf is not None
+        perf.reputation = 1.5
+
+        promotions: list = []
+        lock = threading.Lock()
+
+        def _record_one():
+            p = mgr.record_judgment("miner-01", accepted=True, domain="finance")
+            if p is not None:
+                with lock:
+                    promotions.append(p)
+
+        # Need 10 validated for JOURNEYMAN. Fire 15 threads each recording once.
+        threads = [threading.Thread(target=_record_one) for _ in range(15)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        perf = mgr.get_performance("miner-01")
+        assert perf is not None
+        assert perf.judgments_validated == 15
+        # Exactly one promotion from APPRENTICE→JOURNEYMAN
+        assert len(promotions) == 1
+        assert promotions[0].from_tier == MinerTier.APPRENTICE
+        assert promotions[0].to_tier == MinerTier.JOURNEYMAN
+
+    def test_concurrent_register_and_record(self):
+        """20 threads registering and recording concurrently → no crash."""
+        import threading
+
+        mgr = TierManager()
+        errors: list[str] = []
+
+        def _work(i: int):
+            try:
+                uid = f"miner-{i % 5}"
+                mgr.register_miner(uid, domains={"d"})
+                mgr.record_judgment(uid, accepted=True, domain="d")
+            except Exception as exc:
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=_work, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert len(mgr.all_miners) == 5

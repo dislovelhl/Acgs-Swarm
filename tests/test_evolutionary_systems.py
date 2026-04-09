@@ -23,6 +23,7 @@ from constitutional_swarm.bittensor.island_evolution import (
     _spearman_rho,
 )
 from constitutional_swarm.bittensor.map_elites import (
+    CellCoordinate,
     DeliberationStrategy,
     FitnessWeights,
     GovernanceDomain,
@@ -522,3 +523,749 @@ class TestEmissionEvolver:
         assert fitness_gen1 is not None
         assert fitness_gen20 is not None
         assert fitness_gen20 >= fitness_gen1
+
+
+# ===========================================================================
+# Phase 4: Extended Evolutionary System Tests (25+)
+# ===========================================================================
+
+import random
+
+
+class TestEmissionGenomeExtended:
+    """Extended tests for EmissionGenome creation and weight computation."""
+
+    def test_creation_fields(self):
+        """EmissionGenome stores all fields correctly."""
+        random.seed(42)
+        g = EmissionGenome(
+            genome_id="g1",
+            reputation_weight=0.5,
+            tier_multiplier_scale=1.2,
+            precedent_bonus=0.3,
+            authenticity_weight=0.4,
+            generation=3,
+            parent_id="p1",
+        )
+        assert g.genome_id == "g1"
+        assert g.reputation_weight == 0.5
+        assert g.tier_multiplier_scale == 1.2
+        assert g.precedent_bonus == 0.3
+        assert g.authenticity_weight == 0.4
+        assert g.generation == 3
+        assert g.parent_id == "p1"
+
+    def test_compute_weight_positive_for_positive_inputs(self):
+        """compute_weight produces positive values for positive parameters."""
+        random.seed(42)
+        g = EmissionGenome(
+            genome_id="pos",
+            reputation_weight=0.5,
+            tier_multiplier_scale=0.5,
+            precedent_bonus=0.5,
+            authenticity_weight=0.5,
+            generation=0,
+        )
+        w = g.compute_weight(
+            reputation=1.0,
+            tier=MinerTier.JOURNEYMAN,
+            precedent_count=5,
+            manifold_trust=0.5,
+        )
+        assert w > 0.0
+
+    def test_compute_weight_zero_params_zero_weight(self):
+        """All-zero parameters produce zero weight."""
+        random.seed(42)
+        g = EmissionGenome(
+            genome_id="zero",
+            reputation_weight=0.0,
+            tier_multiplier_scale=0.0,
+            precedent_bonus=0.0,
+            authenticity_weight=0.0,
+            generation=0,
+        )
+        w = g.compute_weight(
+            reputation=5.0, tier=MinerTier.MASTER, precedent_count=50, manifold_trust=1.0
+        )
+        assert w == pytest.approx(0.0)
+
+    def test_precedent_bonus_capped_at_50(self):
+        """Precedent count is capped at 50 in the formula."""
+        random.seed(42)
+        g = EmissionGenome(
+            genome_id="cap",
+            reputation_weight=0.0,
+            tier_multiplier_scale=0.0,
+            precedent_bonus=1.0,
+            authenticity_weight=0.0,
+            generation=0,
+        )
+        w50 = g.compute_weight(reputation=0, tier=MinerTier.APPRENTICE, precedent_count=50, manifold_trust=0)
+        w100 = g.compute_weight(reputation=0, tier=MinerTier.APPRENTICE, precedent_count=100, manifold_trust=0)
+        assert w50 == pytest.approx(w100)
+
+    def test_frozen_dataclass(self):
+        """EmissionGenome is immutable (frozen)."""
+        random.seed(42)
+        g = EmissionGenome(
+            genome_id="frozen",
+            reputation_weight=0.5,
+            tier_multiplier_scale=0.5,
+            precedent_bonus=0.5,
+            authenticity_weight=0.5,
+            generation=0,
+        )
+        with pytest.raises(AttributeError):
+            g.reputation_weight = 0.9  # type: ignore[misc]
+
+
+class TestMinerQualityObservationExtended:
+    """Extended tests for MinerQualityObservation."""
+
+    def test_creation_fields(self):
+        """MinerQualityObservation stores all fields correctly."""
+        random.seed(42)
+        obs = MinerQualityObservation(
+            miner_uid="m1",
+            consensus_quality=0.85,
+            acceptance_rate=0.9,
+            reputation=1.5,
+            tier=MinerTier.JOURNEYMAN,
+            precedent_contributions=7,
+            manifold_trust=0.6,
+        )
+        assert obs.miner_uid == "m1"
+        assert obs.consensus_quality == 0.85
+        assert obs.acceptance_rate == 0.9
+        assert obs.reputation == 1.5
+        assert obs.tier == MinerTier.JOURNEYMAN
+        assert obs.precedent_contributions == 7
+        assert obs.manifold_trust == 0.6
+
+    def test_frozen(self):
+        """MinerQualityObservation is immutable."""
+        random.seed(42)
+        obs = MinerQualityObservation(
+            miner_uid="m1",
+            consensus_quality=0.5,
+            acceptance_rate=0.5,
+            reputation=1.0,
+            tier=MinerTier.APPRENTICE,
+            precedent_contributions=0,
+            manifold_trust=0.0,
+        )
+        with pytest.raises(AttributeError):
+            obs.consensus_quality = 1.0  # type: ignore[misc]
+
+
+class TestIslandInitializationExtended:
+    """Extended tests for island initialization."""
+
+    def test_four_islands_created(self):
+        """initialize_islands creates exactly 4 islands."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42)
+        evolver.initialize_islands()
+        assert len(evolver.islands) == 4
+
+    def test_island_families_are_diverse(self):
+        """Each island has a distinct parameter family."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42)
+        evolver.initialize_islands()
+        families = {island.identity.family for island in evolver.islands.values()}
+        assert families == {"reputation_heavy", "tier_heavy", "precedent_heavy", "balanced"}
+
+    def test_population_size_per_island(self):
+        """Each island has the configured population size."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42, population_per_island=7)
+        evolver.initialize_islands()
+        for island in evolver.islands.values():
+            assert len(island.population) == 7
+
+    def test_initial_genomes_have_generation_zero(self):
+        """All initial genomes are generation 0."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42, population_per_island=5)
+        evolver.initialize_islands()
+        for island in evolver.islands.values():
+            for genome in island.population:
+                assert genome.generation == 0
+
+
+class TestGenomeMutationExtended:
+    """Extended tests for genome mutation."""
+
+    def test_mutation_stays_nonnegative(self):
+        """Mutated parameters are clamped to >= 0."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42, mutation_sigma=10.0)  # Large sigma
+        base = EmissionGenome(
+            genome_id="base",
+            reputation_weight=0.01,
+            tier_multiplier_scale=0.01,
+            precedent_bonus=0.01,
+            authenticity_weight=0.01,
+            generation=0,
+        )
+        # Mutate many times; all values should stay >= 0
+        for _ in range(50):
+            mutated = evolver._mutate(base, 1)
+            assert mutated.reputation_weight >= 0.0
+            assert mutated.tier_multiplier_scale >= 0.0
+            assert mutated.precedent_bonus >= 0.0
+            assert mutated.authenticity_weight >= 0.0
+
+    def test_mutation_changes_genome_id(self):
+        """Mutated genome gets a new ID."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42)
+        base = EmissionGenome(
+            genome_id="original",
+            reputation_weight=0.5,
+            tier_multiplier_scale=1.0,
+            precedent_bonus=0.3,
+            authenticity_weight=0.2,
+            generation=0,
+        )
+        mutated = evolver._mutate(base, 1)
+        assert mutated.genome_id != base.genome_id
+        assert mutated.parent_id == base.genome_id
+
+    def test_mutation_sigma_respected(self):
+        """With very small sigma, mutations are small."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42, mutation_sigma=0.001)
+        base = EmissionGenome(
+            genome_id="base",
+            reputation_weight=0.5,
+            tier_multiplier_scale=1.0,
+            precedent_bonus=0.3,
+            authenticity_weight=0.2,
+            generation=0,
+        )
+        for _ in range(20):
+            mutated = evolver._mutate(base, 1)
+            assert abs(mutated.reputation_weight - base.reputation_weight) < 0.05
+            assert abs(mutated.authenticity_weight - base.authenticity_weight) < 0.05
+
+
+class TestTournamentSelectionExtended:
+    """Extended tests for tournament selection."""
+
+    def test_fittest_wins_deterministic(self):
+        """With seed, tournament consistently picks high-fitness genomes."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42)
+        g_weak = EmissionGenome(
+            genome_id="weak", reputation_weight=0.1, tier_multiplier_scale=0.1,
+            precedent_bonus=0.1, authenticity_weight=0.1, generation=0,
+        )
+        g_strong = EmissionGenome(
+            genome_id="strong", reputation_weight=0.9, tier_multiplier_scale=0.9,
+            precedent_bonus=0.9, authenticity_weight=0.9, generation=0,
+        )
+        scored = [(g_strong, 0.95), (g_weak, 0.1)]
+        # With only 2 candidates and k=3 (clamped to 2), best always wins
+        winners = [evolver._tournament_select(scored, k=2) for _ in range(10)]
+        assert all(w.genome_id == "strong" for w in winners)
+
+
+class TestCrossoverExtended:
+    """Extended tests for single-point crossover."""
+
+    def test_child_has_genes_from_both_parents(self):
+        """Crossover child contains parameters from both parents."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42)
+        a = EmissionGenome(
+            genome_id="a", reputation_weight=0.0, tier_multiplier_scale=0.0,
+            precedent_bonus=0.0, authenticity_weight=0.0, generation=0,
+        )
+        b = EmissionGenome(
+            genome_id="b", reputation_weight=1.0, tier_multiplier_scale=1.0,
+            precedent_bonus=1.0, authenticity_weight=1.0, generation=0,
+        )
+        # Run many crossovers; at least one should mix genes
+        found_mixed = False
+        for _ in range(20):
+            child = evolver._crossover(a, b, 1)
+            params = [
+                child.reputation_weight, child.tier_multiplier_scale,
+                child.precedent_bonus, child.authenticity_weight,
+            ]
+            has_a = any(p == 0.0 for p in params)
+            has_b = any(p == 1.0 for p in params)
+            if has_a and has_b:
+                found_mixed = True
+                break
+        assert found_mixed, "Crossover should produce children with genes from both parents"
+
+    def test_crossover_preserves_parent_id(self):
+        """Crossover child records first parent as parent_id."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42)
+        a = EmissionGenome(
+            genome_id="parent_a", reputation_weight=0.5, tier_multiplier_scale=0.5,
+            precedent_bonus=0.5, authenticity_weight=0.5, generation=0,
+        )
+        b = EmissionGenome(
+            genome_id="parent_b", reputation_weight=0.8, tier_multiplier_scale=0.8,
+            precedent_bonus=0.8, authenticity_weight=0.8, generation=0,
+        )
+        child = evolver._crossover(a, b, 1)
+        assert child.parent_id == "parent_a"
+
+
+class TestCeilingDetectionExtended:
+    """Extended tests for ceiling (stagnation) detection."""
+
+    def test_no_ceiling_initially(self):
+        """Fresh island has no ceiling."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42, stagnation_threshold=3)
+        evolver.initialize_islands()
+        for island in evolver.islands.values():
+            assert evolver.check_ceiling(island) is False
+
+    def test_ceiling_triggers_after_stagnation(self):
+        """Ceiling detected when stagnation_count >= threshold."""
+        random.seed(42)
+        from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+        island = Island(
+            identity=IslandIdentity(island_id="test", family="test"),
+            population=[],
+            stagnation_count=5,
+        )
+        evolver = EmissionEvolver(seed=42, stagnation_threshold=5)
+        assert evolver.check_ceiling(island) is True
+
+    def test_ceiling_not_triggered_below_threshold(self):
+        """No ceiling when stagnation_count < threshold."""
+        random.seed(42)
+        from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+        island = Island(
+            identity=IslandIdentity(island_id="test", family="test"),
+            population=[],
+            stagnation_count=4,
+        )
+        evolver = EmissionEvolver(seed=42, stagnation_threshold=5)
+        assert evolver.check_ceiling(island) is False
+
+
+class TestMigrationExtended:
+    """Extended tests for migration between islands."""
+
+    def test_migration_injects_genome(self):
+        """Best genome from source appears in target after migration."""
+        random.seed(42)
+        from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+        best = EmissionGenome(
+            genome_id="best", reputation_weight=0.9, tier_multiplier_scale=2.0,
+            precedent_bonus=0.5, authenticity_weight=0.8, generation=5,
+        )
+        filler = EmissionGenome(
+            genome_id="filler", reputation_weight=0.1, tier_multiplier_scale=0.1,
+            precedent_bonus=0.1, authenticity_weight=0.1, generation=0,
+        )
+        source = Island(
+            identity=IslandIdentity(island_id="src", family="reputation_heavy"),
+            population=[best],
+            best_genome=best,
+            best_fitness=0.95,
+        )
+        target = Island(
+            identity=IslandIdentity(island_id="tgt", family="balanced"),
+            population=[filler, filler],
+        )
+        evolver = EmissionEvolver(seed=42)
+        _, new_target = evolver.migrate(source, target)
+        # The migrant should have the same parameter values as the source best
+        migrant = new_target.population[-1]
+        assert migrant.reputation_weight == best.reputation_weight
+        assert migrant.tier_multiplier_scale == best.tier_multiplier_scale
+        assert migrant.parent_id == best.genome_id
+
+    def test_migration_records_event(self):
+        """Migration creates a MigrationEvent."""
+        random.seed(42)
+        from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+        best = EmissionGenome(
+            genome_id="best", reputation_weight=0.9, tier_multiplier_scale=2.0,
+            precedent_bonus=0.5, authenticity_weight=0.8, generation=5,
+        )
+        source = Island(
+            identity=IslandIdentity(island_id="src", family="tier_heavy"),
+            population=[best],
+            best_genome=best,
+            best_fitness=0.9,
+        )
+        target = Island(
+            identity=IslandIdentity(island_id="tgt", family="balanced"),
+            population=[best],
+        )
+        evolver = EmissionEvolver(seed=42)
+        evolver.migrate(source, target)
+        assert len(evolver.migrations) == 1
+        event = evolver.migrations[0]
+        assert event.from_island == "src"
+        assert event.to_island == "tgt"
+        assert event.trigger == "ceiling_detected"
+
+    def test_migration_no_op_without_best(self):
+        """Migration is a no-op when source has no best genome."""
+        random.seed(42)
+        from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+        source = Island(
+            identity=IslandIdentity(island_id="src", family="tier_heavy"),
+            population=[],
+            best_genome=None,
+        )
+        filler = EmissionGenome(
+            genome_id="f", reputation_weight=0.1, tier_multiplier_scale=0.1,
+            precedent_bonus=0.1, authenticity_weight=0.1, generation=0,
+        )
+        target = Island(
+            identity=IslandIdentity(island_id="tgt", family="balanced"),
+            population=[filler],
+        )
+        evolver = EmissionEvolver(seed=42)
+        _, new_target = evolver.migrate(source, target)
+        assert new_target.population == target.population
+
+
+class TestFitnessEvaluationExtended:
+    """Extended tests for fitness evaluation (Spearman correlation)."""
+
+    def test_evaluate_genome_with_single_observation(self):
+        """Single observation returns 0.0 (insufficient data)."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42)
+        genome = EmissionGenome(
+            genome_id="g", reputation_weight=1.0, tier_multiplier_scale=0.0,
+            precedent_bonus=0.0, authenticity_weight=0.0, generation=0,
+        )
+        obs = [
+            MinerQualityObservation(
+                "m1", consensus_quality=0.9, acceptance_rate=0.9,
+                reputation=1.0, tier=MinerTier.MASTER,
+                precedent_contributions=0, manifold_trust=0.5,
+            )
+        ]
+        assert evolver.evaluate_genome(genome, obs) == 0.0
+
+    def test_evaluate_genome_anticorrelated(self):
+        """A genome that ranks miners inversely should have negative rho."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42)
+        # Genome weights reputation, but quality is inversely related to reputation
+        genome = EmissionGenome(
+            genome_id="inv", reputation_weight=1.0, tier_multiplier_scale=0.0,
+            precedent_bonus=0.0, authenticity_weight=0.0, generation=0,
+        )
+        obs = [
+            MinerQualityObservation(
+                "m1", consensus_quality=0.1, acceptance_rate=0.1,
+                reputation=2.0, tier=MinerTier.APPRENTICE,
+                precedent_contributions=0, manifold_trust=0.0,
+            ),
+            MinerQualityObservation(
+                "m2", consensus_quality=0.5, acceptance_rate=0.5,
+                reputation=1.0, tier=MinerTier.APPRENTICE,
+                precedent_contributions=0, manifold_trust=0.0,
+            ),
+            MinerQualityObservation(
+                "m3", consensus_quality=0.9, acceptance_rate=0.9,
+                reputation=0.5, tier=MinerTier.APPRENTICE,
+                precedent_contributions=0, manifold_trust=0.0,
+            ),
+        ]
+        rho = evolver.evaluate_genome(genome, obs)
+        assert rho < 0.0
+
+
+class TestFullEvolutionLoopExtended:
+    """Extended tests for multi-generation evolution."""
+
+    def _sample_observations(self) -> list[MinerQualityObservation]:
+        return [
+            MinerQualityObservation(
+                "m1", consensus_quality=0.9, acceptance_rate=0.95,
+                reputation=1.8, tier=MinerTier.MASTER,
+                precedent_contributions=10, manifold_trust=0.8,
+            ),
+            MinerQualityObservation(
+                "m2", consensus_quality=0.7, acceptance_rate=0.75,
+                reputation=1.3, tier=MinerTier.JOURNEYMAN,
+                precedent_contributions=3, manifold_trust=0.5,
+            ),
+            MinerQualityObservation(
+                "m3", consensus_quality=0.3, acceptance_rate=0.35,
+                reputation=0.8, tier=MinerTier.APPRENTICE,
+                precedent_contributions=0, manifold_trust=0.2,
+            ),
+        ]
+
+    def test_ten_generations_nonnegative_fitness(self):
+        """After 10 generations, global best fitness is non-negative."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42, population_per_island=5)
+        evolver.initialize_islands()
+        obs = self._sample_observations()
+        for _ in range(10):
+            evolver.evolve_all(obs)
+        assert evolver._global_best_fitness >= 0.0
+
+    def test_ten_generations_has_active_genome(self):
+        """After 10 generations, there is an active genome."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42, population_per_island=5)
+        evolver.initialize_islands()
+        obs = self._sample_observations()
+        for _ in range(10):
+            evolver.evolve_all(obs)
+        assert evolver.active_genome is not None
+
+    def test_generation_counter_tracks(self):
+        """Total generations counter increments correctly."""
+        random.seed(42)
+        evolver = EmissionEvolver(seed=42, population_per_island=5)
+        evolver.initialize_islands()
+        obs = self._sample_observations()
+        for _ in range(7):
+            evolver.evolve_all(obs)
+        assert evolver._total_generations == 7
+
+
+class TestMapElitesExtended:
+    """Extended MAP-Elites tests."""
+
+    def test_empty_grid_coverage_zero(self):
+        """Empty grid has zero coverage."""
+        random.seed(42)
+        grid = MinerQualityGrid()
+        assert grid.coverage == 0.0
+
+    def test_fill_grid_increases_coverage(self):
+        """Adding approaches to different cells increases coverage."""
+        random.seed(42)
+        grid = MinerQualityGrid()
+        domains = list(GovernanceDomain)
+        strategies = list(DeliberationStrategy)
+        count = 0
+        for d in domains[:3]:
+            for s in strategies[:2]:
+                grid.challenge(
+                    MinerApproach(
+                        miner_uid=f"miner-{count}",
+                        domain=d,
+                        strategy=s,
+                        fitness=0.7,
+                        acceptance_rate=0.7,
+                        reasoning_quality=0.7,
+                        speed_ms=300,
+                        sample_count=10,
+                    )
+                )
+                count += 1
+        assert grid.coverage == pytest.approx(6 / 28, abs=1e-6)
+        assert grid.occupied_count == 6
+
+    def test_challenge_rejects_weaker(self):
+        """Challenge does not replace incumbent with lower fitness."""
+        random.seed(42)
+        grid = MinerQualityGrid()
+        strong = MinerApproach(
+            miner_uid="strong",
+            domain=GovernanceDomain.PRIVACY,
+            strategy=DeliberationStrategy.CONSTITUTIONAL_REASONING,
+            fitness=0.9,
+            acceptance_rate=0.9,
+            reasoning_quality=0.9,
+            speed_ms=100,
+            sample_count=10,
+        )
+        weak = MinerApproach(
+            miner_uid="weak",
+            domain=GovernanceDomain.PRIVACY,
+            strategy=DeliberationStrategy.CONSTITUTIONAL_REASONING,
+            fitness=0.3,
+            acceptance_rate=0.3,
+            reasoning_quality=0.3,
+            speed_ms=800,
+            sample_count=10,
+        )
+        grid.challenge(strong)
+        replaced = grid.challenge(weak)
+        assert replaced is False
+        best = grid.best_for(
+            GovernanceDomain.PRIVACY, DeliberationStrategy.CONSTITUTIONAL_REASONING
+        )
+        assert best is not None
+        assert best.miner_uid == "strong"
+
+    def test_exploration_bonus_new_miner_above_one(self):
+        """Exploration bonus for a brand-new miner is > 1.0."""
+        random.seed(42)
+        grid = MinerQualityGrid()
+        bonus = grid.exploration_bonus("totally-new")
+        assert bonus > 1.0
+
+    def test_diversity_score_increases_with_diverse_miners(self):
+        """Diversity score is higher when different miners hold cells."""
+        random.seed(42)
+        grid_same = MinerQualityGrid()
+        grid_diverse = MinerQualityGrid()
+        domains = list(GovernanceDomain)[:2]
+        strategies = list(DeliberationStrategy)[:2]
+        idx = 0
+        for d in domains:
+            for s in strategies:
+                grid_same.challenge(
+                    MinerApproach(
+                        miner_uid="same",
+                        domain=d, strategy=s, fitness=0.7,
+                        acceptance_rate=0.7, reasoning_quality=0.7,
+                        speed_ms=300, sample_count=10,
+                    )
+                )
+                grid_diverse.challenge(
+                    MinerApproach(
+                        miner_uid=f"miner-{idx}",
+                        domain=d, strategy=s, fitness=0.7,
+                        acceptance_rate=0.7, reasoning_quality=0.7,
+                        speed_ms=300, sample_count=10,
+                    )
+                )
+                idx += 1
+        assert grid_diverse.diversity_score() > grid_same.diversity_score()
+
+    def test_ceiling_detection_stagnant_grid(self):
+        """Ceiling detected when last N challenges produce no improvements."""
+        random.seed(42)
+        grid = MinerQualityGrid(ceiling_window=4)
+        # Fill a cell with a strong approach
+        strong = MinerApproach(
+            miner_uid="king",
+            domain=GovernanceDomain.FAIRNESS,
+            strategy=DeliberationStrategy.STAKEHOLDER_ANALYSIS,
+            fitness=0.99,
+            acceptance_rate=0.99,
+            reasoning_quality=0.99,
+            speed_ms=50,
+            sample_count=20,
+        )
+        grid.challenge(strong)
+        # Now send 4 weaker challenges — none should improve
+        for i in range(4):
+            grid.challenge(
+                MinerApproach(
+                    miner_uid=f"weak-{i}",
+                    domain=GovernanceDomain.FAIRNESS,
+                    strategy=DeliberationStrategy.STAKEHOLDER_ANALYSIS,
+                    fitness=0.1,
+                    acceptance_rate=0.1,
+                    reasoning_quality=0.1,
+                    speed_ms=900,
+                    sample_count=10,
+                )
+            )
+        assert grid.ceiling_detected() is True
+
+    def test_no_ceiling_with_improvements(self):
+        """No ceiling when challenges keep improving."""
+        random.seed(42)
+        grid = MinerQualityGrid(ceiling_window=3)
+        for i in range(5):
+            grid.challenge(
+                MinerApproach(
+                    miner_uid=f"miner-{i}",
+                    domain=GovernanceDomain.RELIABILITY,
+                    strategy=DeliberationStrategy.HYBRID,
+                    fitness=0.1 * (i + 1),
+                    acceptance_rate=0.5,
+                    reasoning_quality=0.5,
+                    speed_ms=500,
+                    sample_count=10,
+                )
+            )
+        assert grid.ceiling_detected() is False
+
+    def test_domain_coverage(self):
+        """domain_coverage counts strategies filled for a domain."""
+        random.seed(42)
+        grid = MinerQualityGrid()
+        for s in [DeliberationStrategy.HYBRID, DeliberationStrategy.PRECEDENT_BASED]:
+            grid.challenge(
+                MinerApproach(
+                    miner_uid="m1",
+                    domain=GovernanceDomain.TRANSPARENCY,
+                    strategy=s,
+                    fitness=0.7,
+                    acceptance_rate=0.7,
+                    reasoning_quality=0.7,
+                    speed_ms=300,
+                    sample_count=10,
+                )
+            )
+        assert grid.domain_coverage(GovernanceDomain.TRANSPARENCY) == 2
+        assert grid.domain_coverage(GovernanceDomain.SAFETY) == 0
+
+    def test_top_miners_ordering(self):
+        """top_miners returns miners sorted by fitness descending."""
+        random.seed(42)
+        grid = MinerQualityGrid()
+        for i, d in enumerate(list(GovernanceDomain)[:3]):
+            grid.challenge(
+                MinerApproach(
+                    miner_uid=f"m-{i}",
+                    domain=d,
+                    strategy=DeliberationStrategy.HYBRID,
+                    fitness=0.3 * (i + 1),
+                    acceptance_rate=0.5,
+                    reasoning_quality=0.5,
+                    speed_ms=500,
+                    sample_count=10,
+                )
+            )
+        top = grid.top_miners(n=3)
+        assert len(top) == 3
+        assert top[0].fitness >= top[1].fitness >= top[2].fitness
+
+    def test_ceiling_for_cell(self):
+        """Per-cell ceiling detection works independently."""
+        random.seed(42)
+        grid = MinerQualityGrid(ceiling_window=3)
+        coord = CellCoordinate(
+            domain=GovernanceDomain.EFFICIENCY,
+            strategy=DeliberationStrategy.CONSTITUTIONAL_REASONING,
+        )
+        # Fill cell, then challenge with weaker approaches
+        grid.challenge(
+            MinerApproach(
+                miner_uid="strong",
+                domain=GovernanceDomain.EFFICIENCY,
+                strategy=DeliberationStrategy.CONSTITUTIONAL_REASONING,
+                fitness=0.95,
+                acceptance_rate=0.95,
+                reasoning_quality=0.95,
+                speed_ms=100,
+                sample_count=10,
+            )
+        )
+        for _ in range(3):
+            grid.challenge(
+                MinerApproach(
+                    miner_uid="weak",
+                    domain=GovernanceDomain.EFFICIENCY,
+                    strategy=DeliberationStrategy.CONSTITUTIONAL_REASONING,
+                    fitness=0.1,
+                    acceptance_rate=0.1,
+                    reasoning_quality=0.1,
+                    speed_ms=900,
+                    sample_count=10,
+                )
+            )
+        assert grid.ceiling_for_cell(coord) is True

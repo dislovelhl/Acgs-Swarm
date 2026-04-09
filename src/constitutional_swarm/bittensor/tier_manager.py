@@ -26,6 +26,7 @@ Roadmap: 08-subnet-implementation-roadmap.md § Phase 5
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -206,6 +207,7 @@ class TierManager:
         self._registry = registry or CapabilityRegistry()
         self._miners: dict[str, MinerPerformance] = {}
         self._promotion_log: list[TierPromotion] = []
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Registration
@@ -218,22 +220,24 @@ class TierManager:
         initial_tier: MinerTier = MinerTier.APPRENTICE,
     ) -> MinerPerformance:
         """Register a new miner. Idempotent — re-registration is a no-op."""
-        if miner_uid in self._miners:
-            return self._miners[miner_uid]
+        with self._lock:
+            if miner_uid in self._miners:
+                return self._miners[miner_uid]
 
-        perf = MinerPerformance(
-            miner_uid=miner_uid,
-            current_tier=initial_tier,
-            domains=set(domains or []),
-        )
-        self._miners[miner_uid] = perf
-        self._sync_registry(perf)
-        return perf
+            perf = MinerPerformance(
+                miner_uid=miner_uid,
+                current_tier=initial_tier,
+                domains=set(domains or []),
+            )
+            self._miners[miner_uid] = perf
+            self._sync_registry(perf)
+            return perf
 
     def unregister_miner(self, miner_uid: str) -> None:
         """Remove a miner from tracking and the CapabilityRegistry."""
-        self._miners.pop(miner_uid, None)
-        self._registry.unregister(miner_uid)
+        with self._lock:
+            self._miners.pop(miner_uid, None)
+            self._registry.unregister(miner_uid)
 
     # ------------------------------------------------------------------
     # Performance recording
@@ -249,6 +253,9 @@ class TierManager:
     ) -> TierPromotion | None:
         """Record a judgment outcome and optionally promote the miner.
 
+        Thread-safe: holds ``_lock`` for the full read-modify-write cycle
+        to prevent double-promotion from concurrent calls.
+
         Args:
             miner_uid:    the miner's ID
             accepted:     True if validator accepted the judgment
@@ -259,41 +266,44 @@ class TierManager:
         Returns:
             TierPromotion if a tier change occurred, else None.
         """
-        if miner_uid not in self._miners:
-            self.register_miner(miner_uid, domains={domain} if domain else None)
+        with self._lock:
+            if miner_uid not in self._miners:
+                # _register_miner_unlocked avoids double-lock
+                self._register_miner_unlocked(miner_uid, domains={domain} if domain else None)
 
-        perf = self._miners[miner_uid]
-        if accepted:
-            perf.judgments_validated += 1
-        else:
-            perf.judgments_rejected += 1
+            perf = self._miners[miner_uid]
+            if accepted:
+                perf.judgments_validated += 1
+            else:
+                perf.judgments_rejected += 1
 
-        if domain:
-            perf.domains.add(domain)
+            if domain:
+                perf.domains.add(domain)
 
-        if authenticity > 0:
-            # Exponential moving average
-            alpha = 0.2
-            perf.avg_authenticity = alpha * authenticity + (1 - alpha) * perf.avg_authenticity
+            if authenticity > 0:
+                # Exponential moving average
+                alpha = 0.2
+                perf.avg_authenticity = alpha * authenticity + (1 - alpha) * perf.avg_authenticity
 
-        if reputation is not None:
-            perf.reputation = reputation
+            if reputation is not None:
+                perf.reputation = reputation
 
-        perf.last_active_at = time.time()
+            perf.last_active_at = time.time()
 
-        # Re-evaluate tier
-        return self._evaluate_tier(perf)
+            # Re-evaluate tier
+            return self._evaluate_tier(perf)
 
     def record_precedent(self, miner_uid: str) -> TierPromotion | None:
         """Record that a miner's judgment was stored as precedent.
 
         Precedent contributions feed the Elder promotion criteria.
         """
-        if miner_uid not in self._miners:
-            self.register_miner(miner_uid)
-        perf = self._miners[miner_uid]
-        perf.precedents_contributed += 1
-        return self._evaluate_tier(perf)
+        with self._lock:
+            if miner_uid not in self._miners:
+                self._register_miner_unlocked(miner_uid)
+            perf = self._miners[miner_uid]
+            perf.precedents_contributed += 1
+            return self._evaluate_tier(perf)
 
     # ------------------------------------------------------------------
     # Task routing
@@ -316,55 +326,59 @@ class TierManager:
 
         Returns RoutingResult with selected_miner=None if no eligible miner.
         """
-        min_tier = _COMPLEXITY_MIN_TIER[complexity]
-        min_order = _TIER_ORDER[min_tier]
+        with self._lock:
+            min_tier = _COMPLEXITY_MIN_TIER[complexity]
+            min_order = _TIER_ORDER[min_tier]
 
-        eligible = [
-            perf for perf in self._miners.values() if _TIER_ORDER[perf.current_tier] >= min_order
-        ]
+            eligible = [
+                perf
+                for perf in self._miners.values()
+                if _TIER_ORDER[perf.current_tier] >= min_order
+            ]
 
-        if not eligible:
+            if not eligible:
+                return RoutingResult(
+                    task_id=task_id,
+                    complexity=complexity,
+                    min_tier_required=min_tier,
+                    eligible_miners=(),
+                    selected_miner=None,
+                    selection_reason=f"No miners at {min_tier.value}+ tier",
+                )
+
+            # Score candidates
+            def _score(p: MinerPerformance) -> tuple:
+                specialist = domain in p.domains if domain else False
+                return (
+                    1 if (prefer_specialist and specialist) else 0,
+                    _TIER_ORDER[p.current_tier],
+                    p.acceptance_rate,
+                    p.avg_authenticity,
+                )
+
+            best = max(eligible, key=_score)
+            reason_parts = [f"tier:{best.current_tier.value}"]
+            if domain and domain in best.domains:
+                reason_parts.append(f"specialist:{domain}")
+            reason_parts.append(f"acceptance:{best.acceptance_rate:.2f}")
+
             return RoutingResult(
                 task_id=task_id,
                 complexity=complexity,
                 min_tier_required=min_tier,
-                eligible_miners=(),
-                selected_miner=None,
-                selection_reason=f"No miners at {min_tier.value}+ tier",
+                eligible_miners=tuple(p.miner_uid for p in eligible),
+                selected_miner=best.miner_uid,
+                selection_reason=", ".join(reason_parts),
             )
-
-        # Score candidates
-        def _score(p: MinerPerformance) -> tuple:
-            specialist = domain in p.domains if domain else False
-            return (
-                1 if (prefer_specialist and specialist) else 0,
-                _TIER_ORDER[p.current_tier],
-                p.acceptance_rate,
-                p.avg_authenticity,
-            )
-
-        best = max(eligible, key=_score)
-        reason_parts = [f"tier:{best.current_tier.value}"]
-        if domain and domain in best.domains:
-            reason_parts.append(f"specialist:{domain}")
-        reason_parts.append(f"acceptance:{best.acceptance_rate:.2f}")
-
-        return RoutingResult(
-            task_id=task_id,
-            complexity=complexity,
-            min_tier_required=min_tier,
-            eligible_miners=tuple(p.miner_uid for p in eligible),
-            selected_miner=best.miner_uid,
-            selection_reason=", ".join(reason_parts),
-        )
 
     def eligible_miners(
         self,
         complexity: TaskComplexity,
     ) -> list[MinerPerformance]:
         """Return all miners eligible for a given task complexity."""
-        min_order = _TIER_ORDER[_COMPLEXITY_MIN_TIER[complexity]]
-        return [p for p in self._miners.values() if _TIER_ORDER[p.current_tier] >= min_order]
+        with self._lock:
+            min_order = _TIER_ORDER[_COMPLEXITY_MIN_TIER[complexity]]
+            return [p for p in self._miners.values() if _TIER_ORDER[p.current_tier] >= min_order]
 
     # ------------------------------------------------------------------
     # Tier evaluation
@@ -372,40 +386,71 @@ class TierManager:
 
     def evaluate_all_tiers(self) -> list[TierPromotion]:
         """Re-evaluate every miner's tier. Returns all promotions/demotions."""
-        return [
-            p
-            for p in (self._evaluate_tier(perf) for perf in self._miners.values())
-            if p is not None
-        ]
+        with self._lock:
+            return [
+                p
+                for p in (self._evaluate_tier(perf) for perf in self._miners.values())
+                if p is not None
+            ]
 
     def get_performance(self, miner_uid: str) -> MinerPerformance | None:
-        return self._miners.get(miner_uid)
+        with self._lock:
+            return self._miners.get(miner_uid)
 
     @property
     def all_miners(self) -> list[MinerPerformance]:
-        return list(self._miners.values())
+        with self._lock:
+            return list(self._miners.values())
 
     @property
     def promotion_log(self) -> list[TierPromotion]:
-        return list(self._promotion_log)
+        with self._lock:
+            return list(self._promotion_log)
 
     def tier_distribution(self) -> dict[str, int]:
+        with self._lock:
+            counts: dict[str, int] = {t.value: 0 for t in MinerTier}
+            for p in self._miners.values():
+                counts[p.current_tier.value] += 1
+            return counts
+
+    def summary(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "total_miners": len(self._miners),
+                "tier_distribution": self._tier_distribution_unlocked(),
+                "total_promotions": sum(1 for p in self._promotion_log if p.is_promotion),
+                "total_demotions": sum(1 for p in self._promotion_log if p.is_demotion),
+            }
+
+    def _tier_distribution_unlocked(self) -> dict[str, int]:
+        """Internal tier distribution without lock (caller holds it)."""
         counts: dict[str, int] = {t.value: 0 for t in MinerTier}
         for p in self._miners.values():
             counts[p.current_tier.value] += 1
         return counts
 
-    def summary(self) -> dict[str, Any]:
-        return {
-            "total_miners": len(self._miners),
-            "tier_distribution": self.tier_distribution(),
-            "total_promotions": sum(1 for p in self._promotion_log if p.is_promotion),
-            "total_demotions": sum(1 for p in self._promotion_log if p.is_demotion),
-        }
-
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _register_miner_unlocked(
+        self,
+        miner_uid: str,
+        domains: set[str] | None = None,
+        initial_tier: MinerTier = MinerTier.APPRENTICE,
+    ) -> MinerPerformance:
+        """Internal registration without acquiring the lock (caller holds it)."""
+        if miner_uid in self._miners:
+            return self._miners[miner_uid]
+        perf = MinerPerformance(
+            miner_uid=miner_uid,
+            current_tier=initial_tier,
+            domains=set(domains or []),
+        )
+        self._miners[miner_uid] = perf
+        self._sync_registry(perf)
+        return perf
 
     def _evaluate_tier(self, perf: MinerPerformance) -> TierPromotion | None:
         """Compute the correct tier for a miner and promote/demote if needed."""

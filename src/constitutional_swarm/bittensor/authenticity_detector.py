@@ -149,7 +149,13 @@ class DimensionScore:
 
 @dataclass(frozen=True, slots=True)
 class AuthenticityScore:
-    """Composite authenticity score for a miner judgment."""
+    """Composite authenticity score for a miner judgment.
+
+    ``manifold_override`` is set when the manifold consensus is strong
+    enough (trust > 0.8 AND peers accepted) to override a low
+    authenticity score.  Authenticity alone should never hard-gate
+    emission — it is an advisory signal combined with manifold trust.
+    """
 
     overall: float  # weighted sum, 0.0 - 1.0
     dimension_scores: tuple[DimensionScore, ...]
@@ -157,12 +163,20 @@ class AuthenticityScore:
     is_authentic: bool  # overall >= threshold
     threshold: float
     flags: tuple[str, ...]  # notable signals (positive or negative)
+    manifold_override: bool = False  # True when manifold consensus overrides low authenticity
+
+    @property
+    def effective_authentic(self) -> bool:
+        """True if authentic OR overridden by strong manifold consensus."""
+        return self.is_authentic or self.manifold_override
 
     @property
     def as_dict(self) -> dict[str, Any]:
         return {
             "overall": round(self.overall, 3),
             "is_authentic": self.is_authentic,
+            "manifold_override": self.manifold_override,
+            "effective_authentic": self.effective_authentic,
             "threshold": self.threshold,
             "word_count": self.judgment_word_count,
             "dimensions": {

@@ -233,7 +233,7 @@ class ComplianceProver(Protocol):
                 # generate Noir ZK-SNARK proof
                 return proof_blob
 
-            def verify(self, proof, threshold, constitutional_hash) -> bool:
+            def verify(self, proof, snapshot, threshold, constitutional_hash) -> bool:
                 # verify Noir proof
                 ...
     """
@@ -279,7 +279,8 @@ class HMACProver:
     ) -> str:
         payload = (
             f"{constitutional_hash}:{snapshot.compliance_rate:.6f}:"
-            f"{threshold:.4f}:{snapshot.total_decisions}:{snapshot.passed_decisions}"
+            f"{threshold:.4f}:{snapshot.total_decisions}:{snapshot.passed_decisions}:"
+            f"{snapshot.escalated_decisions}:{snapshot.auto_resolved_decisions}"
         )
         return hmac.new(self._key, payload.encode(), hashlib.sha256).hexdigest()
 
@@ -321,6 +322,51 @@ class ZKPStubProver:
     ) -> bool:
         expected = self.prove(snapshot, threshold, constitutional_hash)
         return proof == expected
+
+
+class HashCommitmentProver:
+    """Hash-commitment prover — production-grade, deterministic, tamper-evident.
+
+    Proof = H(secret || constitutional_hash || compliance_rate || threshold || counts)
+
+    This is NOT true zero-knowledge — the verifier needs the secret to
+    verify.  However it IS:
+      • Deterministic: same inputs always produce the same proof
+      • Tamper-evident: any field change invalidates the proof
+      • Timing-safe: uses hmac.compare_digest for verification
+
+    For true ZKP (prove "rate >= threshold" without revealing rate),
+    integrate the Noir SDK and implement NoirProver.  This prover
+    serves as the production bridge until then.
+    """
+
+    def __init__(self, secret_key: str | None = None) -> None:
+        self._key = _resolve_compliance_certificate_secret(secret_key).encode()
+
+    def prove(
+        self,
+        snapshot: ComplianceSnapshot,
+        threshold: float,
+        constitutional_hash: str,
+    ) -> str:
+        payload = (
+            f"commitment:{constitutional_hash}:"
+            f"{snapshot.compliance_rate:.6f}:{threshold:.4f}:"
+            f"{snapshot.total_decisions}:{snapshot.passed_decisions}:"
+            f"{snapshot.escalated_decisions}:{snapshot.auto_resolved_decisions}"
+        )
+        mac = hmac.new(self._key, payload.encode(), hashlib.sha256).hexdigest()
+        return "commitment:" + mac
+
+    def verify(
+        self,
+        proof: str,
+        snapshot: ComplianceSnapshot,
+        threshold: float,
+        constitutional_hash: str,
+    ) -> bool:
+        expected = self.prove(snapshot, threshold, constitutional_hash)
+        return hmac.compare_digest(proof, expected)
 
 
 # ---------------------------------------------------------------------------

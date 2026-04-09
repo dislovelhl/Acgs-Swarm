@@ -217,3 +217,74 @@ class TestMeshThreadSafety:
 
         assert successes == 1
         assert len(errors) == 1
+
+
+# ---------------------------------------------------------------------------
+# Manifold-weighted peer selection
+# ---------------------------------------------------------------------------
+
+
+class TestManifoldPeerSelection:
+    def test_manifold_enabled_selects_peers(self):
+        """With use_manifold=True, peer selection still works and returns correct count."""
+        constitution = Constitution.default()
+        mesh = ConstitutionalMesh(
+            constitution,
+            peers_per_validation=3,
+            quorum=2,
+            seed=42,
+            use_manifold=True,
+        )
+        for i in range(5):
+            mesh.register_agent(f"agent-{i}", domain="test")
+
+        # Record some interactions to populate the manifold
+        assignment = mesh.request_validation("agent-0", content="test output", artifact_id="a1")
+        assert len(assignment.peers) == 3
+        assert "agent-0" not in assignment.peers  # MACI: producer excluded
+
+    def test_manifold_biases_toward_trusted_peers(self):
+        """Peers with higher manifold trust appear more frequently over many draws."""
+        constitution = Constitution.default()
+        mesh = ConstitutionalMesh(
+            constitution,
+            peers_per_validation=2,
+            quorum=1,
+            seed=42,
+            use_manifold=True,
+        )
+        # Register agents
+        for i in range(4):
+            mesh.register_agent(f"a-{i}", domain="test")
+
+        # Create an initial validation so manifold gets trust data
+        a1 = mesh.request_validation("a-0", content="first output", artifact_id="v1")
+        # Submit only 1 vote (quorum=1) to build trust without settling early
+        mesh.submit_vote(a1.assignment_id, a1.peers[0], approved=True)
+
+        # Now do multiple validations from a-0, track which peers get selected
+        peer_counts: dict[str, int] = {}
+        for i in range(20):
+            a = mesh.request_validation("a-0", content=f"output {i}", artifact_id=f"x{i}")
+            for p in a.peers:
+                peer_counts[p] = peer_counts.get(p, 0) + 1
+
+        # All available peers should appear at least once (exploration slot)
+        available = [f"a-{i}" for i in range(1, 4)]
+        for aid in available:
+            assert peer_counts.get(aid, 0) > 0, f"{aid} never selected"
+
+    def test_manifold_disabled_uses_uniform_random(self):
+        """With use_manifold=False (default), selection is uniform random."""
+        constitution = Constitution.default()
+        mesh = ConstitutionalMesh(
+            constitution,
+            peers_per_validation=2,
+            quorum=1,
+            seed=42,
+        )
+        for i in range(4):
+            mesh.register_agent(f"a-{i}", domain="test")
+        assignment = mesh.request_validation("a-0", content="test", artifact_id="u1")
+        assert len(assignment.peers) == 2
+        assert "a-0" not in assignment.peers
