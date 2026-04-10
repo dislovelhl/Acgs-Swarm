@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=80.9.0", "wheel>=0.46.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "constitutional-swarm"
 version = "0.1.1"
@@ -20,12 +24,8 @@ PyPI = "https://pypi.org/project/constitutional-swarm/"
 dev = ["pytest>=8.0", "pytest-asyncio>=1.0"]
 bittensor = ["bittensor>=7.0"]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/constitutional_swarm"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
