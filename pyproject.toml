@@ -21,7 +21,7 @@ Changelog = "https://github.com/dislovelhl/constitutional-swarm/releases"
 PyPI = "https://pypi.org/project/constitutional-swarm/"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.4"]
 bittensor = ["bittensor>=7.0"]
 
 [tool.setuptools.packages.find]
