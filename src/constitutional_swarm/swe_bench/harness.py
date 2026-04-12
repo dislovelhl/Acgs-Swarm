@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from constitutional_swarm.swe_bench.agent import SWEBenchAgent, SWEPatch
 

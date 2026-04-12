@@ -124,7 +124,7 @@ class SwarmCoordinator:
         Requires: ``pip install constitutional-swarm[transport]``
         """
         try:
-            from constitutional_swarm.gossip_protocol import SwarmNode, spin_up_swarm
+            from constitutional_swarm.gossip_protocol import spin_up_swarm
         except ImportError as exc:
             raise ImportError(
                 "WebSocket gossip requires: pip install constitutional-swarm[transport]"

@@ -305,12 +305,12 @@ class LatentDNAWrapper:
 
     def generate_governed(
         self,
-        input_ids: "Tensor",
+        input_ids: Tensor,
         *,
         tokenizer: Any | None = None,
         max_new_tokens: int = 128,
         **generate_kwargs: Any,
-    ) -> tuple["Tensor", dict[str, Any]]:
+    ) -> tuple[Tensor, dict[str, Any]]:
         """Generate tokens with BODES steering active throughout.
 
         Enables the hook, calls ``model.generate()``, disables the hook, and

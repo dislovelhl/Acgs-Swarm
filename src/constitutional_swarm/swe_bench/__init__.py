@@ -18,4 +18,4 @@ from __future__ import annotations
 from constitutional_swarm.swe_bench.agent import SWEBenchAgent, SWEPatch
 from constitutional_swarm.swe_bench.harness import SWEBenchHarness
 
-__all__ = ["SWEBenchAgent", "SWEPatch", "SWEBenchHarness"]
+__all__ = ["SWEBenchAgent", "SWEBenchHarness", "SWEPatch"]

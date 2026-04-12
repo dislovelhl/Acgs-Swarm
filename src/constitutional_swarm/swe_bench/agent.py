@@ -78,7 +78,7 @@ class SWEBenchAgent:
     def __init__(
         self,
         *,
-        wrapper: "LatentDNAWrapper | None" = None,
+        wrapper: LatentDNAWrapper | None = None,
         model_name: str = "constitutional-swarm-agent",
         max_new_tokens: int = 512,
         timeout_s: float = 60.0,
