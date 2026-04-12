@@ -123,21 +123,28 @@ def sinkhorn_knopp(
 
 
 class GovernanceManifold:
-    """The governance manifold M^gov for multi-agent systems.
+    """The governance manifold M^gov for multi-agent systems (Birkhoff baseline).
 
     Projects unconstrained agent interaction matrices onto the
-    Birkhoff polytope, guaranteeing bounded influence, compositional
-    closure, and trust conservation.
+    Birkhoff polytope (doubly stochastic) via Sinkhorn-Knopp, guaranteeing
+    bounded influence, compositional closure, and trust conservation.
 
-    Analogous to mHC's manifold-constrained residual connections,
-    but applied to agent governance instead of neural network layers.
+    .. warning::
+        **Research use only.**  The Birkhoff constraint causes Birkhoff Uniformity
+        Collapse: repeated composition drives the trust matrix toward the uniform
+        matrix J = (1/N)·11ᵀ (Perron-Frobenius theorem), destroying agent
+        specialization.  See ``test_manifold_degeneration.py`` for the empirical proof
+        and ``§3.1`` of the MCFS whitepaper for the theoretical derivation.
+
+        **For production swarms use** :class:`constitutional_swarm.spectral_sphere.SpectralSphereManifold`
+        instead.  It replaces the Birkhoff constraint with a spectral-sphere projection
+        that preserves variance (empirically: 2,656% retention vs. ~0% here).
 
     Properties of M^gov:
       1. Bounded influence: ||P_M(H)||_2 ≤ 1
       2. Compositional closure: P_M(H1) · P_M(H2) ∈ M^gov
       3. Conservation: Σ_j H[i,j] = 1, Σ_i H[i,j] = 1
       4. Identity recovery: when N=1, degenerates to scalar 1
-         (identity mapping, same as mHC)
     """
 
     def __init__(self, num_agents: int, *, max_iterations: int = 20) -> None:
