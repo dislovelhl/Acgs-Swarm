@@ -1,0 +1,63 @@
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Multi-agent trust and reputation.}
+Early trust models in multi-agent systems \cite{sabater2005review} used scalar reputation
+scores aggregated via weighted averages.  More recent work represents trust as probability
+distributions \cite{josang2007subjective} or Bayesian networks \cite{teacy2012travos}.
+None of these formulations identify or address BUC because they do not use doubly
+stochastic normalization; BUC is a property specific to matrix-valued trust systems that
+invoke Sinkhorn--Knopp or equivalent row-column normalization.
+
+\paragraph{Sinkhorn--Knopp normalization.}
+The Sinkhorn--Knopp algorithm \cite{sinkhorn1964relationship,sinkhorn1967concerning}
+converges to the unique doubly stochastic matrix in the same ``scaling class'' as the
+input.  It is widely used in optimal transport \cite{cuturi2013sinkhorn}, attention
+mechanisms \cite{sinkhorn_transformer}, and — most relevantly — the mHC architecture
+\cite{xie2025mhc}, which projects residual connection matrices onto the Birkhoff polytope
+to restore identity-mapping properties in deep networks.  Our work identifies the failure
+mode latent in all such systems when Sinkhorn is applied \emph{iteratively}: the
+long-run fixed point is the uniform matrix, not the intended specialization structure.
+
+\paragraph{Manifold-constrained neural architectures.}
+Hyper-Connections \cite{zhu2024hyper} expand the residual stream width in transformers by
+replacing the scalar residual coefficient with a learnable matrix $H^{\mathrm{res}}$.
+Manifold-Constrained Hyper-Connections (mHC) \cite{xie2025mhc} project $H^{\mathrm{res}}$
+onto the Birkhoff polytope, proving bounded spectral norm and compositional closure.
+Spectral-Sphere-Constrained Hyper-Connections (sHC) \cite{shc2025spectral} replace the
+Birkhoff projection with spectral-norm-ball projection, achieving the same stability
+properties with a richer manifold.  Our SpectralSphere Manifold draws directly on sHC's
+projection operator, adapting it to the trust dynamics setting.
+
+\paragraph{Neural ODEs.}
+Continuous-depth networks \cite{chen2018neural} model hidden-state evolution as the
+solution of an ODE $dh/dt = f_\theta(h, t)$.  Augmented Neural ODEs
+\cite{dupont2019augmented} extend this to avoid trajectory intersection.  We formulate
+trust evolution as a Neural ODE on the spectral sphere, using the ODE framework to prove
+global stability rather than as a learned architecture.
+
+\paragraph{Differential privacy for multi-agent systems.}
+Federated learning with differential privacy \cite{mcmahan2018dp,geyer2017dp} adds
+calibrated Gaussian noise to model updates before aggregation.  The Gaussian mechanism
+\cite{dwork2014algorithmic} requires calibration to the $\ell_2$ sensitivity of the
+function being privatized.  Our Lemma~\ref{lem:residual_sensitivity} tightens the
+sensitivity bound from $2r$ to $2(1-\alpha)r$ via the algebraic cancellation of $\alpha I$
+terms, reducing noise requirements by exactly $\alpha \cdot 100\%$.  A related
+sensitivity analysis appears in federated Sinkhorn \cite{federated_sinkhorn2025}, but
+without the residual-injection tightening.
+
+\paragraph{Constitutional AI and MACI.}
+Constitutional AI \cite{bai2022constitutional} provides principles-based governance for
+individual LLMs.  Multi-Agent Constitutional Integrity (MACI) extends this to swarms by
+enforcing MACI separation of powers: Proposer/Validator/Executor roles are assigned to
+distinct agents \cite{acgs2025}.  Our work identifies BUC as a structural threat to MACI:
+if trust collapse makes all agents interchangeable, role separation becomes nominal.
+SpectralSphere projection restores the specialization diversity that MACI requires.
+
+\paragraph{Lyapunov stability for dynamical systems on manifolds.}
+Classical Lyapunov theory \cite{lyapunov1907} establishes global asymptotic stability via
+a scalar function $V(x) > 0$ with $\dot{V}(x) < 0$.  LaSalle's invariance principle
+\cite{lasalle1960some} extends this to compact manifolds without strict Lyapunov functions.
+We apply LaSalle's principle to the spectral sphere ODE, proving that all trajectories
+converge to the largest invariant subset of $\{\dot{V} = 0\}$, which excludes the
+collapsed uniform matrix.

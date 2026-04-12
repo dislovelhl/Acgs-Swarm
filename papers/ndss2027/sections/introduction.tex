@@ -1,0 +1,83 @@
+\section{Introduction}
+\label{sec:introduction}
+
+\IEEEPARstart{T}{he} deployment of multi-agent AI systems for high-stakes tasks —
+software engineering, medical triage, legal analysis, and autonomous governance — raises
+a fundamental security question: how do agents maintain a consistent, tamper-evident
+shared state while broadcasting sensitive information over an open peer-to-peer network?
+
+\paragraph{The governance broadcast problem.}
+In constitutional multi-agent systems \cite{bai2022constitutional,acgs2025}, each agent
+maintains an internal \emph{trust-routing matrix} $H \in \R^{n \times n}$ encoding its
+confidence in peers' specialized capabilities.  Agents must broadcast updates to $H$
+so that the swarm maintains globally coherent routing.  But broadcasting $H$ in the
+clear exposes two attack surfaces:
+
+\begin{itemize}
+  \item \textbf{Inference attack (honest-but-curious nodes).}  An adversary observing
+    the broadcast stream can reverse-engineer an agent's latent activation space,
+    private prompts, or constitutional trust model from the routing matrix entries.
+
+  \item \textbf{Sybil routing attack (Byzantine nodes).}  A Byzantine node $\mathcal{B}$
+    can inject forged trust updates that redirect high-value tasks toward
+    $\mathcal{B}$-controlled executors, violating Multi-Agent Constitutional Integrity
+    (MACI) \cite{maci_spec}.  This is structurally a bribery attack: $\mathcal{B}$
+    ``buys'' routing priority by manipulating the shared trust state.
+\end{itemize}
+
+\paragraph{Our approach: \fedsink{}.}
+We present \fedsink{} (\textbf{Fed}erated \textbf{Sink}horn with \textbf{M}ulti-\textbf{A}gent
+\textbf{C}onstitutional \textbf{I}ntegrity), a protocol that addresses both attack surfaces
+through a layered defense:
+
+\begin{enumerate}
+  \item \textbf{Spectral projection + residual injection} ensures broadcast matrices
+    satisfy $\spnorm{H} \leq r$ and prevents Birkhoff Uniformity Collapse
+    \cite{mcfs_iclr2027}, maintaining diverse trust routing even under adversarial
+    perturbation.
+
+  \item \textbf{Gaussian $\varepsilon$-DP noise} added to the projected matrix before
+    broadcast provides $({\varepsilon}, \delta)$-differential privacy
+    \cite{dwork2014algorithmic}, preventing inference of private state.
+
+  \item \textbf{zk-SNARK proof (MACI)} \cite{maci_spec} asserts that the broadcast matrix
+    was computed correctly from a valid local state and that the spectral constraint was
+    enforced.  An agent cannot prove to a colluder that it routed a specific task in a
+    specific direction, eliminating bribery incentives.
+
+  \item \textbf{Merkle-CRDT gossip} \cite{kleppmann2022crdt} provides Byzantine-resilient
+    eventual consistency: honest replicas accept only CID-verified, proof-validated updates,
+    converging to identical state in $O(\log N)$ rounds.
+\end{enumerate}
+
+\paragraph{Key insight: residual injection tightens DP.}
+A structural observation (Lemma~\ref{lem:sensitivity}) is that residual injection —
+introduced in \cite{mcfs_iclr2027} to prevent trust collapse — also reduces the
+$\ell_2$ sensitivity of the broadcast function from $2r$ to $2(1-\alpha)r$.  At
+$\alpha = 0.1$, this reduces required Gaussian noise by $10\%$ for the same
+$(\varepsilon, \delta)$ budget.  Stability and privacy are synergistic rather than
+competing.
+
+\paragraph{Contributions.}
+\begin{itemize}
+  \item \fedsink{} protocol specification
+    (Section~\ref{sec:protocol}), combining spectral projection, residual injection,
+    $\varepsilon$-DP, zk-SNARK MACI, and Merkle-CRDT gossip in a single coherent
+    seven-step protocol.
+
+  \item Formal security proofs (Section~\ref{sec:security}): CID Integrity
+    (Theorem~\ref{thm:cid_integrity}), Eventual Epistemic Convergence
+    (Theorem~\ref{thm:eec}), and $\varepsilon$-DP guarantee
+    (Theorem~\ref{thm:dp_guarantee}).
+
+  \item Sensitivity tightening via residual injection (Lemma~\ref{lem:sensitivity}),
+    reducing DP noise by $(1-\alpha)$ multiplicatively.
+
+  \item Empirical evaluation on synthetic swarm benchmarks and SWE-bench coding tasks
+    (Section~\ref{sec:evaluation}; SWE-bench results pending Phase 3/4 completion).
+\end{itemize}
+
+\paragraph{Scope.}
+\fedsink{} v1 is out of scope for: timing side-channels, traffic analysis, compromised
+VRF oracles, and adaptive $\varepsilon$ scheduling.  These are directions for future
+work (Section~\ref{sec:conclusion}).

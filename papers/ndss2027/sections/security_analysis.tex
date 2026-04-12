@@ -1,0 +1,138 @@
+\section{Security Analysis}
+\label{sec:security}
+
+We prove three properties: CID Integrity, Eventual Epistemic Convergence (EEC), and
+$(\varepsilon,\delta)$-DP.  Full proofs are in Appendix~\ref{app:security_proofs}.
+
+\subsection{CID Integrity}
+
+\begin{theorem}[CID Integrity]
+  \label{thm:cid_integrity}
+  Under the \fedsink{} protocol, a Byzantine node $\mathcal{B}$ cannot cause an honest
+  agent $j$ to accept a modified matrix $\tilde{H}' \neq \tilde{H}$ under the original
+  CID, except with probability $\negl(\lambda)$, where $\lambda$ is the security
+  parameter.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+  Suppose $\mathcal{B}$ intercepts an honest tuple $(\MCid, \tilde{H}, \pi)$ and attempts
+  to replace $\tilde{H}$ with $\tilde{H}' \neq \tilde{H}$ while keeping $\MCid$
+  unchanged.  Since $\MCid = \mathsf{CID}(\tilde{H}) = \mathsf{H}_{\mathrm{CR}}(\tilde{H})$
+  and $\mathsf{H}_{\mathrm{CR}}$ is collision-resistant, producing
+  $\mathsf{H}_{\mathrm{CR}}(\tilde{H}') = \MCid$ requires finding a collision in
+  $\mathsf{H}_{\mathrm{CR}}$, which succeeds with probability at most $\negl(\lambda)$.
+
+  Alternatively, $\mathcal{B}$ might construct a fresh valid tuple
+  $(\MCid', \tilde{H}', \pi')$.  To produce a valid $\pi'$ for $\tilde{H}'$, $\mathcal{B}$
+  must know a valid witness $(H_{\mathrm{proj}}', Z')$ satisfying the circuit:
+  $\tilde{H}' = (1-\alpha)H_{\mathrm{proj}}' + \alpha I + Z'$ with
+  $\spnorm{H_{\mathrm{proj}}'} \leq r$ and $Z'$ drawn from a VRF-seeded Gaussian.
+  By the knowledge-soundness of the zk-SNARK, the probability of producing an accepting
+  proof without a valid witness is $\negl(\lambda)$.  An honest agent $j$ will reject
+  any tuple with $\MCid \neq \mathsf{CID}(\tilde{H}')$, so $\mathcal{B}$ must use the
+  correct CID for its forged matrix — which is different from the original $\MCid$.
+  Thus no honest replica is corrupted via the original CID.
+\end{proof}
+
+\subsection{Eventual Epistemic Convergence}
+
+\begin{definition}[Eventual Epistemic Convergence (EEC)]
+  \label{def:eec}
+  A distributed governance protocol satisfies \emph{Eventual Epistemic Convergence}
+  if, for any execution with at most $f$ Byzantine nodes, there exists a time $T$ after
+  which all honest agents hold identical governance state:
+  \[
+    \forall i, j \in \mathcal{N} \setminus \mathcal{B},\; t \geq T:\quad
+      \mathsf{State}_i(t) = \mathsf{State}_j(t).
+  \]
+\end{definition}
+
+\begin{theorem}[Eventual Epistemic Convergence]
+  \label{thm:eec}
+  Under the \fedsink{} protocol with gossip over a connected graph and at most
+  $f = \lfloor N/3 \rfloor$ Byzantine agents, the protocol achieves EEC.  Moreover,
+  convergence occurs within $O(\log N)$ gossip rounds in expectation.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+  The Merkle-CRDT merge function is CAI (commutative, associative, idempotent), so all
+  honest replicas converge to the same join-semilattice element: the set of all valid
+  tuples accepted by honest agents.  Byzantine agents cannot inject invalid tuples
+  (Theorem~\ref{thm:cid_integrity}), so the join is taken over honest-generated tuples
+  only.  Gossip liveness \cite{eugster2004epidemic} guarantees every valid tuple reaches
+  every honest agent within $O(\log N)$ rounds (full proof in
+  Appendix~\ref{app:security_proofs}).
+\end{proof}
+
+\paragraph{Remark.}
+EEC is \emph{eventual}, not immediate.  During the convergence period, different honest
+agents may see different governance states.  The Merkle-DAG causal links allow agents to
+detect and resolve conflicts deterministically once convergence completes.
+
+\subsection{Differential Privacy}
+
+\begin{lemma}[$\ell_2$ Sensitivity with Residual Injection]
+  \label{lem:sensitivity}
+  Let $g(D_i) = (1-\alpha)\Pi_r(\phi(D_i)) + \alpha I$ be the residual-injected
+  projection function.  Then:
+  \[
+    \Delta g := \max_{D_i, D_i'} \|g(D_i) - g(D_i')\|_2 \leq 2(1-\alpha)r.
+  \]
+  \emph{Proof.} $\|g(D) - g(D')\|_2 = (1-\alpha)\|\Pi_r(\phi(D)) - \Pi_r(\phi(D'))\|_2
+  \leq (1-\alpha) \cdot 2r$, since the $\alpha I$ terms cancel and
+  $\|\Pi_r(\cdot)\|_2 \leq r$ implies diameter $2r$.  \qed
+\end{lemma}
+
+\begin{theorem}[$(\varepsilon,\delta)$-DP Guarantee]
+  \label{thm:dp_guarantee}
+  The \fedsink{} broadcast mechanism $\mathcal{M}(D_i) = g(D_i) + Z$,
+  $Z \sim \mathcal{N}(0, \sigma^2 I)$, with $\sigma$ as in equation~\eqref{eq:sigma},
+  satisfies $(\varepsilon, \delta)$-differential privacy.
+\end{theorem}
+
+\begin{proof}
+  By the Gaussian mechanism \cite{dwork2014algorithmic}: a mechanism adding
+  $\mathcal{N}(0, \sigma^2 I)$ to a function of sensitivity $\Delta g$ achieves
+  $(\varepsilon, \delta)$-DP if
+  $\sigma \geq \Delta g \sqrt{2\ln(1.25/\delta)}/\varepsilon$.
+  Substituting $\Delta g = 2(1-\alpha)r$ (Lemma~\ref{lem:sensitivity}) gives
+  equation~\eqref{eq:sigma}.
+\end{proof}
+
+\subsection{Anti-Bribery via MACI}
+
+The zk-SNARK zero-knowledge property guarantees that an agent cannot prove to a colluder
+\emph{how} it routed a specific task.  Even if a Byzantine node offers payment for
+evidence of routing behavior, the honest agent cannot produce such evidence without
+revealing $H_{\mathrm{proj}}$ and $Z$ — which are never broadcast.  The only public
+information is $(\MCid, \tilde{H}, \pi)$; the proof $\pi$ reveals only that the circuit
+was satisfied, not the private witnesses.
+
+\begin{claim}[MACI Anti-Bribery]
+  \label{claim:anti_bribery}
+  Under the zero-knowledge property of the zk-SNARK, no PPT adversary can construct a
+  distinguisher for the routing direction of an honest agent from the broadcast tuple
+  $(\MCid, \tilde{H}, \pi)$ alone, except with probability $\negl(\lambda)$.
+\end{claim}
+
+\subsection{Security Property Summary}
+
+\begin{table}[t]
+  \centering
+  \caption{Security properties of \fedsink{}.}
+  \label{tab:security_properties}
+  \renewcommand{\arraystretch}{1.1}
+  \begin{tabular}{lll}
+    \toprule
+    \textbf{Property} & \textbf{Mechanism} & \textbf{Guarantee} \\
+    \midrule
+    Input privacy        & Gaussian DP noise        & $(\varepsilon,\delta)$-DP \\
+    Routing integrity    & Spectral constraint       & $\spnorm{H_{\mathrm{proj}}} \leq r$ \\
+    Anti-bribery         & zk-SNARK ZK               & MACI \\
+    Byzantine tolerance  & Proof rejection + CID     & $f < N/3$ \\
+    Eventual consistency & CAI CRDT merge            & EEC in $O(\log N)$ \\
+    Collapse prevention  & Residual injection        & $\mathrm{VR} > 0$ always \\
+    Noise reduction      & Residual sensitivity      & $-10\%$ at $\alpha{=}0.1$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

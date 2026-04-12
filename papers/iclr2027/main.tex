@@ -1,0 +1,104 @@
+\documentclass{iclr2025_conference}
+
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{subcaption}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+% Notation macros
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Hmat}{H}
+\newcommand{\Hproj}{H_{\mathrm{proj}}}
+\newcommand{\manifold}{\mathcal{M}}
+\newcommand{\birkhoff}{\mathcal{B}_n}
+\newcommand{\spnorm}[1]{\left\|#1\right\|_2}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\Id}{I}
+\newcommand{\constitutionalhash}{\texttt{608508a9bd224290}}
+
+\title{Manifold-Constrained Fluid Swarms: \\
+Eliminating Uniformity Collapse in \\
+Multi-Agent Trust Dynamics}
+
+\author{
+  % Authors omitted for blind review
+}
+
+\begin{document}
+
+\maketitle
+
+\input{sections/abstract}
+
+\input{sections/introduction}
+
+\input{sections/related_work}
+
+\input{sections/method}
+
+\input{sections/experiments}
+
+\input{sections/conclusion}
+
+\bibliography{references}
+\bibliographystyle{iclr2025_conference}
+
+\appendix
+
+\section{Proof of Theorem~\ref{thm:spectral_sphere_prevents_collapse}}
+\label{app:proof_main}
+
+We provide the full proof that SpectralSphere projection with residual injection prevents
+Birkhoff Uniformity Collapse for all $n \geq 2$.
+
+\begin{proof}[Full proof]
+  Let $H^{(k)}$ denote the trust matrix at cycle $k$ under the SpectralSphere update rule
+  (Definition~\ref{def:spectral_sphere_update}). After one step:
+  \[
+    H^{(k+1)} = (1-\alpha)\,\Pi_r\!\left(H^{(k)}\right) + \alpha I.
+  \]
+  The eigenvalues $\lambda_i$ of $\Pi_r(H^{(k)})$ satisfy $|\lambda_i| \leq r$ by
+  construction of the spectral projection. The eigenvalues of $H^{(k+1)}$ are therefore
+  $\mu_i = (1-\alpha)\lambda_i + \alpha$. The variance of the eigenvalue distribution is
+  \[
+    \mathrm{Var}(\mu) = (1-\alpha)^2\,\mathrm{Var}(\lambda).
+  \]
+  Since $(1-\alpha) < 1$, each iteration contracts variance. Collapse to zero variance
+  requires $\mathrm{Var}(\mu) = 0$, which demands $\alpha = 1$ (uniform initialization).
+  For $\alpha \in (0,1)$, the map has a unique fixed point whose variance is determined by
+  the balance between the spectral projection (which contracts toward $r$-bounded sphere)
+  and the residual (which maintains diagonal structure). The residual term $\alpha I$
+  contributes $n$ eigenvalues equal to $\alpha$; these cannot collapse to a single point
+  unless $r = 0$. Hence $\mathrm{Var}(H^{(\infty)}) > 0$ for any $\alpha > 0$, $r > 0$. \qed
+\end{proof}
+
+\section{Implementation Details}
+\label{app:implementation}
+
+All experiments used the \texttt{constitutional\_swarm} package
+(constitutional hash \constitutionalhash) with the \texttt{SpectralSphereManifold}
+implementation in PyTorch. Sinkhorn baseline used 20 iterations (matching the mHC
+hyperparameter from \cite{xie2025mhc}). ODE solver used \texttt{torchdiffeq}
+\texttt{dopri5} with \texttt{rtol=1e-3}, \texttt{atol=1e-6}.
+
+\end{document}

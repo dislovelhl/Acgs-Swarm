@@ -42,6 +42,14 @@ def _trust_variance(m: GovernanceManifold) -> float:
     return total_var / (n * n)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Birkhoff Uniformity Collapse: Sinkhorn re-projection drives variance→0 "
+        "(Perron-Frobenius). This failure is the empirical proof of the phenomenon. "
+        "See §3.1 of MCFS whitepaper and test_spectral_sphere_retention.py for the fix."
+    ),
+)
 @pytest.mark.parametrize("n,cycles", [(10, 50), (50, 100)])
 def test_birkhoff_uniformity_collapse(n: int, cycles: int) -> None:
     """

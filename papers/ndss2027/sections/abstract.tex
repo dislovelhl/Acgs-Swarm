@@ -1,0 +1,29 @@
+\begin{abstract}
+Multi-agent AI governance systems face a critical security challenge: when agents
+broadcast their trust-routing matrices over a peer-to-peer network, adversarial nodes
+can corrupt honest replicas or reverse-engineer agents' private internal state.
+We present \fedsink{} (\textbf{Fed}erated \textbf{Sink}horn with
+\textbf{M}ulti-\textbf{A}gent \textbf{C}onstitutional \textbf{I}ntegrity), a
+Byzantine-resilient federated governance protocol combining four mechanisms:
+(1) Merkle-CRDT gossip for eventually consistent distributed state;
+(2) spectral-sphere projection with residual injection to prevent trust collapse;
+(3) Gaussian $(\varepsilon, \delta)$-differential privacy over broadcast routing matrices;
+and (4) zk-SNARK proofs (MACI) to prevent bribery attacks.
+
+We prove three security properties.
+\textbf{CID Integrity}: a Byzantine node cannot inject a modified matrix that passes
+honest-replica verification, because the content-identifier (CID) is bound to the
+zk-SNARK proof.
+\textbf{Eventual Epistemic Convergence (EEC)}: all honest replicas converge to
+identical governance state in $O(\log N)$ gossip rounds despite up to $\lfloor N/3
+\rfloor$ Byzantine nodes.
+\textbf{$(\varepsilon, \delta)$-DP Privacy}: agent trust weights satisfy differential
+privacy with noise $\sigma = 2(1-\alpha)r\sqrt{2\ln(1.25/\delta)}/\varepsilon$; residual
+injection at $\alpha{=}0.1$ reduces required noise by $10\%$ relative to the
+non-residual baseline.
+
+We evaluate \fedsink{} on a synthetic $N$-agent swarm benchmark and — upon completion
+of Phase 3/4 experiments — on SWE-bench coding tasks.
+The protocol is implemented in the \texttt{constitutional\_swarm} package
+(constitutional hash \texttt{608508a9bd224290}).
+\end{abstract}

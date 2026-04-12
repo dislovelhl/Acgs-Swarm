@@ -1,0 +1,30 @@
+\begin{abstract}
+We identify and formally characterize a failure mode in multi-agent trust dynamics that
+we term \emph{Birkhoff Uniformity Collapse} (BUC): iterated Sinkhorn--Knopp
+normalization of inter-agent trust matrices converges to the uniform doubly stochastic
+matrix, annihilating all agent specialization. In controlled experiments with $n{=}50$
+agents, Sinkhorn-normalized trust reaches $0\%$ variance retention by cycle 10 — a
+catastrophic loss of routing diversity with no recovery.
+
+To eliminate BUC, we introduce the \emph{SpectralSphere Manifold}: trust matrices are
+projected onto the spectral-norm ball of radius $r$ (not the Birkhoff polytope) and
+mixed with a residual identity term $\alpha I$ at strength $\alpha{=}0.1$. We prove
+(Theorem~\ref{thm:spectral_sphere_prevents_collapse}) that this projection prevents
+collapse while preserving bounded influence. Empirically, SpectralSphere + residual
+achieves stable $142\%$ variance retention ($n{=}50$) and $20\%$ variance retention
+($n{=}10$), confirming that specialization persists indefinitely.
+
+We further formulate continuous-time trust evolution as a Neural ODE on the spectral
+sphere manifold. Lyapunov analysis proves global asymptotic stability; the ODE achieves
+$2{,}656\%$ topological capacity relative to Sinkhorn baseline, demonstrating that the
+manifold's topology is rich enough to support diverse specialization patterns — though
+we stress that high topological capacity does not itself guarantee amplification of
+the \emph{correct} specialization, only that collapse is provably absent.
+
+Finally, we show that residual injection at $\alpha{=}0.1$ reduces $\varepsilon$-DP
+noise requirements by exactly $10\%$ (Lemma~\ref{lem:residual_sensitivity}), proving
+that topological stability and cryptographic privacy are complementary rather than
+competing objectives. All results are reproducible via the
+\texttt{constitutional\_swarm} package (constitutional hash
+\texttt{608508a9bd224290}).
+\end{abstract}

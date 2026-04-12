@@ -1,0 +1,57 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \fedsink{}, a Byzantine-resilient federated governance protocol for
+multi-agent AI systems.  The protocol combines spectral-sphere projection with residual
+injection (preventing Birkhoff Uniformity Collapse \cite{mcfs_iclr2027}), Gaussian
+$(\varepsilon,\delta)$-differential privacy (preventing inference of private agent state),
+zk-SNARK MACI proofs (preventing bribery attacks on routing decisions), and Merkle-CRDT
+gossip (achieving eventual consistency under $f < N/3$ Byzantine faults).
+
+Our main security results are:
+\begin{itemize}
+  \item \textbf{CID Integrity} (Theorem~\ref{thm:cid_integrity}): Byzantine nodes cannot
+    corrupt honest replicas without detection.
+  \item \textbf{EEC} (Theorem~\ref{thm:eec}): honest replicas converge to identical state
+    in $O(\log N)$ gossip rounds.
+  \item \textbf{$(\varepsilon,\delta)$-DP} (Theorem~\ref{thm:dp_guarantee}): agent trust
+    weights are differentially private.
+\end{itemize}
+
+A structural observation (Lemma~\ref{lem:sensitivity}) is that residual injection reduces
+DP noise requirements by $(1-\alpha)$ multiplicatively — at $\alpha{=}0.1$, a $10\%$
+reduction with no tradeoff in stability or security.  The stability fix and the
+cryptographic efficiency improvement are synergistic.
+
+\paragraph{Limitations.}
+(1) The zk-SNARK circuit for Gaussian randomness verification requires a VRF or
+hash-to-curve, adding significant proving overhead — benchmarking is deferred to Phase 3.
+(2) SWE-bench evaluation is pending Phase 3/4 completion; routing quality claims are
+currently theoretical.
+(3) Timing side-channels and traffic analysis are out of scope for v1.
+(4) Advanced composition accounting (moments accountant) for multi-round DP is not yet
+integrated.
+
+\paragraph{Future work.}
+\begin{itemize}
+  \item \textbf{Tight sensitivity via BODES composition.}  When $H_{\mathrm{proj}}$
+    derives from BODES latent steering vectors, the output space may be a strict subset
+    of $\mathcal{S}_r$, lowering $\Delta g$ further below $2(1-\alpha)r$.
+
+  \item \textbf{Adaptive $\varepsilon$ scheduling.}  High-stakes rounds (constitutional
+    amendments) should use tight $\varepsilon$; routine routing can use loose $\varepsilon$.
+    A session-level privacy account with adaptive per-round allocation is unexplored.
+
+  \item \textbf{Efficient zk-SNARK circuits.}  The Gaussian draw verification circuit
+    is the bottleneck.  Plonky2 or STARKs may offer better proving times at the cost
+    of larger proof sizes.
+
+  \item \textbf{Threshold decryption for trust aggregation.}  Rather than each agent
+    broadcasting a full matrix, threshold FHE could allow the swarm to compute aggregate
+    trust updates without any single agent learning individual contributions.
+\end{itemize}
+
+\paragraph{Reproducibility.}
+All protocol steps are implemented in the \texttt{constitutional\_swarm} package
+(constitutional hash \texttt{608508a9bd224290}).  Correctness tests for CID integrity,
+EEC convergence, and DP calibration pass in the Phase 2 test suite.

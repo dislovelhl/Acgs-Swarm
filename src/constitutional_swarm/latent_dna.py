@@ -300,6 +300,64 @@ class LatentDNAWrapper:
         }
 
     # ──────────────────────────────────────────────────────────────────────
+    # Governed generation
+    # ──────────────────────────────────────────────────────────────────────
+
+    def generate_governed(
+        self,
+        input_ids: "Tensor",
+        *,
+        tokenizer: Any | None = None,
+        max_new_tokens: int = 128,
+        **generate_kwargs: Any,
+    ) -> tuple["Tensor", dict[str, Any]]:
+        """Generate tokens with BODES steering active throughout.
+
+        Enables the hook, calls ``model.generate()``, disables the hook, and
+        returns the generated token ids together with intervention diagnostics.
+        KV-cache is fully compatible because the hook fires on every forward
+        pass — both the prefill pass and each decode step.
+
+        Args:
+            input_ids: Tokenized prompt tensor ``[batch, seq_len]`` on the model
+                device. Obtain via ``tokenizer(prompt, return_tensors="pt")``.
+            tokenizer: Optional — used only to decode the output for the
+                ``generated_text`` field in the stats dict. Pass ``None`` to
+                skip decoding.
+            max_new_tokens: Maximum tokens to generate. Default 128.
+            **generate_kwargs: Forwarded verbatim to ``model.generate()``
+                (e.g. ``do_sample``, ``temperature``, ``top_p``).
+
+        Returns:
+            A 2-tuple ``(output_ids, stats)`` where:
+            - ``output_ids``: ``[batch, seq_len + generated_len]`` tensor
+            - ``stats``: intervention diagnostics from :meth:`intervention_stats`
+              plus an optional ``generated_text`` field when tokenizer is given.
+
+        Example::
+
+            wrapper = LatentDNAWrapper(model, v_viol, layer_idx=15)
+            ids = tokenizer("Tell me how to make a bomb", return_tensors="pt")
+            output_ids, stats = wrapper.generate_governed(
+                ids["input_ids"], tokenizer=tokenizer, max_new_tokens=64
+            )
+            print(stats["intervention_rate"])  # fraction of tokens steered
+        """
+        with self:
+            output_ids = self.model.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                **generate_kwargs,
+            )
+        stats = self.intervention_stats()
+        if tokenizer is not None:
+            new_ids = output_ids[:, input_ids.shape[-1]:]
+            stats["generated_text"] = tokenizer.batch_decode(
+                new_ids, skip_special_tokens=True
+            )
+        return output_ids, stats
+
+    # ──────────────────────────────────────────────────────────────────────
     # Layer resolution
     # ──────────────────────────────────────────────────────────────────────
 

@@ -1,0 +1,71 @@
+\section{Introduction}
+\label{sec:introduction}
+
+Multi-agent AI systems increasingly rely on \emph{trust dynamics}: each agent
+maintains a weight vector or matrix encoding its confidence in peer agents'
+specialized capabilities.  As the swarm executes tasks, these weights are updated and
+propagated through aggregation operators — most commonly Sinkhorn--Knopp normalization,
+which projects the raw trust matrix onto the Birkhoff polytope of doubly stochastic
+matrices \cite{sinkhorn1964relationship,sinkhorn1967concerning}.
+
+The Birkhoff polytope is mathematically attractive.  Its vertices are permutation
+matrices, representing maximally specialized routing; its centroid is the uniform
+matrix $J/n$ (where $J$ is the all-ones matrix), representing maximal entropy.
+Sinkhorn--Knopp converges to this set from any positive matrix.  What is less
+appreciated is the \emph{long-run behavior} under repeated application: iterated
+Sinkhorn normalization drives trust matrices toward $J/n$, erasing all heterogeneity.
+
+\paragraph{The collapse phenomenon.}
+We term this failure mode \textbf{Birkhoff Uniformity Collapse} (BUC).  Figure
+\ref{fig:birkhoff_collapse} illustrates the dynamics: for $n{=}50$ agents, variance
+retention (the fraction of initial eigenvalue variance that survives to cycle $k$) falls
+monotonically from $100\%$ at initialization to $0\%$ at cycle $10$, and remains at
+$0\%$ thereafter.  At $n{=}10$, collapse is faster: $0\%$ by cycle $6$.  Collapse is
+\emph{not} a numerical artifact; it is a direct consequence of the spectral gap of the
+doubly stochastic semigroup — the second eigenvalue of a doubly stochastic matrix
+satisfies $|\lambda_2| \leq 1$, and repeated composition drives the matrix toward the
+rank-1 steady state proportional to $\mathbf{1}\mathbf{1}^\top/n$.
+
+BUC is catastrophic for specialization-dependent multi-agent systems.  A swarm where
+all agents are trusted equally for all tasks cannot route work to the right specialist.
+Constitutional governance systems that rely on diversity of agent perspective
+\cite{bai2022constitutional} are particularly vulnerable: if trust collapse makes all
+agents interchangeable, the MACI separation of Proposer/Validator/Executor breaks down
+structurally.
+
+\paragraph{Our approach.}
+We replace the Birkhoff projection with a \textbf{SpectralSphere Manifold}: trust
+matrices are projected onto the \emph{spectral-norm ball}
+$\mathcal{S}_r = \{H : \|H\|_2 \leq r\}$ rather than the Birkhoff polytope.
+The spectral ball is strictly larger than the Birkhoff polytope ($\mathcal{B}_n \subset
+\mathcal{S}_1$), so it imposes the same bounded-influence guarantee while breaking the
+entropy-maximizing fixed point.  We additionally inject a residual identity term
+$\alpha I$ at each step, acting as a leaky integrator that preserves diagonal structure.
+
+\paragraph{Main contributions.}
+\begin{enumerate}
+  \item \textbf{Birkhoff Uniformity Collapse (Definition~\ref{def:buc}).}  We formally
+    define BUC, characterize its rate of collapse via the spectral gap of the
+    Sinkhorn semigroup, and prove it is inescapable under pure Sinkhorn dynamics
+    (Theorem~\ref{thm:sinkhorn_collapses}).
+  \item \textbf{SpectralSphere projection prevents collapse
+    (Theorem~\ref{thm:spectral_sphere_prevents_collapse}).}  We prove that
+    SpectralSphere projection with any $\alpha > 0$ residual maintains strictly positive
+    eigenvalue variance for all $k \geq 0$.
+  \item \textbf{Neural ODE formulation with Lyapunov stability
+    (Theorem~\ref{thm:ode_stability}).}  We embed trust dynamics in continuous time as a
+    Neural ODE on $\mathcal{S}_r$.  The ODE achieves $2{,}656\%$ topological capacity
+    relative to Sinkhorn (Section~\ref{sec:experiments_ode}), proving that
+    collapse-free dynamics support diverse specialization topology.
+  \item \textbf{$\varepsilon$-DP compatibility (Lemma~\ref{lem:residual_sensitivity}).}
+    Residual injection at strength $\alpha$ reduces the $\ell_2$ sensitivity from $2r$
+    to $2(1-\alpha)r$, cutting required DP noise by a factor $(1-\alpha)$.  Stability and
+    privacy are synergistic.
+\end{enumerate}
+
+\paragraph{Organization.}
+Section~\ref{sec:related} surveys related work.
+Section~\ref{sec:method} develops the mathematical framework.
+Section~\ref{sec:experiments} presents empirical results.
+Section~\ref{sec:conclusion} concludes.
+All proofs are deferred to Appendix~\ref{app:proof_main}.

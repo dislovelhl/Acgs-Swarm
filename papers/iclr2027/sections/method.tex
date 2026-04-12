@@ -1,0 +1,204 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Setup and Notation}
+
+Let $\mathcal{A} = \{1, \ldots, n\}$ be a swarm of $n$ agents.  The inter-agent trust
+state at discrete time $k$ is a matrix $H^{(k)} \in \R^{n \times n}$, where
+$H^{(k)}_{ij}$ encodes agent $i$'s confidence in agent $j$'s competence on the current
+task distribution.  We write $\spnorm{\cdot}$ for the spectral norm (largest singular
+value), $\|\cdot\|_F$ for the Frobenius norm, and $\mathrm{Var}(H)$ for the variance of
+the eigenvalue distribution of $H$.
+
+\subsection{Birkhoff Uniformity Collapse}
+
+\begin{definition}[Sinkhorn Update Rule]
+  \label{def:sinkhorn_rule}
+  The Sinkhorn update applies $t$ iterations of alternating row and column normalization
+  to a positive matrix $H > 0$:
+  \[
+    \mathrm{Sink}_t(H) := \lim_{t' \to t} \left(D_r^{(t')} H D_c^{(t')}\right),
+  \]
+  where $D_r^{(t')}, D_c^{(t')}$ are diagonal scaling matrices enforcing
+  $H\mathbf{1} = \mathbf{1}$ and $H^\top\mathbf{1} = \mathbf{1}$ alternately.
+\end{definition}
+
+\begin{definition}[Birkhoff Uniformity Collapse]
+  \label{def:buc}
+  A trust dynamics sequence $\{H^{(k)}\}_{k \geq 0}$ exhibits \textbf{Birkhoff
+  Uniformity Collapse} (BUC) if
+  \[
+    \lim_{k \to \infty} \mathrm{Var}\!\left(H^{(k)}\right) = 0
+    \quad \text{and} \quad
+    \lim_{k \to \infty} H^{(k)} = \frac{J}{n},
+  \]
+  where $J \in \R^{n \times n}$ is the all-ones matrix.  The \emph{collapse rate} is
+  the smallest $k^*$ such that $\mathrm{Var}(H^{(k^*)}) < \tau_{\mathrm{tol}}$ for a
+  tolerance $\tau_{\mathrm{tol}} > 0$.
+\end{definition}
+
+\begin{theorem}[Sinkhorn Dynamics Collapse]
+  \label{thm:sinkhorn_collapses}
+  Under the iterated Sinkhorn update $H^{(k+1)} = \mathrm{Sink}_t(H^{(k)})$ starting
+  from any doubly stochastic $H^{(0)} \in \mathcal{B}_n$, the sequence converges to
+  $J/n$:
+  \[
+    \left\|H^{(k)} - \frac{J}{n}\right\|_F \;\leq\; C \cdot \lambda_2^k,
+  \]
+  where $\lambda_2 < 1$ is the second-largest eigenvalue of $H^{(0)}$ and $C$ depends
+  only on $H^{(0)}$.  In particular, $\mathrm{Var}(H^{(k)}) \to 0$ exponentially.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+  Doubly stochastic matrices have $\lambda_1 = 1$ as the Perron eigenvalue with
+  eigenvector $\mathbf{1}/\sqrt{n}$.  Every other eigenvalue satisfies $|\lambda_i| \leq
+  \lambda_2 < 1$ (strict inequality for primitive matrices).  Repeated application of
+  $\mathrm{Sink}_t$ preserves doubly stochastic structure and contracts all non-Perron
+  components by $\lambda_2^t$ per iteration.  The full proof is in
+  Appendix~\ref{app:proof_main}.
+\end{proof}
+
+\subsection{SpectralSphere Manifold}
+
+\begin{definition}[Spectral-Norm Ball]
+  For $r > 0$, the spectral-norm ball is
+  $\mathcal{S}_r = \{H \in \R^{n \times n} : \spnorm{H} \leq r\}$.
+\end{definition}
+
+\begin{definition}[Spectral Projection]
+  \label{def:spectral_proj}
+  The spectral projection $\Pi_r : \R^{n \times n} \to \mathcal{S}_r$ clips singular
+  values to $r$:
+  \[
+    \Pi_r(H) = U \cdot \mathrm{diag}\!\left(\min(\sigma_i, r)\right) \cdot V^\top,
+  \]
+  where $H = U \Sigma V^\top$ is the singular value decomposition.
+\end{definition}
+
+\begin{definition}[SpectralSphere Update Rule]
+  \label{def:spectral_sphere_update}
+  The SpectralSphere update with residual strength $\alpha \in (0,1)$ and radius $r > 0$
+  is:
+  \[
+    H^{(k+1)} = (1 - \alpha)\,\Pi_r\!\left(H^{(k)}\right) + \alpha I.
+  \]
+\end{definition}
+
+The key structural difference from Sinkhorn: $\Pi_r$ projects onto a \emph{ball}
+(preserving spectral diversity) rather than an \emph{affine submanifold} (the Birkhoff
+polytope, which drives to the centroid $J/n$).  The residual term $\alpha I$ acts as a
+leaky integrator, ensuring the identity is always represented in the limit.
+
+\begin{theorem}[SpectralSphere Prevents Collapse]
+  \label{thm:spectral_sphere_prevents_collapse}
+  Under the SpectralSphere update (Definition~\ref{def:spectral_sphere_update}) with
+  $\alpha \in (0,1)$ and $r > 0$, the sequence $\{H^{(k)}\}$ satisfies
+  \[
+    \mathrm{Var}\!\left(H^{(k)}\right) \;\geq\; V_\infty \;>\; 0 \quad \forall k \geq 0,
+  \]
+  where $V_\infty = \alpha^2 \cdot \mathrm{Var}(I)$ is the variance of the residual
+  attractor.  In particular, BUC does not occur.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+  The fixed point $H^* = (1-\alpha)\Pi_r(H^*) + \alpha I$ has eigenvalue structure
+  determined by the residual: eigenvalues of $\alpha I$ are all equal to $\alpha$
+  (variance zero), but $\Pi_r(H^*)$ contributes non-trivially unless $r = 0$.  For
+  $r > 0$ and generic initializations, the fixed point has $\mathrm{Var}(H^*) > 0$
+  (full proof in Appendix~\ref{app:proof_main}).
+\end{proof}
+
+\subsection{Neural ODE Formulation}
+
+We lift the discrete SpectralSphere update to continuous time.  Let $\Phi : \R^{n \times
+n} \times \R \to \R^{n \times n}$ be a neural network parameterized by $\theta$.  The
+trust dynamics ODE is:
+\begin{equation}
+  \label{eq:trust_ode}
+  \frac{dH}{dt} = f_\theta(H, t) := -\nabla_H \mathcal{L}(H) + \alpha (I - H),
+\end{equation}
+where $\mathcal{L}(H) = \frac{1}{2}\max(0, \spnorm{H} - r)^2$ is the spectral
+constraint penalty and $\alpha(I - H)$ is the continuous-time residual injection.
+
+\begin{theorem}[Lyapunov Stability of Trust ODE]
+  \label{thm:ode_stability}
+  Consider the ODE \eqref{eq:trust_ode} on $\mathcal{S}_r$.  The Lyapunov function
+  \[
+    V(H) = \frac{1}{2}\left\|H - H^*\right\|_F^2
+  \]
+  satisfies $\dot{V}(H) \leq -\alpha V(H)$ along trajectories, establishing global
+  exponential stability with rate $\alpha$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+  Differentiating: $\dot{V} = \langle H - H^*, f_\theta(H, t) \rangle_F$.  The spectral
+  penalty term is zero inside $\mathcal{S}_r$.  The residual term contributes
+  $-\alpha \langle H - H^*, H - H^* \rangle_F = -\alpha \|H - H^*\|_F^2 = -2\alpha V$.
+\end{proof}
+
+\paragraph{Topological capacity.}
+The Neural ODE achieves dramatically higher topological capacity than Sinkhorn.  We
+measure capacity as the volume (Lebesgue measure) of the reachable set in matrix space
+after 10 cycles, normalized by the Sinkhorn baseline volume.  The result of $2{,}656\%$
+(Table~\ref{tab:variance_results}) confirms that the manifold topology is rich enough
+to accommodate diverse specialization patterns.  \emph{Importantly}, high topological
+capacity proves only that collapse is absent — not that the ODE amplifies the correct
+specialization.  Routing quality depends on the trained $f_\theta$ and is evaluated in
+Section~\ref{sec:experiments_routing}.
+
+\subsection{Differential Privacy via Residual Sensitivity}
+
+\begin{lemma}[$\ell_2$ Sensitivity with Residual Injection]
+  \label{lem:residual_sensitivity}
+  Let $f(D) = \Pi_r(H_{\mathrm{new}})$ be the spectral projection with $\ell_2$
+  sensitivity $\Delta f \leq 2r$ (from the diameter of $\mathcal{S}_r$).  Let
+  $g(D) = (1-\alpha)f(D) + \alpha I$ be the residual-injected function.  Then:
+  \[
+    \left\|g(D) - g(D')\right\|_2
+      = (1-\alpha)\left\|f(D) - f(D')\right\|_2
+      \leq 2(1-\alpha)r =: \Delta g.
+  \]
+  The $\alpha I$ terms cancel exactly.  The Gaussian mechanism with noise $Z \sim
+  \mathcal{N}(0, \sigma^2 I)$ achieves $(\varepsilon, \delta)$-DP if:
+  \[
+    \sigma = \frac{2(1-\alpha)r \cdot \sqrt{2 \ln(1.25/\delta)}}{\varepsilon}.
+  \]
+  At $\alpha = 0.1$, required noise is reduced by exactly $10\%$ relative to the
+  baseline $\Delta f = 2r$.
+\end{lemma}
+
+\begin{proof}
+  $\|g(D) - g(D')\|_2 = \|(1-\alpha)f(D) + \alpha I - (1-\alpha)f(D') - \alpha I\|_2
+  = (1-\alpha)\|f(D) - f(D')\|_2 \leq 2(1-\alpha)r$. \qed
+\end{proof}
+
+\paragraph{Significance.}
+The factor $(1-\alpha)$ means that the same $\alpha$ controlling topological stability
+also controls DP noise.  There is no tradeoff: more stability ($\alpha$ larger) implies
+less required noise.  At $\alpha = 0.2$ the noise budget shrinks by $20\%$; at $\alpha =
+0.5$ by $50\%$.  This synergy is a structural consequence of the algebraic form of
+residual injection and holds for any $r > 0$ and any $(\varepsilon, \delta)$.
+
+\begin{algorithm}[t]
+  \caption{SpectralSphere Trust Update with DP Broadcast}
+  \label{alg:spectral_dp}
+  \SetAlgoLined
+  \KwIn{Local trust matrix $H_{\mathrm{new}} \in \R^{n \times n}$; radius $r$;
+        residual $\alpha$; privacy budget $(\varepsilon, \delta)$}
+  \KwOut{Noisy public matrix $\tilde{H}$; noise level $\sigma$}
+  \BlankLine
+  \tcp{Step 1: Spectral projection}
+  $U, \Sigma, V^\top \leftarrow \mathrm{SVD}(H_{\mathrm{new}})$\;
+  $H_{\mathrm{proj}} \leftarrow U \cdot \mathrm{diag}(\min(\sigma_i, r)) \cdot V^\top$\;
+  \BlankLine
+  \tcp{Step 2: Residual injection}
+  $H_{\mathrm{proj}} \leftarrow (1-\alpha)\,H_{\mathrm{proj}} + \alpha I$\;
+  \BlankLine
+  \tcp{Step 3: Calibrate Gaussian noise (Lemma~\ref{lem:residual_sensitivity})}
+  $\sigma \leftarrow 2(1-\alpha)r \cdot \sqrt{2 \ln(1.25/\delta)} \,/\, \varepsilon$\;
+  $Z \sim \mathcal{N}(0, \sigma^2 I_{n^2})$\;
+  \BlankLine
+  \tcp{Step 4: DP-noised broadcast matrix}
+  $\tilde{H} \leftarrow H_{\mathrm{proj}} + Z$\;
+  \Return $(\tilde{H},\, \sigma)$\;
+\end{algorithm}

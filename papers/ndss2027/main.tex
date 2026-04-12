@@ -1,0 +1,127 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc, fit, backgrounds}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{subcaption}
+\usepackage{cite}
+
+% Theorem environments (IEEEtran compatible)
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{remark}[theorem]{Remark}
+\newtheorem{claim}[theorem]{Claim}
+
+% Notation macros
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\spnorm}[1]{\left\|#1\right\|_2}
+\newcommand{\negl}{\mathrm{negl}}
+\newcommand{\Adv}{\mathcal{A}}
+\newcommand{\MCid}{\mathtt{CID}}
+\newcommand{\maci}{\textsc{MACI}}
+\newcommand{\fedsink}{\textsc{FedSink-MACI}}
+\newcommand{\constitutionalhash}{\texttt{608508a9bd224290}}
+
+\title{Byzantine-Resilient Federated Governance via\\
+Merkle-CRDT Gossip with $\varepsilon$-Differential Privacy}
+
+\author{%
+  \IEEEauthorblockN{Authors omitted for blind review}
+  \IEEEauthorblockA{%
+    Submission to NDSS 2027 \\
+    Track: Network and Distributed System Security
+  }
+}
+
+\begin{document}
+
+\maketitle
+
+\input{sections/abstract}
+
+\input{sections/introduction}
+
+\input{sections/protocol}
+
+\input{sections/security_analysis}
+
+\input{sections/evaluation}
+
+\input{sections/conclusion}
+
+\bibliography{references}
+\bibliographystyle{IEEEtran}
+
+\appendix
+
+\section{Full Protocol Pseudocode}
+\label{app:pseudocode}
+
+Algorithm~\ref{alg:full_fedsink_maci} presents the complete
+\fedsink{} protocol including all seven steps described in
+Section~\ref{sec:protocol}.
+
+\begin{algorithm}[h]
+  \caption{\fedsink{}: Full Node Protocol}
+  \label{alg:full_fedsink_maci}
+  \SetAlgoLined
+  \SetKwInOut{Input}{Input}
+  \SetKwInOut{Output}{Output}
+  \Input{Local activations $D_i$; radius $r$; residual $\alpha$;
+         privacy budget $(\eps, \delta)$; VRF key $\mathsf{vk}_i$}
+  \Output{Broadcast tuple $(\MCid, \tilde{H}, \pi)$}
+
+  $H_{\mathrm{new}} \leftarrow \phi(D_i)$ \tcp*{Local trust computation}
+  $H_{\mathrm{proj}} \leftarrow \Pi_r(H_{\mathrm{new}})$ \tcp*{Spectral projection}
+  $H_{\mathrm{proj}} \leftarrow (1-\alpha)H_{\mathrm{proj}} + \alpha I$
+    \tcp*{Residual injection}
+  $\sigma \leftarrow 2(1-\alpha)r\sqrt{2\ln(1.25/\delta)}/\eps$ \tcp*{Lemma~\ref{lem:sensitivity}}
+  $Z \sim \mathcal{N}(0, \sigma^2 I)$ \tcp*{DP noise}
+  $\tilde{H} \leftarrow H_{\mathrm{proj}} + Z$\;
+  $\pi \leftarrow \mathsf{Prove}(H_{\mathrm{new}}, H_{\mathrm{proj}}, Z, \mathsf{vk}_i)$
+    \tcp*{zk-SNARK}
+  $\MCid \leftarrow \mathsf{CID}(\tilde{H})$ \tcp*{Content-addressed ID}
+  \Return $(\MCid, \tilde{H}, \pi)$\;
+\end{algorithm}
+
+\section{Security Proof Sketches}
+\label{app:security_proofs}
+
+\subsection{Proof of Theorem~\ref{thm:cid_integrity}}
+The CID uniquely identifies $\tilde{H}$ via a collision-resistant hash.  A Byzantine
+node $\mathcal{B}$ that modifies $\tilde{H}$ to $\tilde{H}'$ must produce a valid proof
+$\pi'$ for the modified matrix.  Since the zk-SNARK is sound (proof-of-knowledge
+property), $\mathcal{B}$ must know a valid witness $(H_{\mathrm{proj}}, Z)$ satisfying
+the circuit constraints.  Modifying $\tilde{H}$ invalidates the circuit equation
+$\tilde{H} = H_{\mathrm{proj}} + Z$, so no valid $\pi'$ exists unless $\mathcal{B}$
+also modifies the committed inputs — which changes the CID.  Honest replicas reject
+any tuple with mismatched CID.
+
+\subsection{Proof of Theorem~\ref{thm:eec}}
+The CRDT merge function is commutative, associative, and idempotent.  Therefore, the
+partial order on CRDTs has a unique least upper bound.  Under the gossip protocol, every
+honest node eventually receives every valid tuple (liveness of gossip
+\cite{eugster2004epidemic}).  Byzantine nodes can inject invalid tuples, but these are
+rejected by all honest nodes (Theorem~\ref{thm:cid_integrity}).  Therefore, the set of
+accepted tuples at every honest node converges to the same set: the set of all valid
+honest-generated tuples.  Convergence time follows the gossip mixing time, which is
+$O(\log N)$ rounds for a random regular graph \cite{levin2009markov}.
+
+\end{document}

@@ -1,0 +1,149 @@
+\section{The \fedsink{} Protocol}
+\label{sec:protocol}
+
+\subsection{System Model}
+
+Let $\mathcal{N} = \{1, \ldots, N\}$ be a set of $N$ agents communicating over an
+asynchronous peer-to-peer network.  Each agent $i \in \mathcal{N}$ has:
+\begin{itemize}
+  \item A local dataset $D_i$ (activations, task history, capability embeddings).
+  \item A local trust computation function $\phi_i : D_i \to \R^{n \times n}$ producing
+    a raw routing matrix $H_{\mathrm{new}}$.
+  \item A VRF key pair $(\mathsf{sk}_i, \mathsf{vk}_i)$ for verifiable randomness.
+  \item A zk-SNARK proving key $\mathsf{pk}$ (shared, from a trusted setup).
+\end{itemize}
+
+Up to $f = \lfloor N/3 \rfloor$ agents may be \emph{Byzantine}: they deviate
+arbitrarily from the protocol.  Remaining agents are \emph{honest}: they follow the
+protocol specification exactly.
+
+\subsection{Threat Model}
+
+\paragraph{Honest-but-curious peers.}
+These agents read Merkle-CRDT entries to update their local governance state and attempt
+to infer private data (activations, prompts, constitutional threat models) of other agents
+from the broadcast routing matrices.  Defense: Gaussian $\varepsilon$-DP noise.
+
+\paragraph{Byzantine / colluding nodes.}
+These agents attempt to inject forged trust updates to redirect high-value tasks toward
+controlled executors (Sybil routing attack) or to corrupt the shared CRDT state.
+Defense: zk-SNARK proof verification + CID integrity checking.
+
+\paragraph{Out of scope (v1).}
+Timing side-channels, traffic analysis, compromised VRF oracles.
+
+\subsection{Cryptographic Primitives}
+
+\begin{definition}[Content Identifier]
+  The content identifier $\MCid(\tilde{H}) = \mathsf{H}_{\mathrm{CR}}(\tilde{H})$ is
+  computed by a collision-resistant hash function $\mathsf{H}_{\mathrm{CR}}$ (e.g., SHA3-256).
+\end{definition}
+
+\begin{definition}[Merkle-CRDT]
+  A Merkle-CRDT is a conflict-free replicated data type (CRDT) \cite{shapiro2011crdt}
+  augmented with a Merkle-DAG structure: each state update is a content-addressed block
+  referencing its causal predecessors.  The merge function is commutative, associative,
+  and idempotent (CAI).  Byzantine fault tolerance is achieved by requiring valid
+  zk-SNARK proofs for all accepted entries \cite{kleppmann2022crdt}.
+\end{definition}
+
+\begin{definition}[zk-SNARK for \fedsink{}]
+  \label{def:zksnark_circuit}
+  The zk-SNARK proof $\pi$ for a broadcast tuple $(\MCid, \tilde{H}, \pi)$ asserts
+  the following circuit statement:
+  \[
+    \exists\, H_{\mathrm{proj}},\, Z \;\text{ s.t. }\;
+    \begin{cases}
+      \spnorm{H_{\mathrm{proj}}} \leq r \\
+      \tilde{H} = (1-\alpha)H_{\mathrm{proj}} + \alpha I + Z \\
+      Z \sim \mathcal{N}(0, \sigma^2 I) \text{ via VRF}
+    \end{cases}
+  \]
+  Soundness: no PPT prover can produce an accepting proof for a false statement
+  (except with negligible probability).
+  Zero-knowledge: the proof reveals nothing about $H_{\mathrm{proj}}$ or $Z$ beyond
+  the circuit statement.
+\end{definition}
+
+\subsection{Seven-Step Protocol Execution}
+
+The \fedsink{} protocol consists of seven steps executed by each honest agent $i$
+at each governance round.
+
+\paragraph{Step 1 — Local trust computation.}
+Agent $i$ computes $H_{\mathrm{new}} \leftarrow \phi_i(D_i)$ from local data.
+$H_{\mathrm{new}}$ is never broadcast.
+
+\paragraph{Step 2 — Spectral projection.}
+\begin{equation}
+  \label{eq:spectral_proj}
+  H_{\mathrm{proj}} \leftarrow \Pi_r(H_{\mathrm{new}}) = U\,\mathrm{diag}(\min(\sigma_j, r))\,V^\top,
+\end{equation}
+where $H_{\mathrm{new}} = U\Sigma V^\top$ is the SVD.  This enforces
+$\spnorm{H_{\mathrm{proj}}} \leq r$ and prevents Birkhoff Uniformity Collapse
+\cite{mcfs_iclr2027}.
+
+\paragraph{Step 3 — Residual injection.}
+\begin{equation}
+  \label{eq:residual}
+  H_{\mathrm{proj}} \leftarrow (1-\alpha)\,H_{\mathrm{proj}} + \alpha I,
+  \quad \alpha = 0.1.
+\end{equation}
+This provides topological stability (Section~\ref{sec:security}) and tightens the DP
+sensitivity by factor $(1-\alpha)$ (Lemma~\ref{lem:sensitivity}).
+
+\paragraph{Step 4 — DP noise addition.}
+Calibrate $\sigma$ to Lemma~\ref{lem:sensitivity}:
+\begin{equation}
+  \label{eq:sigma}
+  \sigma = \frac{2(1-\alpha)r \cdot \sqrt{2\ln(1.25/\delta)}}{\varepsilon}.
+\end{equation}
+Sample $Z \sim \mathcal{N}(0, \sigma^2 I_{n^2})$ using VRF-seeded randomness and
+compute the noisy matrix:
+\begin{equation}
+  \label{eq:noisy_matrix}
+  \tilde{H} \leftarrow H_{\mathrm{proj}} + Z.
+\end{equation}
+
+\paragraph{Step 5 — zk-SNARK proof generation.}
+Agent $i$ generates proof $\pi \leftarrow \mathsf{Prove}(\mathsf{pk},\,
+H_{\mathrm{new}},\, H_{\mathrm{proj}},\, Z,\, \mathsf{vk}_i)$ asserting the circuit
+statement of Definition~\ref{def:zksnark_circuit}.  The proof is non-interactive and
+publicly verifiable.
+
+\paragraph{Step 6 — Merkle-CRDT broadcast.}
+Compute $\MCid \leftarrow \mathsf{CID}(\tilde{H})$ and append the tuple
+$(\MCid,\, \tilde{H},\, \pi)$ to the Merkle-CRDT.  The CRDT records the causal
+predecessors of this update (Merkle-DAG links).
+
+\paragraph{Step 7 — Peer verification and gossip.}
+When agent $j \neq i$ receives $(\MCid,\, \tilde{H},\, \pi)$:
+\begin{enumerate}
+  \item Verify $\MCid = \mathsf{CID}(\tilde{H})$.  If false, \textbf{reject}.
+  \item Verify $\mathsf{Verify}(\mathsf{vk},\, \tilde{H},\, \pi) = 1$.
+    If false, \textbf{reject}.
+  \item If both checks pass, \textbf{accept}: merge into local CRDT state and
+    gossip to peers.
+\end{enumerate}
+Invalid proofs are never forwarded (no gossip amplification of Byzantine messages).
+
+\subsection{Privacy Composition under Multiple Rounds}
+
+If agent $i$ broadcasts $k$ updates per session, the composed privacy cost under
+standard composition is approximately $(\varepsilon\sqrt{2k\ln(1/\delta)},\, k\delta)$.
+Under advanced composition (the moments accountant \cite{abadi2016moments}), tighter
+budgets are achievable.  We recommend allocating $\varepsilon_{\mathrm{session}}$ at
+session start and tracking consumption per round.
+
+\subsection{Impact on Swarm ODE Dynamics}
+
+Because $Z$ has zero mean ($\mathbb{E}[Z] = 0$), the macroscopic mean-field dynamics
+are unaffected:
+\begin{equation}
+  \frac{d\bar{H}}{dt} = f_\theta(\bar{H},\, t) + \mathbb{E}[Z(t)] = f_\theta(\bar{H},\, t).
+\end{equation}
+The noise term acts as Langevin dynamics: at high $\sigma$ (tight privacy), the swarm
+explores the trust manifold stochastically; at low $\sigma$ (loose privacy), it converges
+deterministically.  For $\sigma \leq r/\sqrt{n}$, the expected spectral norm of the noise
+satisfies $\mathbb{E}[\spnorm{Z}] \approx \sigma\sqrt{n} \leq r$, so the perturbation
+remains within the spectral ball.

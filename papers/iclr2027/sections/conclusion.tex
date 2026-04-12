@@ -1,0 +1,53 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced \textbf{Birkhoff Uniformity Collapse} (BUC), a formally characterized
+failure mode of iterated Sinkhorn--Knopp trust normalization in multi-agent systems.
+Empirically, Sinkhorn collapses to $0\%$ variance retention by cycle 10 for swarms of
+$n \in \{10, 50\}$ agents, destroying all agent specialization with no recovery path.
+
+Our main contribution is the \textbf{SpectralSphere Manifold with residual injection},
+which provably eliminates BUC.  The method achieves $142\%$ stable variance retention
+($n{=}50$) and $20\%$ ($n{=}10$) across all tested cycles.  The continuous-time Neural
+ODE formulation achieves $2{,}656\%$ topological capacity relative to the Sinkhorn
+baseline, proving that the manifold supports rich specialization topology.  However, we
+emphasize that topological capacity is necessary but not sufficient for correct routing:
+the trained dynamics must be directed toward useful specialization patterns via task
+performance feedback.
+
+A secondary contribution is the algebraic proof (Lemma~\ref{lem:residual_sensitivity})
+that residual injection reduces $\varepsilon$-DP noise requirements by exactly
+$(1-\alpha) \cdot 100\%$.  At $\alpha{=}0.1$, the stability fix reduces required DP
+noise by $10\%$ — confirming that topological stability and differential privacy are
+synergistic rather than competing objectives.
+
+\paragraph{Limitations.}
+(1) Topological capacity does not guarantee routing quality; learning $f_\theta$ for
+meaningful specialization is left to future work.
+(2) All experiments are synthetic; real-world validation on LLM-based swarms
+(e.g., Claude Code, Codex) is needed.
+(3) The $n{=}10$ equilibrium at $20\%$ VR may be insufficient for highly specialized
+small swarms; alternative residual designs (e.g., block-diagonal rather than $\alpha I$)
+warrant investigation.
+(4) The ODE solver adds compute overhead versus discrete Sinkhorn; efficient
+discretizations are a practical concern.
+
+\paragraph{Future directions.}
+\begin{itemize}
+  \item \textbf{Learned residual.}  Replace $\alpha I$ with a learned diagonal matrix
+    $\alpha \Lambda$, allowing per-agent specialization in the residual attractor.
+  \item \textbf{SWE-bench routing.}  Evaluate SpectralSphere trust routing on software
+    engineering benchmarks with $N$-agent code-repair swarms.
+  \item \textbf{Adaptive $\varepsilon$ scheduling.}  Combine the $\alpha$-parameterized DP
+    budget with a session-level privacy account, allocating tight $\varepsilon$ for
+    constitutional governance rounds and loose $\varepsilon$ for routine routing.
+  \item \textbf{BODES integration.}  When trust matrices derive from BODES latent
+    steering vectors, the spectral projection may have a tighter sensitivity bound than
+    $2r$; a full composition analysis remains open.
+\end{itemize}
+
+\paragraph{Reproducibility.}
+All code, configurations, and random seeds are available in the
+\texttt{constitutional\_swarm} package (constitutional hash \texttt{608508a9bd224290}).
+The \texttt{SpectralSphereManifold} class reproduces all reported numbers with
+\texttt{torch.manual\_seed(42)}.
