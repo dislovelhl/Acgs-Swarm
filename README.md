@@ -52,23 +52,42 @@ dna = AgentDNA.default(agent_id="worker-1")  # permissive defaults
 Compile a goal into a `TaskDAG`. Agents self-select ready tasks by capability — no orchestrator.
 
 ```python
-from constitutional_swarm import DAGCompiler, GoalSpec, SwarmExecutor, CapabilityRegistry
+from constitutional_swarm import (
+    DAGCompiler, GoalSpec, SwarmExecutor, CapabilityRegistry, ArtifactStore, Artifact,
+)
+import uuid, time
 
 spec = GoalSpec(
     goal="Analyse and summarise quarterly reports",
-    subtasks=[
-        {"title": "fetch-reports", "domain": "data", "required_capabilities": ["fetch"]},
+    domains=["data", "analytics", "writing"],
+    steps=[
+        {"title": "fetch-reports", "domain": "data",      "required_capabilities": ["fetch"]},
         {"title": "analyse",       "domain": "analytics", "required_capabilities": ["analyse"],
          "depends_on": ["fetch-reports"]},
-        {"title": "summarise",     "domain": "writing", "required_capabilities": ["write"],
+        {"title": "summarise",     "domain": "writing",   "required_capabilities": ["write"],
          "depends_on": ["analyse"]},
     ],
 )
 
 dag = DAGCompiler().compile(spec)
 registry = CapabilityRegistry()
-executor = SwarmExecutor(registry=registry)
-results = executor.run(dag)
+store = ArtifactStore()
+executor = SwarmExecutor(registry, store)
+executor.load_dag(dag)
+
+# Agents self-select and execute tasks
+agent_id = "worker-1"
+for task in executor.available_tasks(agent_id):
+    receipt = executor.claim(task.node_id, agent_id)
+    artifact = Artifact(
+        artifact_id=uuid.uuid4().hex,
+        task_id=receipt.task_id,
+        agent_id=agent_id,
+        content_type="text/plain",
+        content=f"completed: {receipt.title}",
+        domain=receipt.domain,
+    )
+    executor.submit(receipt.task_id, artifact)
 ```
 
 ### Pattern C — Constitutional Mesh (Byzantine-tolerant peer validation)
@@ -150,7 +169,7 @@ print(result.converged, result.spectral_bound)  # True, ≤1.0
 
 # Or use the stateful GovernanceManifold (tracks interaction history)
 manifold = GovernanceManifold(num_agents=3)
-manifold.record_interaction(producer=0, validator=1, trust=0.8)
+manifold.update_trust(from_agent=0, to_agent=1, delta=0.8)
 projection = manifold.project()
 ```
 

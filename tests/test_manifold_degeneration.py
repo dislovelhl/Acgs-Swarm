@@ -42,6 +42,7 @@ def _trust_variance(m: GovernanceManifold) -> float:
     return total_var / (n * n)
 
 
+@pytest.mark.research
 @pytest.mark.xfail(
     strict=True,
     reason=(

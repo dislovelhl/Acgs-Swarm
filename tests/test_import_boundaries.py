@@ -29,7 +29,7 @@ def _iter_imports(path: Path) -> list[str]:
 
 def test_runtime_source_avoids_forbidden_cross_package_imports() -> None:
     offenders: list[str] = []
-    for path in sorted(SOURCE_ROOT.glob("*.py")):
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
         for module in _iter_imports(path):
             if any(
                 module == prefix.rstrip(".") or module.startswith(prefix)

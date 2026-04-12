@@ -35,5 +35,6 @@ pythonpath = ["src"]
 markers = [
   "slow: marks tests as slow (800+ agent scale)",
   "integration: marks cross-package integration tests",
-  "contract: marks stable cross-package contract tests"
+  "contract: marks stable cross-package contract tests",
+  "research: marks empirical research proof tests (expected to fail; excluded from release gating)"
 ]
