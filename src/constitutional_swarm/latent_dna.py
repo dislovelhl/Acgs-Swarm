@@ -403,3 +403,101 @@ class LatentDNAWrapper:
         v_viol = unsafe_mean - safe_mean
         v_viol = v_viol / v_viol.norm()
         return v_viol
+
+    @staticmethod
+    def extract_violation_vector_pca(
+        model: PreTrainedModel,
+        safe_inputs: list[dict[str, Tensor]],
+        unsafe_inputs: list[dict[str, Tensor]],
+        layer_idx: int,
+        *,
+        layer_attr_path: str | None = None,
+        n_components: int = 1,
+    ) -> Tensor:
+        """Extract violation vector via Contrastive PCA (Zou et al. 2025 RepE).
+
+        Computes paired differences between unsafe and safe activations, centers
+        them, then returns the first principal component via SVD. This isolates
+        the pure "constitutional violation" axis while filtering out entangled
+        semantic noise that mean-difference captures.
+
+        Requires paired inputs: safe_inputs[i] and unsafe_inputs[i] must be
+        contrastive versions of the same prompt (e.g., same question, one
+        answered safely and one unconstitutionally).
+
+        For n_components > 1, returns a [n_components, hidden_dim] matrix.
+        The first row is the primary violation direction. Additional rows
+        capture secondary violation modes (e.g., different violation types).
+
+        Args:
+            model: The model to probe.
+            safe_inputs: List of tokenized safe inputs (output of tokenizer).
+                Must be the same length as unsafe_inputs (paired).
+            unsafe_inputs: List of tokenized unsafe inputs (paired with safe).
+            layer_idx: Layer to extract activations from.
+            layer_attr_path: If None, auto-detected from model type.
+            n_components: Number of principal components to return. Default 1.
+
+        Returns:
+            If n_components == 1: unit-normalized vector [hidden_dim].
+            If n_components > 1: matrix [n_components, hidden_dim], rows normalized.
+        """
+        if len(safe_inputs) != len(unsafe_inputs):
+            raise ValueError(
+                f"Contrastive PCA requires paired inputs: "
+                f"{len(safe_inputs)} safe vs {len(unsafe_inputs)} unsafe"
+            )
+        if len(safe_inputs) < 2:
+            raise ValueError(
+                "Contrastive PCA requires at least 2 pairs. "
+                "For single pair, use extract_violation_vector (mean-difference)."
+            )
+
+        if layer_attr_path is None:
+            path = LatentDNAWrapper._auto_detect_path(model)
+        else:
+            path = layer_attr_path
+        target_layer = LatentDNAWrapper._resolve_layer(model, path, layer_idx)
+
+        activations: list[Tensor] = []
+
+        def _capture_hook(
+            module: nn.Module, input: tuple[Any, ...], output: Any
+        ) -> None:
+            h = output[0] if isinstance(output, tuple) else output
+            activations.append(h.mean(dim=1).detach().cpu())
+
+        handle = target_layer.register_forward_hook(_capture_hook)
+        try:
+            model.eval()
+            with torch.no_grad():
+                safe_acts = []
+                for inp in safe_inputs:
+                    activations.clear()
+                    model(**inp)
+                    safe_acts.append(activations[0])
+
+                unsafe_acts = []
+                for inp in unsafe_inputs:
+                    activations.clear()
+                    model(**inp)
+                    unsafe_acts.append(activations[0])
+        finally:
+            handle.remove()
+
+        safe_cat = torch.cat(safe_acts, dim=0)     # [N, hidden_dim]
+        unsafe_cat = torch.cat(unsafe_acts, dim=0)  # [N, hidden_dim]
+
+        # Contrastive PCA: SVD on centered paired differences
+        diffs = unsafe_cat - safe_cat                              # [N, hidden_dim]
+        diffs_centered = diffs - diffs.mean(dim=0, keepdim=True)   # center
+        _U, _S, Vh = torch.linalg.svd(diffs_centered, full_matrices=False)
+
+        if n_components == 1:
+            v_viol = Vh[0]
+            return v_viol / v_viol.norm()
+
+        components = Vh[:n_components]  # [n_components, hidden_dim]
+        # Normalize each row
+        norms = components.norm(dim=1, keepdim=True)
+        return components / norms

@@ -297,3 +297,126 @@ def test_wrapper_explicit_layer_path() -> None:
     # Should not raise
     wrapper = LatentDNAWrapper(model, v, layer_idx=5, layer_attr_path="model.layers")
     assert not wrapper.enabled
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Contrastive PCA extraction tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _collect_activations(
+    model: _FakeModel, inputs: list[Tensor], layer_idx: int
+) -> Tensor:
+    """Helper: collect mean-pooled activations at a layer for a batch of inputs."""
+    target = model.model.layers[layer_idx]
+    acts: list[Tensor] = []
+
+    def _hook(mod: nn.Module, inp: tuple, out: tuple) -> None:
+        h = out[0] if isinstance(out, tuple) else out
+        acts.append(h.mean(dim=1).detach().cpu())
+
+    handle = target.register_forward_hook(_hook)
+    try:
+        model.eval()
+        with torch.no_grad():
+            for x in inputs:
+                acts.clear()
+                model(x)
+                # Only keep last
+    finally:
+        handle.remove()
+    return acts[-1] if acts else torch.empty(0)
+
+
+def test_pca_extracts_unit_vector() -> None:
+    """PCA extraction must return a unit-normalized 1D vector."""
+    from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+    hidden_dim = 64
+    model = _FakeModel(n_layers=24, hidden_dim=hidden_dim)
+    torch.manual_seed(99)
+
+    n_pairs = 10
+    # Simulate contrastive pairs: safe inputs are random, unsafe shift along a known direction
+    known_direction = torch.randn(hidden_dim)
+    known_direction = known_direction / known_direction.norm()
+
+    safe_inputs = [torch.randn(1, 4, hidden_dim) for _ in range(n_pairs)]
+    unsafe_inputs = [s + 5.0 * known_direction for s in safe_inputs]
+
+    # Wrap inputs as dicts with 'hidden_states' key — but our _FakeModel takes positional
+    # We need to use the actual wrapper infrastructure, so wrap as kwargs the model accepts
+    # The extract_violation_vector_pca calls model(**inp), so we need dict-like inputs.
+    # Our _FakeModel.forward takes hidden_states as positional. Wrap as dict.
+    safe_dicts = [{"hidden_states": s} for s in safe_inputs]
+    unsafe_dicts = [{"hidden_states": u} for u in unsafe_inputs]
+
+    v = LatentDNAWrapper.extract_violation_vector_pca(
+        model, safe_dicts, unsafe_dicts,
+        layer_idx=0,
+        layer_attr_path="model.layers",
+    )
+
+    assert v.dim() == 1
+    assert v.shape[0] == hidden_dim
+    norm = v.norm().item()
+    assert abs(norm - 1.0) < 1e-4, f"v_viol should be unit-normalized, got ‖v‖={norm}"
+
+
+def test_pca_multi_component() -> None:
+    """n_components > 1 must return [n_components, hidden_dim] matrix."""
+    from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+    hidden_dim = 64
+    model = _FakeModel(n_layers=24, hidden_dim=hidden_dim)
+    torch.manual_seed(42)
+
+    n_pairs = 20
+    safe_inputs = [torch.randn(1, 4, hidden_dim) for _ in range(n_pairs)]
+    unsafe_inputs = [s + torch.randn(1, 1, hidden_dim) for s in safe_inputs]
+
+    safe_dicts = [{"hidden_states": s} for s in safe_inputs]
+    unsafe_dicts = [{"hidden_states": u} for u in unsafe_inputs]
+
+    components = LatentDNAWrapper.extract_violation_vector_pca(
+        model, safe_dicts, unsafe_dicts,
+        layer_idx=0,
+        layer_attr_path="model.layers",
+        n_components=3,
+    )
+
+    assert components.shape == (3, hidden_dim)
+    # Each row should be unit-normalized
+    for i in range(3):
+        norm = components[i].norm().item()
+        assert abs(norm - 1.0) < 1e-4, f"Component {i} ‖v‖={norm}"
+
+
+def test_pca_rejects_unpaired_inputs() -> None:
+    """PCA must raise ValueError if safe and unsafe lists differ in length."""
+    from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+    model = _FakeModel()
+    with pytest.raises(ValueError, match="paired"):
+        LatentDNAWrapper.extract_violation_vector_pca(
+            model,
+            [{"hidden_states": torch.randn(1, 4, 64)}] * 5,
+            [{"hidden_states": torch.randn(1, 4, 64)}] * 3,
+            layer_idx=0,
+            layer_attr_path="model.layers",
+        )
+
+
+def test_pca_rejects_single_pair() -> None:
+    """PCA needs at least 2 pairs for meaningful variance computation."""
+    from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+    model = _FakeModel()
+    with pytest.raises(ValueError, match="at least 2"):
+        LatentDNAWrapper.extract_violation_vector_pca(
+            model,
+            [{"hidden_states": torch.randn(1, 4, 64)}],
+            [{"hidden_states": torch.randn(1, 4, 64)}],
+            layer_idx=0,
+            layer_attr_path="model.layers",
+        )
