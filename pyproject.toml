@@ -24,7 +24,10 @@ PyPI = "https://pypi.org/project/constitutional-swarm/"
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.4"]
 bittensor = ["bittensor>=7.0"]
 transport = ["websockets>=12.0"]
-latent = ["torch>=2.0", "transformers>=4.40"]
+# research: MCFS research stack (latent DNA steering, swarm ODE dynamics)
+research = ["torch>=2.0", "transformers>=4.40"]
+# deprecated alias — use research instead
+latent = ["constitutional-swarm[research]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

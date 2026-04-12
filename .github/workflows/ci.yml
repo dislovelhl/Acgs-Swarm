@@ -15,13 +15,14 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
+        extras: ["dev"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[${{ matrix.extras }}]"
       - name: Lint
         run: ruff check src/constitutional_swarm/
       - name: Test
@@ -32,6 +33,25 @@ jobs:
           python -m pytest tests/ \
             --import-mode=importlib \
             -m "not slow and not benchmark and not e2e and not research" \
+            -v --tb=short
+
+  test-research:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install with research extras
+        run: pip install -e ".[dev,research]"
+      - name: Test research stack
+        env:
+          OPENAI_API_KEY: test-key-for-unit-tests
+          ANTHROPIC_API_KEY: test-key-for-unit-tests
+        run: |
+          python -m pytest tests/ \
+            --import-mode=importlib \
+            -m "not slow and not benchmark and not e2e" \
             -v --tb=short
 
   package:

@@ -11,7 +11,14 @@
 ## Installation
 
 ```bash
+# Core install — no torch required
 pip install constitutional-swarm
+
+# With MCFS research stack (latent DNA steering, swarm ODE dynamics)
+pip install "constitutional-swarm[research]"
+
+# With WebSocket gossip transport
+pip install "constitutional-swarm[transport]"
 ```
 
 Requires Python 3.11+.
