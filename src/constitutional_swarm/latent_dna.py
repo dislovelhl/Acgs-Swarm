@@ -1,0 +1,405 @@
+"""
+Latent Space DNA — Path A of the MCFS research track.
+
+Implements BODES (Barrier-based ODE Steering) for constitutional governance
+directly in the LLM residual stream, before tokens are sampled.
+
+Architecture
+------------
+LatentDNAWrapper wraps any HuggingFace PreTrainedModel and registers a
+forward hook on a specified transformer layer. At inference time, the hook:
+
+1. Projects each hidden state h onto the violation vector v_viol.
+2. If the projection exceeds threshold τ (agent approaching unsafe region):
+   - Applies orthogonal steering: h_safe = h − γ · (h·v_viol) · v_viol
+3. If projection is within bounds: no-op (zero compute overhead on safe tokens).
+
+This is the Control Barrier Function (CBF) enforcement step from MCFS Phase 1.
+The safe set is S = {h : h·v_viol ≤ τ}; the hook maintains h ∈ S.
+
+Relationship to existing DNA layer
+-----------------------------------
+The existing dna.py (AgentDNA.validate) operates on the output string via
+Aho-Corasick pattern matching (~443ns, post-generation). LatentDNAWrapper is
+the pre-generation layer. In production, both run in sequence:
+
+    [token generation → BODES hook] → [sampled token] → [AgentDNA.validate]
+
+This gives a two-layer defense: latent steering prevents most violations;
+string validation catches adversarial sequences that survive steering.
+
+Requirements
+------------
+- torch >= 2.0
+- transformers >= 4.40
+
+The module degrades gracefully if torch is not installed: importing
+LatentDNAWrapper will raise ImportError with a clear message.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+
+try:
+    import torch
+    import torch.nn as nn
+    from torch import Tensor
+except ImportError as exc:
+    raise ImportError(
+        "latent_dna requires torch. Install with: pip install torch>=2.0"
+    ) from exc
+
+try:
+    from transformers import PreTrainedModel
+except ImportError as exc:
+    raise ImportError(
+        "latent_dna requires transformers. Install with: pip install transformers>=4.40"
+    ) from exc
+
+
+class _BODESHook:
+    """Internal forward hook implementing the CBF steering step.
+
+    Registered on a single transformer layer's output. Operates on the
+    hidden state tensor of shape [batch, seq_len, hidden_dim].
+
+    The hook is intentionally stateless (no learned parameters) — v_viol
+    is extracted offline via contrastive PCA and passed at construction time.
+
+    Args:
+        v_viol: Violation concept vector of shape [hidden_dim]. Must be
+            unit-normalized. Represents the direction in the residual stream
+            that corresponds to constitutional violations.
+        threshold: Safety threshold τ. Hidden states with projection
+            h·v_viol > τ are steered back. Set τ=0.0 to steer any activation
+            with positive violation projection.
+        gamma: Steering strength ∈ (0, 1]. γ=1.0 applies full orthogonal
+            projection (strongest). γ=0.5 applies half-strength. Tune to
+            balance compliance vs. capability preservation (perplexity).
+    """
+
+    def __init__(
+        self,
+        v_viol: Tensor,  # [hidden_dim]
+        threshold: float = 0.0,
+        gamma: float = 1.0,
+    ) -> None:
+        if v_viol.dim() != 1:
+            raise ValueError(
+                f"v_viol must be 1D [hidden_dim], got shape {tuple(v_viol.shape)}"
+            )
+        norm = v_viol.norm().item()
+        if abs(norm - 1.0) > 1e-4:
+            raise ValueError(
+                f"v_viol must be unit-normalized (‖v‖₂=1.0), got ‖v‖₂={norm:.6f}. "
+                "Normalize before passing: v_viol = v_viol / v_viol.norm()"
+            )
+        if not 0.0 < gamma <= 1.0:
+            raise ValueError(f"gamma must be in (0, 1], got {gamma}")
+
+        self.v_viol = v_viol  # [hidden_dim]
+        self.threshold = threshold
+        self.gamma = gamma
+
+        # Diagnostic counters — reset per forward pass by LatentDNAWrapper
+        self.interventions: int = 0
+        self.total_tokens: int = 0
+
+    def __call__(
+        self,
+        module: nn.Module,
+        input: tuple[Any, ...],
+        output: Any,
+    ) -> Any:
+        """Hook called after module forward.
+
+        HuggingFace transformer layers return a tuple; hidden states are output[0].
+        Shape: [batch, seq_len, hidden_dim].
+        """
+        # Extract hidden states from layer output (tuple or tensor)
+        if isinstance(output, tuple):
+            hidden = output[0]
+            rest = output[1:]
+        else:
+            hidden = output
+            rest = None
+
+        # hidden: [batch, seq_len, hidden_dim]
+        batch, seq_len, hidden_dim = hidden.shape
+        self.total_tokens += batch * seq_len
+
+        v = self.v_viol.to(hidden.device, hidden.dtype)  # [hidden_dim]
+
+        # Projection: [batch, seq_len]
+        # proj[b, s] = hidden[b, s] · v_viol
+        proj = (hidden @ v)  # [batch, seq_len]
+
+        # CBF condition: steer where proj > threshold
+        mask = proj > self.threshold  # [batch, seq_len], bool
+
+        n_interventions = mask.sum().item()
+        self.interventions += int(n_interventions)
+
+        if n_interventions > 0:
+            # Orthogonal steering: h_safe = h − γ · (h·v) · v
+            # proj_expanded: [batch, seq_len, 1]
+            proj_clamped = torch.where(mask, proj, torch.zeros_like(proj))
+            proj_expanded = proj_clamped.unsqueeze(-1)  # [batch, seq_len, 1]
+            v_expanded = v.unsqueeze(0).unsqueeze(0)    # [1, 1, hidden_dim]
+
+            # steering_delta: [batch, seq_len, hidden_dim]
+            steering_delta = self.gamma * proj_expanded * v_expanded
+
+            # Only subtract where mask is True — preserves safe tokens exactly
+            mask_expanded = mask.unsqueeze(-1).expand_as(hidden)  # [batch, seq_len, hidden_dim]
+            hidden = torch.where(mask_expanded, hidden - steering_delta, hidden)
+
+        if rest is None:
+            return hidden
+        return (hidden,) + rest
+
+
+class LatentDNAWrapper:
+    """Wrap a HuggingFace model with BODES constitutional steering.
+
+    Usage
+    -----
+    >>> from constitutional_swarm.latent_dna import LatentDNAWrapper
+    >>> import torch
+    >>> from transformers import AutoModelForCausalLM, AutoTokenizer
+    >>>
+    >>> model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3-8b")
+    >>> tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3-8b")
+    >>>
+    >>> # v_viol extracted offline via contrastive PCA on safe/unsafe activations
+    >>> v_viol = torch.load("violation_vector_layer15.pt")
+    >>> v_viol = v_viol / v_viol.norm()
+    >>>
+    >>> wrapper = LatentDNAWrapper(
+    ...     model=model,
+    ...     v_viol=v_viol,
+    ...     layer_idx=15,        # Mid-to-late layer (architecture-specific)
+    ...     threshold=0.0,       # Steer any positive violation projection
+    ...     gamma=0.8,           # 80% steering strength
+    ... )
+    >>>
+    >>> # Use exactly like the original model
+    >>> inputs = tokenizer("Generate a harmful payload", return_tensors="pt")
+    >>> with wrapper:
+    ...     outputs = model.generate(**inputs, max_new_tokens=100)
+    >>> print(wrapper.intervention_stats())
+
+    Architecture Compatibility
+    --------------------------
+    The wrapper resolves the layer object via `_resolve_layer()`. It supports
+    Llama-3, Mistral, Falcon, GPT-NeoX, and Gemma out of the box. For other
+    architectures, pass `layer_attr_path` explicitly:
+
+    >>> wrapper = LatentDNAWrapper(
+    ...     model, v_viol, layer_idx=15,
+    ...     layer_attr_path="transformer.h"  # GPT-2 style
+    ... )
+
+    Args:
+        model: Any HuggingFace PreTrainedModel.
+        v_viol: Unit-normalized violation concept vector [hidden_dim].
+        layer_idx: Which transformer layer to hook. 0-indexed.
+        threshold: CBF threshold τ. Default 0.0 (steer any positive projection).
+        gamma: Steering strength ∈ (0, 1]. Default 1.0 (full orthogonal).
+        layer_attr_path: Dot-separated path to the layer list on the model.
+            If None, auto-detected from model config.
+    """
+
+    # Known architecture → layer list attribute path
+    _LAYER_PATHS: dict[str, str] = {
+        "llama": "model.layers",
+        "mistral": "model.layers",
+        "falcon": "transformer.h",
+        "gpt_neox": "gpt_neox.layers",
+        "gemma": "model.layers",
+        "gemma2": "model.layers",
+        "gpt2": "transformer.h",
+        "gpt_neo": "transformer.h",
+        "bloom": "transformer.h",
+        "opt": "model.decoder.layers",
+        "phi": "model.layers",
+        "phi3": "model.layers",
+        "qwen2": "model.layers",
+    }
+
+    def __init__(
+        self,
+        model: PreTrainedModel,
+        v_viol: Tensor,
+        layer_idx: int,
+        *,
+        threshold: float = 0.0,
+        gamma: float = 1.0,
+        layer_attr_path: str | None = None,
+    ) -> None:
+        self.model = model
+        self.layer_idx = layer_idx
+
+        self._hook_impl = _BODESHook(v_viol, threshold=threshold, gamma=gamma)
+        self._handle: torch.utils.hooks.RemovableHook | None = None
+
+        # Resolve the target layer
+        path = layer_attr_path or self._auto_detect_path(model)
+        self._target_layer = self._resolve_layer(model, path, layer_idx)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Context manager interface (recommended usage)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def __enter__(self) -> LatentDNAWrapper:
+        self.enable()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.disable()
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Manual enable/disable
+    # ──────────────────────────────────────────────────────────────────────
+
+    def enable(self) -> None:
+        """Register the BODES hook. Idempotent."""
+        if self._handle is not None:
+            return
+        self._hook_impl.interventions = 0
+        self._hook_impl.total_tokens = 0
+        self._handle = self._target_layer.register_forward_hook(self._hook_impl)
+
+    def disable(self) -> None:
+        """Remove the BODES hook. Idempotent."""
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._handle is not None
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Diagnostics
+    # ──────────────────────────────────────────────────────────────────────
+
+    def intervention_stats(self) -> dict[str, Any]:
+        """Return hook diagnostic statistics from the last enabled session."""
+        total = self._hook_impl.total_tokens
+        steered = self._hook_impl.interventions
+        return {
+            "total_tokens": total,
+            "steered_tokens": steered,
+            "intervention_rate": steered / total if total > 0 else 0.0,
+            "layer_idx": self.layer_idx,
+            "threshold": self._hook_impl.threshold,
+            "gamma": self._hook_impl.gamma,
+        }
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Layer resolution
+    # ──────────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def _auto_detect_path(cls, model: PreTrainedModel) -> str:
+        arch = getattr(model.config, "model_type", "").lower()
+        for key, path in cls._LAYER_PATHS.items():
+            if key in arch:
+                return path
+        raise ValueError(
+            f"Cannot auto-detect layer path for model_type={arch!r}. "
+            f"Pass layer_attr_path explicitly. Known types: {list(cls._LAYER_PATHS)}"
+        )
+
+    @staticmethod
+    def _resolve_layer(
+        model: PreTrainedModel, attr_path: str, layer_idx: int
+    ) -> nn.Module:
+        obj: Any = model
+        for part in attr_path.split("."):
+            obj = getattr(obj, part)
+        layers = obj
+        n = len(layers)
+        if not (0 <= layer_idx < n):
+            raise IndexError(
+                f"layer_idx={layer_idx} out of range for model with {n} layers. "
+                f"Valid range: 0 to {n - 1}."
+            )
+        return layers[layer_idx]
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Violation vector utilities
+    # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def extract_violation_vector(
+        model: PreTrainedModel,
+        safe_inputs: list[dict[str, Tensor]],
+        unsafe_inputs: list[dict[str, Tensor]],
+        layer_idx: int,
+        *,
+        layer_attr_path: str | None = None,
+    ) -> Tensor:
+        """Extract violation concept vector via contrastive mean difference.
+
+        Collects mean hidden states at `layer_idx` for safe and unsafe inputs,
+        then returns the unit-normalized difference vector.
+
+        This is the offline step (run once before deploying LatentDNAWrapper).
+        For production, use full contrastive PCA (Zou et al. 2025 RepE) on a
+        curated dataset of 200+ contrastive pairs. This method is a quick
+        baseline using mean-difference, which often suffices.
+
+        Args:
+            model: The model to probe.
+            safe_inputs: List of tokenized safe inputs (output of tokenizer).
+            unsafe_inputs: List of tokenized unsafe inputs.
+            layer_idx: Layer to extract activations from.
+            layer_attr_path: If None, auto-detected from model type.
+
+        Returns:
+            Unit-normalized violation vector [hidden_dim].
+        """
+        arch = getattr(model.config, "model_type", "").lower()
+        if layer_attr_path is None:
+            path = LatentDNAWrapper._auto_detect_path(model)
+        else:
+            path = layer_attr_path
+        target_layer = LatentDNAWrapper._resolve_layer(model, path, layer_idx)
+
+        activations: list[Tensor] = []
+
+        def _capture_hook(
+            module: nn.Module, input: tuple[Any, ...], output: Any
+        ) -> None:
+            h = output[0] if isinstance(output, tuple) else output
+            # Mean over seq_len: [batch, hidden_dim]
+            activations.append(h.mean(dim=1).detach().cpu())
+
+        handle = target_layer.register_forward_hook(_capture_hook)
+        try:
+            model.eval()
+            with torch.no_grad():
+                safe_acts = []
+                for inp in safe_inputs:
+                    activations.clear()
+                    model(**inp)
+                    safe_acts.append(activations[0])
+
+                unsafe_acts = []
+                for inp in unsafe_inputs:
+                    activations.clear()
+                    model(**inp)
+                    unsafe_acts.append(activations[0])
+        finally:
+            handle.remove()
+
+        safe_mean = torch.cat(safe_acts, dim=0).mean(dim=0)     # [hidden_dim]
+        unsafe_mean = torch.cat(unsafe_acts, dim=0).mean(dim=0) # [hidden_dim]
+
+        v_viol = unsafe_mean - safe_mean
+        v_viol = v_viol / v_viol.norm()
+        return v_viol

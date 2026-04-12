@@ -234,6 +234,54 @@ def dp_broadcast_matrix(
 
 ---
 
+## 8. Addendum: Sensitivity-Tightening via Residual Attractors
+
+In Phase 2, the MCFS architecture introduced residual identity injection to prevent
+Birkhoff Uniformity Collapse:
+
+```
+H_proj = (1 − α) · Proj_r(H_new) + α · I
+```
+
+where α ∈ (0, 1) (empirically optimal at α = 0.1, yielding a stable 142% variance
+retention for n=50 agents). While designed as a leaky integrator for topological
+stability, this formulation provides a secondary benefit: it is a strict contraction
+mapping on the L₂ sensitivity, reducing the required DP noise budget.
+
+### Lemma 2: Residual Sensitivity Bound
+
+Let `f(D) = Proj_r(H_new)` be the base projection function with sensitivity `Δf ≤ 2r`
+(Lemma 1). Let `g(D) = (1−α)f(D) + αI` be the residual-injected function.
+
+The L₂ sensitivity of `g` is:
+
+```
+‖g(D) − g(D')‖₂ = ‖[(1−α)f(D) + αI] − [(1−α)f(D') + αI]‖₂
+                 = (1−α) · ‖f(D) − f(D')‖₂
+```
+
+The αI terms cancel exactly. Because `‖f(D) − f(D')‖₂ ≤ 2r`:
+
+```
+Δg ≤ 2(1−α)r
+```
+
+**Corollary:** Define effective radius `ρ = (1−α)r`. The tightened noise calibration:
+
+```
+σ_tight = 2(1−α)r · √(2 ln(1.25/δ)) / ε
+```
+
+Because `σ ∝ Δg`, the residual injection at α=0.1 **reduces required cryptographic
+noise by exactly 10%** for the same (ε, δ) budget. For α=0.2: 20% reduction.
+More generally: the stronger the stability injection, the less noise required.
+
+**Significance:** The topological stability fix (Phase 2) intrinsically improves
+cryptographic utility (Phase 3). The same α that prevents trust collapse also
+lowers the DP noise floor — these are not competing tradeoffs, they compound.
+
+---
+
 ## References
 
 - Dwork et al. (2006) — Calibrating Noise to Sensitivity in Private Data Analysis
