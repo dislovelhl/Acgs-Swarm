@@ -227,6 +227,12 @@ class ConstitutionalMesh:
         self._use_manifold = use_manifold
         self._manifold: GovernanceManifold | None = None
         self._agent_indices: dict[str, int] = {}
+        # Trust persistence: keyed by (from_agent_id, to_agent_id)
+        # Survives agent churn and constitution rotation when preserve_trust=True.
+        self._trust_store: dict[tuple[str, str], float] = {}
+        # Archive for departed agents: agent_id → {partner_id: (trust_value, timestamp)}
+        # Capped at _TRUST_ARCHIVE_MAX entries; LRU eviction by timestamp.
+        self._trust_archive: dict[str, dict[str, tuple[float, float]]] = {}
         self._settled_assignments: set[str] = set()
         self._settled_voters: dict[str, set[str]] = {}
         self._lock = threading.RLock()
@@ -279,18 +285,30 @@ class ConstitutionalMesh:
     # -- Agent management --------------------------------------------------
 
     def register_agent(self, agent_id: str, domain: str = "") -> None:
-        """Register an agent as a mesh participant."""
+        """Register an agent as a mesh participant.
+
+        If the agent previously existed and was unregistered, their archived
+        trust relationships are restored with exponential decay applied.
+        """
         with self._lock:
             self._agents[agent_id] = _AgentInfo(agent_id=agent_id, domain=domain)
             if self._use_manifold and agent_id not in self._agent_indices:
                 self._agent_indices[agent_id] = len(self._agent_indices)
                 self._rebuild_manifold()
+                self._restore_archive_for_agent(agent_id)
 
     def unregister_agent(self, agent_id: str) -> None:
-        """Remove an agent from the mesh."""
+        """Remove an agent from the mesh, archiving their trust relationships."""
         with self._lock:
             self._agents.pop(agent_id, None)
             if self._use_manifold and agent_id in self._agent_indices:
+                self._archive_trust_for_agent(agent_id)
+                # Remove departing agent from trust_store entries
+                self._trust_store = {
+                    (a, b): v
+                    for (a, b), v in self._trust_store.items()
+                    if a != agent_id and b != agent_id
+                }
                 remaining_ids = [
                     existing_agent_id
                     for existing_agent_id, _ in sorted(
@@ -302,6 +320,45 @@ class ConstitutionalMesh:
                     existing_agent_id: idx for idx, existing_agent_id in enumerate(remaining_ids)
                 }
                 self._rebuild_manifold()
+
+    def rotate_constitution(
+        self,
+        new_constitution: Constitution,
+        *,
+        preserve_trust: bool = False,
+    ) -> None:
+        """Replace the mesh constitution with a new one.
+
+        Args:
+            new_constitution: The new constitution to apply.
+            preserve_trust: If True, carry forward the current trust matrix into
+                the new manifold rather than resetting to zero.  Use this when
+                the constitution update is a policy amendment (same agents, new
+                rules) rather than a full governance reset.  Default False to
+                avoid inadvertently carrying adversarial trust state across a
+                security-motivated rotation.
+        """
+        with self._lock:
+            if preserve_trust and self._use_manifold:
+                self._save_trust_to_store()
+            self._constitution = new_constitution
+            self._dna = AgentDNA(
+                constitution=new_constitution,
+                agent_id="mesh-validator",
+                risk_scoring=self._risk_scoring,
+            )
+            if self._use_manifold:
+                if preserve_trust:
+                    # Rebuild keeps agent indices; restore will replay trust_store
+                    n = len(self._agent_indices)
+                    if n > 0:
+                        self._manifold = GovernanceManifold(n)
+                        self._restore_trust_from_store()
+                else:
+                    # Hard reset — null manifold first so _save_trust_to_store is a no-op
+                    self._manifold = None
+                    self._trust_store = {}
+                    self._rebuild_manifold()
 
     def get_reputation(self, agent_id: str) -> float:
         """Get an agent's reputation score."""
@@ -719,13 +776,89 @@ class ConstitutionalMesh:
                 return pool[j]
         return pool[-1]
 
+    _TRUST_ARCHIVE_MAX: int = 1000
+    _TRUST_DECAY_RATE: float = 0.05  # fraction lost per re-join round
+
+    def _save_trust_to_store(self) -> None:
+        """Snapshot current manifold raw trust into _trust_store (by agent_id pair)."""
+        if self._manifold is None:
+            return
+        raw = self._manifold._raw_trust  # direct access — same package
+        n = len(raw)
+        for aid, i in self._agent_indices.items():
+            if i >= n:
+                continue  # new agent not yet in old manifold
+            for bid, j in self._agent_indices.items():
+                if j >= n:
+                    continue
+                val = raw[i][j]
+                if val != 0.0:
+                    self._trust_store[(aid, bid)] = val
+
+    def _restore_trust_from_store(self) -> None:
+        """Replay _trust_store into the freshly built manifold, applying decay for archived agents."""
+        if self._manifold is None:
+            return
+        for (aid, bid), val in self._trust_store.items():
+            i = self._agent_indices.get(aid)
+            j = self._agent_indices.get(bid)
+            if i is not None and j is not None:
+                self._manifold._raw_trust[i][j] = val
+
+    def _restore_archive_for_agent(self, agent_id: str) -> None:
+        """Restore archived trust for a returning agent with exponential decay."""
+        archived = self._trust_archive.pop(agent_id, None)
+        if archived is None or self._manifold is None:
+            return
+        now = time.monotonic()
+        i = self._agent_indices.get(agent_id)
+        if i is None:
+            return
+        for partner_id, (val, ts) in archived.items():
+            j = self._agent_indices.get(partner_id)
+            if j is None:
+                continue
+            elapsed_rounds = max(0.0, now - ts)
+            decayed = val * max(0.0, 1.0 - self._TRUST_DECAY_RATE * elapsed_rounds)
+            if decayed > 0.0:
+                self._manifold._raw_trust[i][j] = decayed
+                self._manifold._raw_trust[j][i] = decayed
+
+    def _archive_trust_for_agent(self, agent_id: str) -> None:
+        """Save departing agent's trust to archive (capped at _TRUST_ARCHIVE_MAX)."""
+        if self._manifold is None:
+            return
+        i = self._agent_indices.get(agent_id)
+        if i is None:
+            return
+        raw = self._manifold._raw_trust
+        now = time.monotonic()
+        entries: dict[str, tuple[float, float]] = {}
+        for partner_id, j in self._agent_indices.items():
+            if partner_id == agent_id:
+                continue
+            val = raw[i][j]
+            if val != 0.0:
+                entries[partner_id] = (val, now)
+        if entries:
+            # Evict oldest archive entries if at cap
+            while len(self._trust_archive) >= self._TRUST_ARCHIVE_MAX:
+                oldest = min(
+                    self._trust_archive,
+                    key=lambda aid: min(ts for _, ts in self._trust_archive[aid].values()),
+                )
+                del self._trust_archive[oldest]
+            self._trust_archive[agent_id] = entries
+
     def _rebuild_manifold(self) -> None:
-        """Rebuild the manifold with the current number of agents."""
+        """Rebuild the manifold with the current number of agents, preserving trust state."""
+        self._save_trust_to_store()
         n = len(self._agent_indices)
         if n == 0:
             self._manifold = None
             return
         self._manifold = GovernanceManifold(n)
+        self._restore_trust_from_store()
 
     # -- Internal ----------------------------------------------------------
 
