@@ -9,9 +9,9 @@ the empirical proof.
 
 This module replaces the Sinkhorn projection with a **Spectral-Sphere projection**:
 
-    H_proj = H · min(1, r / σ_max(H))
+    H_proj = H * min(1, r / sigma_max(H))
 
-where σ_max(H) is the largest singular value (spectral norm) and r is the sphere
+where sigma_max(H) is the largest singular value (spectral norm) and r is the sphere
 radius (default 1.0). This allows negative entries, breaks the Perron-Frobenius
 attractor, and preserves the r-bounded spectral norm stability guarantee.
 
@@ -37,7 +37,7 @@ class SpectralProjectionResult:
     """Result of a spectral-sphere projection step."""
 
     matrix: tuple[tuple[float, ...], ...]
-    spectral_norm: float  # σ_max of the projected matrix — always ≤ r
+    spectral_norm: float  # sigma_max of the projected matrix - always <= r
     clipped: bool  # True if projection actually changed the matrix
     power_iterations: int
 
@@ -55,7 +55,7 @@ def _mat_vec(m: list[list[float]], v: list[float], n: int) -> list[float]:
 
 
 def _mat_T_vec(m: list[list[float]], v: list[float], n: int) -> list[float]:
-    """Transpose-vector product (for power iteration on Mᵀ·M)."""
+    """Transpose-vector product (for power iteration on M^T * M)."""
     return [sum(m[j][i] * v[j] for j in range(n)) for i in range(n)]
 
 
@@ -70,16 +70,16 @@ def spectral_norm_power_iter(
     seed: int = 0,
     tol: float = 1e-8,
 ) -> float:
-    """Estimate σ_max(matrix) via power iteration on Mᵀ·M.
+    """Estimate sigma_max(matrix) via power iteration on M^T * M.
 
     Converges to the largest singular value. O(n²) per iteration, O(n²·k) total.
     No numpy dependency — designed for the pure-Python swarm runtime.
 
     Args:
-        matrix: n×n matrix as list-of-lists.
-        max_iterations: Maximum power iterations (30 is generous for n≤200).
+        matrix: nxn matrix as list-of-lists.
+        max_iterations: Maximum power iterations (30 is generous for n<=200).
         seed: RNG seed for reproducible initialization.
-        tol: Convergence threshold on relative σ change.
+        tol: Convergence threshold on relative sigma change.
 
     Returns:
         Largest singular value (spectral norm) of matrix.
@@ -88,7 +88,7 @@ def spectral_norm_power_iter(
     if n == 0:
         return 0.0
 
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 - deterministic numerical initialization
     v = [rng.gauss(0, 1) for _ in range(n)]
     norm_v = _l2_norm(v)
     if norm_v < 1e-12:
@@ -103,7 +103,7 @@ def spectral_norm_power_iter(
         new_norm = _l2_norm(mtmv)
         if new_norm < 1e-14:
             return 0.0
-        new_sigma = math.sqrt(new_norm)  # σ ≈ ‖Mᵀ·M·v‖^½ / ‖v‖
+        new_sigma = math.sqrt(new_norm)  # sigma ~= ||M^T * M * v||^0.5 / ||v||
         v = [x / new_norm for x in mtmv]
         if abs(new_sigma - sigma) / (sigma + 1e-12) < tol:
             return new_sigma
@@ -120,16 +120,16 @@ def spectral_sphere_project(
 ) -> SpectralProjectionResult:
     """Project matrix onto the spectral-norm sphere of radius r.
 
-    Computes H_proj = H · min(1, r / σ_max(H)).
+    Computes H_proj = H * min(1, r / sigma_max(H)).
 
-    If σ_max(H) ≤ r, no clipping occurs and the matrix is returned unchanged.
+    If sigma_max(H) <= r, no clipping occurs and the matrix is returned unchanged.
     This is the key difference from Sinkhorn: no row/column normalization, so
     negative entries and non-uniform structure are preserved.
 
     Args:
-        matrix: n×n trust matrix.
+        matrix: nxn trust matrix.
         r: Spectral-sphere radius (default 1.0).
-        max_power_iter: Power iterations for σ_max estimation.
+        max_power_iter: Power iterations for sigma_max estimation.
 
     Returns:
         SpectralProjectionResult with projected matrix and diagnostics.
@@ -176,7 +176,7 @@ class SpectralSphereManifold:
         r: Spectral-sphere radius. r=1.0 preserves contractiveness (compositions
            never amplify signals). r<1.0 adds damping. r>1.0 allows amplification
            (useful for hierarchical swarms where planners have broader influence).
-        max_power_iter: Power iterations for σ_max estimation in each projection.
+        max_power_iter: Power iterations for sigma_max estimation in each projection.
     """
 
     def __init__(
@@ -223,7 +223,7 @@ class SpectralSphereManifold:
 
     @property
     def spectral_norm(self) -> float:
-        """σ_max of the projected matrix. Always ≤ r."""
+        """sigma_max of the projected matrix. Always <= r."""
         return self.project().spectral_norm
 
     @property
@@ -250,11 +250,11 @@ class SpectralSphereManifold:
                 backward compatible). Values in [0.05, 0.20] stabilize variance
                 by preventing power-iteration convergence to a rank-1 limit.
 
-                Formally: result = spectral_project(α·I + (1-α)·(A @ B))
+                Formally: result = spectral_project(alpha * I + (1 - alpha) * (A @ B))
 
                 This is the mHC residual-connection analog for governance matrices.
-                With α > 0, H^k never converges to rank-1 because each composition
-                injects α·I of identity structure back into the product.
+                With alpha > 0, H^k never converges to rank-1 because each composition
+                injects alpha * I of identity structure back into the product.
 
         Birkhoff (GovernanceManifold): 0% retention at cycle 10.
         Spectral sphere (alpha=0.0):  ~5% retention at cycle 10, decays slowly.
@@ -276,7 +276,7 @@ class SpectralSphereManifold:
         product = _mat_mul(a, b, n)
 
         if residual_alpha > 0.0:
-            # Inject residual identity: α·I + (1-α)·(A @ B)
+            # Inject residual identity: alpha * I + (1 - alpha) * (A @ B)
             beta = 1.0 - residual_alpha
             product = [
                 [

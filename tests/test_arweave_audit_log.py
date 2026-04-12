@@ -453,7 +453,7 @@ class TestArweaveAuditLogger:
         batch_a = AuditBatch("batch-AAA", CONST_HASH, entries_a)
 
         entries_b = [_entry(f"b-{i}") for i in range(3)]
-        batch_b = AuditBatch("batch-BBB", CONST_HASH, entries_b)
+        AuditBatch("batch-BBB", CONST_HASH, entries_b)
 
         # Valid proof within batch A
         path = batch_a.merkle_path_for("a-0")

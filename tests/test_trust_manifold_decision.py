@@ -47,7 +47,7 @@ def test_spectral_manifold_retains_variance_after_10_cycles() -> None:
     initial_var = _trust_variance(manifold)
     assert initial_var > 0.0, "Initial variance must be non-zero"
 
-    # residual_alpha=0.1 is the production default: adds α·I to each composition,
+    # residual_alpha=0.1 is the production default: adds alpha * I to each composition,
     # breaking Perron-Frobenius convergence and retaining specialization variance.
     current = manifold
     for _ in range(10):

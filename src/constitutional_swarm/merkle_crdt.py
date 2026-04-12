@@ -23,7 +23,6 @@ No external dependencies — pure Python with hashlib and asyncio.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import threading
@@ -362,7 +361,7 @@ async def simulate_gossip_convergence(
     """
     import random
 
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 - deterministic simulation seed
     agents = [MerkleCRDT(f"agent-{i}") for i in range(n_agents)]
 
     for round_idx in range(n_rounds):

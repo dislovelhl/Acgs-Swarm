@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from constitutional_swarm.bittensor.precedent_store import PrecedentRecord
 from constitutional_swarm.bittensor.protocol import EscalationType
@@ -348,15 +350,15 @@ class TestRuleCodificationE2E:
     propose rules, approve, activate, and verify state transitions."""
 
     # Three distinct 7-vector profiles
-    _PRIVACY_VEC = {
+    _PRIVACY_VEC: ClassVar[dict[str, float]] = {
         "safety": 0.10, "security": 0.15, "privacy": 0.92,
         "fairness": 0.25, "reliability": 0.10, "transparency": 0.60, "efficiency": 0.08,
     }
-    _SECURITY_VEC = {
+    _SECURITY_VEC: ClassVar[dict[str, float]] = {
         "safety": 0.85, "security": 0.90, "privacy": 0.15,
         "fairness": 0.10, "reliability": 0.72, "transparency": 0.25, "efficiency": 0.45,
     }
-    _FAIRNESS_VEC = {
+    _FAIRNESS_VEC: ClassVar[dict[str, float]] = {
         "safety": 0.18, "security": 0.12, "privacy": 0.28,
         "fairness": 0.93, "reliability": 0.20, "transparency": 0.70, "efficiency": 0.15,
     }
@@ -476,12 +478,12 @@ class TestRuleCodificationE2E:
 
         # Transition to APPROVED
         codifier.approve(cid)
-        approved = [c for c in codifier.all_candidates() if c.candidate_id == cid][0]
+        approved = next(c for c in codifier.all_candidates() if c.candidate_id == cid)
         assert approved.status == RuleCandidateStatus.APPROVED
 
         # Transition to ACTIVE
         codifier.activate(cid, SIMPLE_CONSTITUTION)
-        active = [c for c in codifier.all_candidates() if c.candidate_id == cid][0]
+        active = next(c for c in codifier.all_candidates() if c.candidate_id == cid)
         assert active.status == RuleCandidateStatus.ACTIVE
 
     def test_e2e_reject_path(self):

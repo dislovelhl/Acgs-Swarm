@@ -3,7 +3,7 @@ Tests for swarm_ode.py — MCFS Phase 4 continuous-time dynamics.
 
 Three test tiers:
 1. RK4 integrator correctness (StationaryField → known analytic solution)
-2. Spectral projection enforcement (σ_max ≤ r at every recorded step)
+2. Spectral projection enforcement (sigma_max <= r at every recorded step)
 3. Variance retention comparison: continuous ODE vs discrete compose()
 
 torch-optional via pytest.importorskip.
@@ -16,14 +16,13 @@ import pytest
 torch = pytest.importorskip("torch")
 from torch import Tensor
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _random_trust_matrix(n: int, seed: int = 42) -> Tensor:
-    """Random n×n trust matrix with entries in [0, 1], then spectral-projected."""
+    """Random nxn trust matrix with entries in [0, 1], then spectral-projected."""
     torch.manual_seed(seed)
     H = torch.rand(n, n)
     from constitutional_swarm.swarm_ode import spectral_project_torch
@@ -101,11 +100,11 @@ def test_rk4_zero_field_preserves_state() -> None:
 
 
 def test_spectral_bound_maintained_throughout() -> None:
-    """σ_max(H) ≤ r at every recorded trajectory point."""
+    """sigma_max(H) <= r at every recorded trajectory point."""
     from constitutional_swarm.swarm_ode import (
         TrustDecayField,
-        integrate,
         _spectral_norm_torch,
+        integrate,
     )
 
     n = 10
@@ -118,15 +117,15 @@ def test_spectral_bound_maintained_throughout() -> None:
         r=r, residual_alpha=0.1, record_every=10,
     )
 
-    for t, H, var in result["trajectory"]:
+    for t, H, _var in result["trajectory"]:
         sigma = _spectral_norm_torch(H)
         assert sigma <= r + 0.02, (
-            f"Spectral bound violated at t={t:.2f}: σ_max={sigma:.6f} > r={r}"
+            f"Spectral bound violated at t={t:.2f}: sigma_max={sigma:.6f} > r={r}"
         )
 
 
 def test_residual_injection_active() -> None:
-    """With residual_alpha > 0, diagonal entries should be biased toward α."""
+    """With residual_alpha > 0, diagonal entries should be biased toward alpha."""
     from constitutional_swarm.swarm_ode import (
         TrustDecayField,
         integrate,
@@ -145,10 +144,10 @@ def test_residual_injection_active() -> None:
     H_final = result["H_final"]
     diag = torch.diag(H_final)
 
-    # With zero-start and residual injection, diagonal should be biased toward α
+    # With zero-start and residual injection, diagonal should be biased toward alpha
     # (exact value depends on dynamics, but should be positive and nonzero)
     assert (diag > 0).all(), (
-        f"Residual α={alpha} should keep diagonal entries positive.\n"
+        f"Residual alpha={alpha} should keep diagonal entries positive.\n"
         f"Diagonal: {diag.tolist()}"
     )
 
@@ -188,7 +187,7 @@ def test_continuous_ode_retains_variance() -> None:
     print(f"  initial_var = {initial_var:.6f}")
     print(f"  final_var   = {final_var:.6f}")
     print(f"  retention   = {final_var / initial_var:.1%}")
-    for t, H, var in result["trajectory"]:
+    for t, _H, var in result["trajectory"]:
         print(f"  t={t:5.1f}: var={var:.6f}  retention={var / initial_var:.1%}")
 
     # Must retain nonzero variance (unlike Birkhoff which collapses to 0%)
@@ -274,13 +273,13 @@ def test_trust_decay_field_shape() -> None:
 
 
 def test_spectral_project_torch_clipping() -> None:
-    """spectral_project_torch must clip σ_max to r."""
-    from constitutional_swarm.swarm_ode import spectral_project_torch, _spectral_norm_torch
+    """spectral_project_torch must clip sigma_max to r."""
+    from constitutional_swarm.swarm_ode import _spectral_norm_torch, spectral_project_torch
 
-    H = torch.eye(5) * 10.0  # σ_max = 10
+    H = torch.eye(5) * 10.0  # sigma_max = 10
     H_proj = spectral_project_torch(H, r=1.0)
     sigma = _spectral_norm_torch(H_proj)
-    assert abs(sigma - 1.0) < 1e-3, f"Expected σ_max≈1.0, got {sigma}"
+    assert abs(sigma - 1.0) < 1e-3, f"Expected sigma_max~=1.0, got {sigma}"
 
 
 def test_spectral_project_torch_passthrough() -> None:

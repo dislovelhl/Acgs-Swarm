@@ -4,16 +4,16 @@ Continuous-Time Swarm Dynamics — MCFS Phase 4.
 Replaces the discrete `GovernanceManifold.compose()` loop with a continuous ODE
 on the trust matrix H(t) ∈ ℝⁿˣⁿ, integrated via a custom Projected RK4 solver.
 
-State variable: S(t) = H(t), the n×n trust/routing matrix (Candidate A).
+State variable: S(t) = H(t), the nxn trust/routing matrix (Candidate A).
 
 At each RK4 step, the derivative dH/dt = f_θ(H, t) is evaluated in Euclidean
 space, then the result is projected back onto the spectral sphere and injected
-with the residual α·I. This guarantees BIBO stability without computing tangent
+with the residual alpha * I. This guarantees BIBO stability without computing tangent
 spaces of the spectral norm ball (which requires differentiating through SVD).
 
 The approach directly extends Phase 2:
-    Discrete:   H_{k+1} = spectral_project(α·I + (1-α)·(H_k @ H_0))
-    Continuous:  H(t+dt) = spectral_project(α·I + (1-α)·RK4_step(f, H, t, dt))
+    Discrete:   H_{k+1} = spectral_project(alpha * I + (1 - alpha) * (H_k @ H_0))
+    Continuous: H(t+dt) = spectral_project(alpha * I + (1 - alpha) * RK4_step(f, H, t, dt))
 
 Dependencies: torch (optional, same isolation as latent_dna.py).
 """
@@ -45,10 +45,10 @@ class SwarmVectorField(Protocol):
 class TrustDecayField(nn.Module):
     """Default vector field: learned task-pressure with exponential decay.
 
-    dH/dt = tanh(W @ H) − λ·H
+    dH/dt = tanh(W @ H) - lambda * H
 
-    W is a learnable n×n matrix representing how each agent's trust influences
-    others' evolution. λ controls the natural decay rate — without reinforcement,
+    W is a learnable nxn matrix representing how each agent's trust influences
+    others' evolution. lambda controls the natural decay rate - without reinforcement,
     trust fades. tanh prevents unbounded growth.
 
     Args:
@@ -85,7 +85,7 @@ class StationaryField(nn.Module):
 
 
 def _spectral_norm_torch(M: Tensor, max_iter: int = 20) -> float:
-    """Estimate σ_max(M) via power iteration on M^T @ M. GPU-friendly."""
+    """Estimate sigma_max(M) via power iteration on M^T @ M. GPU-friendly."""
     n = M.shape[0]
     v = torch.randn(n, device=M.device, dtype=M.dtype)
     v = v / v.norm()
@@ -136,7 +136,7 @@ def projected_rk4_step(
         k4 = f(H + dt · k3, t + dt)
         H_unprojected = H + dt/6 · (k1 + 2k2 + 2k3 + k4)
         H_projected = spectral_project(H_unprojected, r)
-        H_next = (1 − α)·H_projected + α·I
+        H_next = (1 - alpha) * H_projected + alpha * I
 
     Args:
         f: Vector field dH/dt = f(H, t).
@@ -159,10 +159,10 @@ def projected_rk4_step(
 
     if residual_alpha > 0.0:
         n = H.shape[0]
-        I = torch.eye(n, device=H.device, dtype=H.dtype)
-        H_unprojected = (1.0 - residual_alpha) * H_unprojected + residual_alpha * I
+        identity = torch.eye(n, device=H.device, dtype=H.dtype)
+        H_unprojected = (1.0 - residual_alpha) * H_unprojected + residual_alpha * identity
 
-    # Project AFTER residual injection to guarantee σ_max ≤ r
+    # Project AFTER residual injection to guarantee sigma_max <= r
     H_next = spectral_project_torch(H_unprojected, r=r, max_power_iter=max_power_iter)
 
     return H_next

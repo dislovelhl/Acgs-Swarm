@@ -10,13 +10,13 @@ Expected result: ALL PASS — retention_ratio > 0.50 (we aim for >80%).
 """
 
 import random
+
 import pytest
 from constitutional_swarm.spectral_sphere import (
     SpectralSphereManifold,
     spectral_norm_power_iter,
     spectral_sphere_project,
 )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -85,21 +85,21 @@ def test_spectral_sphere_slower_than_birkhoff(n: int, cycles: int) -> None:
 def test_residual_compose_retains_variance(n: int, cycles: int) -> None:
     """Spectral sphere + residual connections (alpha=0.1) converges to a STABLE fixed point.
 
-    This is the full Path C fix. Adding α·I to each composition prevents
+    This is the full Path C fix. Adding alpha * I to each composition prevents
     power-iteration convergence to rank-1, analogous to skip connections in mHC.
 
     Observed fixed-point behavior (empirical):
         n=10, cycles=50:   stabilizes at ~20% retention (perfectly flat from cycle 10)
         n=50, cycles=100:  stabilizes at ~142% retention (flat from cycle 10)
 
-    Note: retention > 100% is correct for n=50 — the residual α·I injection adds
+    Note: retention > 100% is correct for n=50 - the residual alpha * I injection adds
     diagonal structure that increases variance above the original random initialization.
     The key property is STABILITY (variance stops changing), not the exact percentage.
 
     Three-tier comparison (all measured at cycle 10):
-        Birkhoff (GovernanceManifold):       0.0%   — catastrophic collapse
-        Spectral sphere (alpha=0.0):        ~2-5%   — slower decay, unstable
-        Spectral sphere + residual (α=0.1): >10%    — stable fixed point
+        Birkhoff (GovernanceManifold):         0.0% - catastrophic collapse
+        Spectral sphere (alpha=0.0):          ~2-5% - slower decay, unstable
+        Spectral sphere + residual (alpha=0.1): >10% - stable fixed point
     """
     manifold = _make_manifold(n)
     initial_var = _trust_variance(manifold)
@@ -118,7 +118,7 @@ def test_residual_compose_retains_variance(n: int, cycles: int) -> None:
     final_var = _trust_variance(current)
     retention_ratio = final_var / initial_var if initial_var > 0 else 0.0
 
-    print(f"\nSpectral-Sphere + Residual (α=0.1) report (n={n}, cycles={cycles})")
+    print(f"\nSpectral-Sphere + Residual (alpha=0.1) report (n={n}, cycles={cycles})")
     print(f"  initial_var = {initial_var:.6f}")
     print(f"  final_var   = {final_var:.6f}")
     print(f"  retention   = {retention_ratio:.4f} ({retention_ratio:.1%})")
@@ -146,15 +146,15 @@ def test_residual_compose_retains_variance(n: int, cycles: int) -> None:
 
 
 def test_spectral_norm_estimation_identity() -> None:
-    """Identity matrix has σ_max = 1.0."""
+    """Identity matrix has sigma_max = 1.0."""
     n = 5
-    I = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-    sigma = spectral_norm_power_iter(I)
-    assert abs(sigma - 1.0) < 1e-4, f"Identity σ_max should be 1.0, got {sigma}"
+    identity = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+    sigma = spectral_norm_power_iter(identity)
+    assert abs(sigma - 1.0) < 1e-4, f"Identity sigma_max should be 1.0, got {sigma}"
 
 
 def test_spectral_norm_estimation_scaled() -> None:
-    """Diagonal matrix with max entry 3.0 has σ_max = 3.0."""
+    """Diagonal matrix with max entry 3.0 has sigma_max = 3.0."""
     n = 4
     D = [[0.0] * n for _ in range(n)]
     D[0][0] = 3.0
@@ -162,23 +162,23 @@ def test_spectral_norm_estimation_scaled() -> None:
     D[2][2] = 0.7
     D[3][3] = 0.2
     sigma = spectral_norm_power_iter(D)
-    assert abs(sigma - 3.0) < 1e-3, f"Diagonal σ_max should be 3.0, got {sigma}"
+    assert abs(sigma - 3.0) < 1e-3, f"Diagonal sigma_max should be 3.0, got {sigma}"
 
 
 def test_projection_clips_large_matrix() -> None:
-    """Matrix with σ_max > r should be clipped to exactly r."""
+    """Matrix with sigma_max > r should be clipped to exactly r."""
     n = 3
-    # Scale identity by 5 — σ_max = 5.0
+    # Scale identity by 5 - sigma_max = 5.0
     big = [[5.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
     result = spectral_sphere_project(big, r=1.0)
     assert result.clipped is True
     assert abs(result.spectral_norm - 1.0) < 1e-4, (
-        f"After projection, σ_max should be 1.0, got {result.spectral_norm}"
+        f"After projection, sigma_max should be 1.0, got {result.spectral_norm}"
     )
 
 
 def test_projection_preserves_small_matrix() -> None:
-    """Matrix with σ_max ≤ r should not be modified."""
+    """Matrix with sigma_max <= r should not be modified."""
     n = 3
     small = [[0.1 if i == j else 0.0 for j in range(n)] for i in range(n)]
     result = spectral_sphere_project(small, r=1.0)

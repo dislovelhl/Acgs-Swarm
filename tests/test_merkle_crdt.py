@@ -13,16 +13,13 @@ No torch dependency — pure Python, runs everywhere.
 
 from __future__ import annotations
 
-import asyncio
 import pytest
-
 from constitutional_swarm.merkle_crdt import (
     DAGNode,
     MerkleCRDT,
     compute_cid,
     simulate_gossip_convergence,
 )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DAGNode integrity
@@ -276,7 +273,7 @@ async def test_gossip_convergence_small() -> None:
         f"Gossip did not converge: sizes={result['sizes']}"
     )
     assert result["unique_cids"] == result["total_artifacts"]
-    print(f"\nGossip convergence (5 agents, 10 rounds)")
+    print("\nGossip convergence (5 agents, 10 rounds)")
     print(f"  total artifacts: {result['total_artifacts']}")
     print(f"  unique CIDs: {result['unique_cids']}")
     print(f"  converged: {result['converged']}")
@@ -293,7 +290,7 @@ async def test_gossip_convergence_large() -> None:
     )
     expected_total = 20 * 20 * 3
     assert result["unique_cids"] == expected_total
-    print(f"\nGossip convergence (20 agents, 20 rounds)")
+    print("\nGossip convergence (20 agents, 20 rounds)")
     print(f"  total artifacts: {result['total_artifacts']}")
     print(f"  unique CIDs: {result['unique_cids']}")
 
@@ -323,7 +320,7 @@ async def test_gossip_byzantine_agent_excluded() -> None:
         byzantine._nodes[node.cid] = tampered
 
     # Gossip including Byzantine agent
-    all_agents = agents + [byzantine]
+    all_agents = [*agents, byzantine]
     for _ in range(5):
         for agent in agents:  # Only honest agents gossip
             peers = rng.sample(all_agents, 2)
@@ -341,7 +338,7 @@ async def test_gossip_byzantine_agent_excluded() -> None:
 
     # Byzantine tampered nodes must NOT be in honest replicas
     for agent in agents:
-        for cid, node in agent._nodes.items():
+        for _cid, node in agent._nodes.items():
             assert "TAMPERED" not in node.payload, (
                 f"Byzantine payload leaked into {agent.agent_id}: {node.payload}"
             )

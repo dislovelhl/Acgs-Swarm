@@ -11,7 +11,7 @@ forward hook on a specified transformer layer. At inference time, the hook:
 
 1. Projects each hidden state h onto the violation vector v_viol.
 2. If the projection exceeds threshold τ (agent approaching unsafe region):
-   - Applies orthogonal steering: h_safe = h − γ · (h·v_viol) · v_viol
+   - Applies orthogonal steering: h_safe = h - gamma * (h·v_viol) * v_viol
 3. If projection is within bounds: no-op (zero compute overhead on safe tokens).
 
 This is the Control Barrier Function (CBF) enforcement step from MCFS Phase 1.
@@ -44,8 +44,7 @@ and indexable layers — no hard transformers dependency at import time.
 from __future__ import annotations
 
 import importlib.util
-import math
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 try:
     import torch
@@ -55,15 +54,6 @@ except ImportError as exc:
     raise ImportError(
         "latent_dna requires torch. Install with: pip install torch>=2.0"
     ) from exc
-
-if TYPE_CHECKING:
-    # Only imported during static type checking — never at runtime.
-    # This keeps the module importable in torch-only environments.
-    try:
-        from transformers import PreTrainedModel
-    except ImportError:
-        pass
-
 
 def _transformers_available() -> bool:
     """Return True if the transformers package is importable."""
@@ -99,8 +89,8 @@ class _BODESHook:
         threshold: Safety threshold τ. Hidden states with projection
             h·v_viol > τ are steered back. Set τ=0.0 to steer any activation
             with positive violation projection.
-        gamma: Steering strength ∈ (0, 1]. γ=1.0 applies full orthogonal
-            projection (strongest). γ=0.5 applies half-strength. Tune to
+        gamma: Steering strength ∈ (0, 1]. gamma=1.0 applies full orthogonal
+            projection (strongest). gamma=0.5 applies half-strength. Tune to
             balance compliance vs. capability preservation (perplexity).
     """
 
@@ -151,7 +141,7 @@ class _BODESHook:
             rest = None
 
         # hidden: [batch, seq_len, hidden_dim]
-        batch, seq_len, hidden_dim = hidden.shape
+        batch, seq_len, _hidden_dim = hidden.shape
         self.total_tokens += batch * seq_len
 
         v = self.v_viol.to(hidden.device, hidden.dtype)  # [hidden_dim]
@@ -167,7 +157,7 @@ class _BODESHook:
         self.interventions += int(n_interventions)
 
         if n_interventions > 0:
-            # Orthogonal steering: h_safe = h − γ · (h·v) · v
+            # Orthogonal steering: h_safe = h - gamma * (h·v) * v
             # proj_expanded: [batch, seq_len, 1]
             proj_clamped = torch.where(mask, proj, torch.zeros_like(proj))
             proj_expanded = proj_clamped.unsqueeze(-1)  # [batch, seq_len, 1]
@@ -182,7 +172,7 @@ class _BODESHook:
 
         if rest is None:
             return hidden
-        return (hidden,) + rest
+        return (hidden, *rest)
 
 
 class LatentDNAWrapper:
@@ -237,7 +227,7 @@ class LatentDNAWrapper:
     """
 
     # Known architecture → layer list attribute path
-    _LAYER_PATHS: dict[str, str] = {
+    _LAYER_PATHS: ClassVar[dict[str, str]] = {
         "llama": "model.layers",
         "mistral": "model.layers",
         "falcon": "transformer.h",
@@ -445,7 +435,6 @@ class LatentDNAWrapper:
         Returns:
             Unit-normalized violation vector [hidden_dim].
         """
-        arch = getattr(model.config, "model_type", "").lower()
         if layer_attr_path is None:
             path = LatentDNAWrapper._auto_detect_path(model)
         else:

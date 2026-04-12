@@ -10,9 +10,9 @@ Tests verify:
 
 from __future__ import annotations
 
-import pytest
-from acgs_lite import Constitution
 from constitutional_swarm import ConstitutionalMesh
+
+from acgs_lite import Constitution
 
 
 def _mesh_with_manifold(n: int) -> ConstitutionalMesh:
@@ -80,7 +80,7 @@ class TestAgentChurn:
 
         # Record agent-0's trust relationships
         idx_0 = mesh._agent_indices.get("agent-0")
-        raw_before = list(mesh._manifold._raw_trust[idx_0])  # type: ignore[index]
+        assert idx_0 is not None
 
         # Unregister agent-0 — trust should be archived
         mesh.unregister_agent("agent-0")

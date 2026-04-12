@@ -14,9 +14,8 @@ WebSocket dependency: skip if websockets not installed.
 from __future__ import annotations
 
 import asyncio
-import pytest
 
-from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT, compute_cid
+import pytest
 from constitutional_swarm.gossip_protocol import (
     GossipClient,
     GossipPeerRegistry,
@@ -27,6 +26,7 @@ from constitutional_swarm.gossip_protocol import (
     simulate_ws_gossip_convergence,
     spin_up_swarm,
 )
+from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT, compute_cid
 
 websockets = pytest.importorskip("websockets", reason="websockets not installed — skip transport tests")
 
@@ -339,7 +339,7 @@ async def test_five_node_convergence() -> None:
         f"CID count mismatch: unique={result['unique_cids']}, "
         f"total={result['total_artifacts']}"
     )
-    print(f"\nWebSocket gossip convergence (5 nodes, 10 rounds)")
+    print("\nWebSocket gossip convergence (5 nodes, 10 rounds)")
     print(f"  total artifacts: {result['total_artifacts']}")
     print(f"  unique CIDs: {result['unique_cids']}")
     print(f"  converged: {result['converged']}")
@@ -375,8 +375,6 @@ async def test_byzantine_node_does_not_corrupt_swarm() -> None:
             node.registry.add("127.0.0.1", byz_port)
 
         # Byzantine generates tampered nodes
-        import json
-        byzantine_client = GossipClient()
         for i in range(3):
             node = byzantine_crdt.append(payload=f"will-tamper-{i}")
             tampered = DAGNode(
@@ -408,7 +406,7 @@ async def test_byzantine_node_does_not_corrupt_swarm() -> None:
 
         # No tampered payloads in honest replicas
         for node in honest_nodes:
-            for cid, n in node.crdt._nodes.items():
+            for _cid, n in node.crdt._nodes.items():
                 assert "TAMPERED" not in n.payload, (
                     f"Byzantine payload leaked into {node.agent_id}: {n.payload}"
                 )

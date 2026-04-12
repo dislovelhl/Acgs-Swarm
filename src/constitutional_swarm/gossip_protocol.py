@@ -48,7 +48,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT, compute_cid
+from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT
 
 log = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ class GossipPeerRegistry:
 
     def sample(self, n: int, *, rng: random.Random | None = None) -> list[tuple[str, int]]:
         """Return up to n random peers."""
-        rng = rng or random.Random()
+        rng = rng or random.SystemRandom()
         with self._lock:
             pool = list(self._peers)
         return rng.sample(pool, min(n, len(pool)))
@@ -214,6 +214,13 @@ class GossipServer:
 
     async def _handle_connection(self, websocket: Any) -> None:
         """Handle one WebSocket connection. Reads batches until disconnect."""
+        try:
+            import websockets  # type: ignore[import]
+        except ImportError:
+            connection_closed_error = RuntimeError
+        else:
+            connection_closed_error = websockets.exceptions.ConnectionClosed
+
         peer = websocket.remote_address
         log.debug("Gossip connection from %s", peer)
         try:
@@ -224,7 +231,7 @@ class GossipServer:
                     log.debug("Merged %d/%d nodes from %s", added, len(nodes), peer)
                 except ValueError as exc:
                     log.warning("Rejected malformed batch from %s: %s", peer, exc)
-        except Exception as exc:  # websockets.ConnectionClosed and others
+        except (connection_closed_error, OSError) as exc:
             log.debug("Connection from %s closed: %s", peer, type(exc).__name__)
 
 
@@ -276,11 +283,8 @@ class GossipClient:
                     await ws.send(encode_batch(nodes))
             log.debug("Sent %d nodes to %s:%d", len(nodes), host, port)
             return True
-        except (OSError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, OSError, websockets.exceptions.WebSocketException) as exc:
             log.debug("Failed to reach %s:%d: %s", host, port, type(exc).__name__)
-            return False
-        except Exception as exc:
-            log.debug("Send to %s:%d error: %s", host, port, type(exc).__name__)
             return False
 
 
@@ -488,7 +492,7 @@ async def simulate_ws_gossip_convergence(
     Returns:
         dict with convergence result, per-node sizes, total artifacts.
     """
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 - deterministic simulation seed
     nodes = await spin_up_swarm(n_nodes, host=host)
 
     try:
