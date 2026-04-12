@@ -214,27 +214,32 @@ class SwarmExecutor:
 
         Matches agent capabilities against task requirements.
         Returns only READY (unclaimed) tasks.
+
+        The DAG snapshot is taken inside the lock; the (potentially
+        slow) capability lookup and filtering happen outside the lock
+        so concurrent callers are not serialised on registry I/O.
         """
         with self._lock:
-            if self._dag is None:
-                return []
-            agent_caps = self._registry.get_agent_capabilities(agent_id)
-            cap_names = {c.name.lower() for c in agent_caps}
-            cap_domains = {c.domain for c in agent_caps}
+            dag = self._dag  # snapshot — TaskDAG is immutable
+        if dag is None:
+            return []
+        agent_caps = self._registry.get_agent_capabilities(agent_id)
+        cap_names = {c.name.lower() for c in agent_caps}
+        cap_domains = {c.domain for c in agent_caps}
 
-            available = []
-            for node in self._dag.nodes.values():
-                if node.status != ExecutionStatus.READY:
-                    continue
-                if not node.required_capabilities:
-                    available.append(node)
-                    continue
-                has_caps = any(rc.lower() in cap_names for rc in node.required_capabilities)
-                in_domain = node.domain in cap_domains
-                if has_caps or in_domain:
-                    available.append(node)
+        available = []
+        for node in dag.nodes.values():
+            if node.status != ExecutionStatus.READY:
+                continue
+            if not node.required_capabilities:
+                available.append(node)
+                continue
+            has_caps = any(rc.lower() in cap_names for rc in node.required_capabilities)
+            in_domain = node.domain in cap_domains
+            if has_caps or in_domain:
+                available.append(node)
 
-            return sorted(available, key=lambda n: -n.priority)
+        return sorted(available, key=lambda n: -n.priority)
 
     def claim(self, node_id: str, agent_id: str) -> WorkReceipt:
         """Agent claims a task. Returns the immutable work receipt."""
@@ -260,6 +265,7 @@ class SwarmExecutor:
         Verifies the submitting agent matches the claimant (MACI: no
         self-validation via unauthorized submit).
         """
+        callbacks: tuple[Any, ...] = ()
         with self._lock:
             if self._dag is None:
                 raise RuntimeError("No DAG loaded")
@@ -270,9 +276,10 @@ class SwarmExecutor:
                 raise PermissionError(
                     f"Agent {artifact.agent_id} cannot submit for node claimed by {node.claimed_by}"
                 )
-            self._store.publish(artifact)
+            callbacks = self._store.publish_deferred(artifact)
             self._dag = self._dag.complete_node(node_id, artifact.artifact_id)
             self._dag = self._dag.mark_ready()
+        self._store.dispatch_callbacks(artifact, callbacks)
 
     @property
     def is_complete(self) -> bool:

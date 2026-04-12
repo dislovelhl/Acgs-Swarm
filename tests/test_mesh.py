@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import time
+import warnings
 
 import pytest
 from constitutional_swarm.mesh import (
@@ -13,12 +16,48 @@ from constitutional_swarm.mesh import (
     MeshProof,
     MeshResult,
     PeerAssignment,
+    SettlementPersistenceError,
     UnauthorizedVoterError,
     ValidationVote,
 )
-from constitutional_swarm.settlement_store import JSONLSettlementStore, SQLiteSettlementStore
+from constitutional_swarm.settlement_store import (
+    DuplicateSettlementError,
+    JSONLSettlementStore,
+    SettlementRecord,
+    SQLiteSettlementStore,
+)
 
 from acgs_lite import Constitution, ConstitutionalViolationError, Rule
+
+
+class _FailingSettlementStore:
+    """Store test double that records the attempted write and then fails."""
+
+    def __init__(self) -> None:
+        self.last_record: SettlementRecord | None = None
+        self.pending: dict[str, SettlementRecord] = {}
+
+    def append(self, record: SettlementRecord) -> None:
+        self.last_record = record
+        raise OSError("disk full")
+
+    def mark_pending(self, record: SettlementRecord) -> None:
+        self.pending[str(record.assignment["assignment_id"])] = record
+
+    def clear_pending(self, assignment_id: str) -> None:
+        self.pending.pop(assignment_id, None)
+
+    def load_pending(self) -> list[SettlementRecord]:
+        return list(self.pending.values())
+
+    def pending_count(self) -> int:
+        return len(self.pending)
+
+    def load_all(self) -> list[SettlementRecord]:
+        return []
+
+    def describe(self) -> dict[str, str]:
+        return {"backend": "failing"}
 
 
 @pytest.fixture
@@ -82,7 +121,8 @@ class TestAgentManagement:
         self, mesh: ConstitutionalMesh
     ) -> None:
         summary = mesh.summary()
-        assert summary["settlement_storage"] == {"enabled": False, "backend": None}
+        assert summary["settlement_storage"] == {"enabled": False, "backend": None, "pending": 0}
+        assert summary["pending_settlements"] == 0
 
     def test_summary_reports_jsonl_settlement_storage(self, tmp_path) -> None:
         store = JSONLSettlementStore(tmp_path / "mesh.jsonl")
@@ -90,6 +130,8 @@ class TestAgentManagement:
         summary = mesh.summary()
         assert summary["settlement_storage"]["enabled"] is True
         assert summary["settlement_storage"]["backend"] == "jsonl"
+        assert summary["settlement_storage"]["pending"] == 0
+        assert summary["pending_settlements"] == 0
 
     def test_summary_reports_sqlite_settlement_storage(self, tmp_path) -> None:
         store = SQLiteSettlementStore(tmp_path / "mesh.db")
@@ -97,6 +139,8 @@ class TestAgentManagement:
         summary = mesh.summary()
         assert summary["settlement_storage"]["enabled"] is True
         assert summary["settlement_storage"]["backend"] == "sqlite"
+        assert summary["settlement_storage"]["pending"] == 0
+        assert summary["pending_settlements"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +267,10 @@ class TestVoting:
         # agent-00 is the producer, not a peer
         with pytest.raises(UnauthorizedVoterError):
             mesh.submit_vote(assignment.assignment_id, "agent-00", approved=True)
+
+    def test_unknown_assignment_raises_key_error(self, mesh: ConstitutionalMesh) -> None:
+        with pytest.raises(KeyError, match="not found"):
+            mesh.submit_vote("missing-assignment", "agent-01", approved=True)
 
     def test_validate_and_vote_auto(self, mesh: ConstitutionalMesh) -> None:
         """Convenience method: peer validates via DNA and auto-votes."""
@@ -623,3 +671,343 @@ class TestManifoldIntegration:
         assert matrix_after is not None
         assert manifold_mesh.agent_count == 4
         assert len(matrix_after) == 4
+
+
+# ---------------------------------------------------------------------------
+# SettlementRecord / store: constitutional_hash round-trips (T-2)
+# ---------------------------------------------------------------------------
+
+
+class TestSettlementRecordConstitutionalHash:
+    """SettlementRecord.constitutional_hash persists through JSONL and SQLite."""
+
+    def _make_record(self, h: str = "abcdef1234") -> SettlementRecord:
+        return SettlementRecord(
+            assignment={"assignment_id": "test-assign-1", "agent_id": "ag1"},
+            result={"accepted": True, "votes_for": 3},
+            constitutional_hash=h,
+        )
+
+    def test_jsonl_constitutional_hash_round_trip(self, tmp_path) -> None:
+        store = JSONLSettlementStore(tmp_path / "sr.jsonl")
+        rec = self._make_record("sha256-abc")
+        store.append(rec)
+        loaded = store.load_all()
+        assert len(loaded) == 1
+        assert loaded[0].constitutional_hash == "sha256-abc"
+
+    def test_jsonl_missing_hash_defaults_to_empty_string(self, tmp_path) -> None:
+        """Old records without constitutional_hash deserialize with ''."""
+        path = tmp_path / "old.jsonl"
+        import json as _json
+
+        path.write_text(
+            _json.dumps(
+                {
+                    "assignment": {"assignment_id": "old-1", "agent_id": "ag2"},
+                    "result": {"accepted": True},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        store = JSONLSettlementStore(path)
+        loaded = store.load_all()
+        assert len(loaded) == 1
+        assert loaded[0].constitutional_hash == ""
+
+    def test_jsonl_load_salvages_only_terminal_truncated_line(self, tmp_path) -> None:
+        """Only a final truncated append is salvageable."""
+        path = tmp_path / "bad.jsonl"
+        good = json.dumps(
+            {
+                "assignment": {"assignment_id": "good-1", "agent_id": "ag1"},
+                "result": {"accepted": True},
+                "constitutional_hash": "ok-hash",
+            }
+        )
+        path.write_text(
+            good + "\n" + good.replace("good-1", "good-2") + "\n" + '{"assignment":',
+            encoding="utf-8",
+        )
+        store = JSONLSettlementStore(path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            loaded = store.load_all()
+
+        assert len(loaded) == 2  # two good lines
+        assert [record.assignment["assignment_id"] for record in loaded] == ["good-1", "good-2"]
+
+    def test_jsonl_load_rejects_nonterminal_corruption(self, tmp_path) -> None:
+        path = tmp_path / "bad-middle.jsonl"
+        good = json.dumps(
+            {
+                "assignment": {"assignment_id": "good-1", "agent_id": "ag1"},
+                "result": {"accepted": True},
+                "constitutional_hash": "ok-hash",
+            }
+        )
+        path.write_text(good + "\n{BROKEN JSON\n" + good.replace("good-1", "good-2") + "\n")
+        store = JSONLSettlementStore(path)
+
+        with pytest.raises(json.JSONDecodeError):
+            store.load_all()
+
+    def test_jsonl_pending_round_trip(self, tmp_path) -> None:
+        store = JSONLSettlementStore(tmp_path / "pending.jsonl")
+        record = self._make_record("pending-hash")
+        store.mark_pending(record)
+        pending = store.load_pending()
+        assert len(pending) == 1
+        assert pending[0].constitutional_hash == "pending-hash"
+        store.clear_pending("test-assign-1")
+        assert store.load_pending() == []
+
+    def test_sqlite_constitutional_hash_round_trip(self, tmp_path) -> None:
+        store = SQLiteSettlementStore(tmp_path / "sr.db")
+        rec = self._make_record("sha256-xyz")
+        store.append(rec)
+        loaded = store.load_all()
+        assert len(loaded) == 1
+        assert loaded[0].constitutional_hash == "sha256-xyz"
+
+    def test_sqlite_duplicate_settlement_append_raises(self, tmp_path) -> None:
+        store = SQLiteSettlementStore(tmp_path / "dedup.db")
+        original = SettlementRecord(
+            assignment={"assignment_id": "dup-1", "agent_id": "ag1"},
+            result={"accepted": True, "votes_for": 3},
+            constitutional_hash="original-hash",
+        )
+        store.append(original)
+        # Try to overwrite with a different hash — must be a no-op
+        duplicate = SettlementRecord(
+            assignment={"assignment_id": "dup-1", "agent_id": "ag1"},
+            result={"accepted": False, "votes_for": 0},
+            constitutional_hash="tampered-hash",
+        )
+        with pytest.raises((DuplicateSettlementError, sqlite3.IntegrityError, ValueError)):
+            store.append(duplicate)
+        loaded = store.load_all()
+        assert len(loaded) == 1
+        assert loaded[0].constitutional_hash == "original-hash"
+
+    def test_sqlite_pending_round_trip(self, tmp_path) -> None:
+        store = SQLiteSettlementStore(tmp_path / "pending.db")
+        record = self._make_record("pending-hash")
+        store.mark_pending(record)
+        pending = store.load_pending()
+        assert len(pending) == 1
+        assert pending[0].constitutional_hash == "pending-hash"
+        store.clear_pending("test-assign-1")
+        assert store.load_pending() == []
+
+    def test_sqlite_column_migration_on_old_schema(self, tmp_path) -> None:
+        """SQLiteSettlementStore._initialize() must handle DB schemas that
+        pre-date the constitutional_hash column (old_schema = no column)."""
+        import sqlite3 as _sqlite3
+
+        db_path = tmp_path / "legacy.db"
+        # Simulate a DB written by the old schema (no constitutional_hash column)
+        with _sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE mesh_settlements (
+                    assignment_id TEXT PRIMARY KEY,
+                    assignment_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL
+                )
+                """
+            )
+            import json as _json
+
+            conn.execute(
+                "INSERT INTO mesh_settlements VALUES (?, ?, ?)",
+                (
+                    "legacy-1",
+                    _json.dumps({"assignment_id": "legacy-1"}),
+                    _json.dumps({"accepted": True}),
+                ),
+            )
+            conn.commit()
+
+        # Opening the store should apply the migration without error
+        store = SQLiteSettlementStore(db_path)
+        records = store.load_all()
+        assert len(records) == 1
+        assert records[0].constitutional_hash == ""  # default from migration
+
+
+# ---------------------------------------------------------------------------
+# mesh.settle() outside lock + constitutional_hash propagation (T-2 / T-3)
+# ---------------------------------------------------------------------------
+
+
+class TestMeshSettlePersistenceIntegration:
+    """settle() writes constitutional_hash into the backing store record."""
+
+    def test_settle_writes_constitutional_hash_to_jsonl(self, tmp_path) -> None:
+        store = JSONLSettlementStore(tmp_path / "mesh.jsonl")
+        rules = [Rule(id="R1", text="no-op rule")]
+        const = Constitution.from_rules(rules, name="hash-test")
+        m = ConstitutionalMesh(
+            const,
+            peers_per_validation=3,
+            quorum=2,
+            seed=99,
+            settlement_store=store,
+        )
+        # Need enough peers for peers_per_validation=3 (producer excluded)
+        for i in range(5):
+            m.register_agent(f"peer-{i:02d}", domain="d0")
+
+        assignment = m.request_validation("peer-00", "safe action", "art-hash-test")
+        peers = assignment.peers
+        m.submit_vote(assignment.assignment_id, peers[0], approved=True)
+        m.submit_vote(assignment.assignment_id, peers[1], approved=True)
+        # quorum=2, so settlement is already triggered by get_result
+        result = m.get_result(assignment.assignment_id)
+        assert result.settled is True
+
+        records = store.load_all()
+        assert len(records) == 1
+        assert records[0].constitutional_hash == result.constitutional_hash
+        # Must match the mesh constitution's hash
+        assert records[0].constitutional_hash == const.hash
+
+    def test_settle_raises_persistence_error_but_result_remains_visible_in_process(
+        self, monkeypatch
+    ) -> None:
+        store = _FailingSettlementStore()
+        mesh = ConstitutionalMesh(
+            Constitution.default(),
+            peers_per_validation=3,
+            quorum=2,
+            seed=23,
+            settlement_store=store,
+        )
+        for i in range(5):
+            mesh.register_agent(f"agent-{i:02d}")
+
+        assignment = mesh.request_validation("agent-00", "safe output", "art-persist-1")
+        # Prevent auto-finalization so settle() itself owns the persistence error.
+        monkeypatch.setattr(mesh, "_maybe_finalize_result", lambda _assignment_id: None)
+        mesh.submit_vote(assignment.assignment_id, assignment.peers[0], approved=True)
+        mesh.submit_vote(assignment.assignment_id, assignment.peers[1], approved=True)
+
+        with pytest.raises(SettlementPersistenceError):
+            mesh.settle(assignment.assignment_id)
+
+        result = mesh.get_result(assignment.assignment_id)
+        assert result.settled is True
+        assert result.proof is not None
+        assert result.proof.verify() is True
+        assert store.last_record is not None
+        assert store.load_pending() != []
+        assert store.last_record.assignment["assignment_id"] == assignment.assignment_id
+
+    def test_full_validation_raises_persistence_error_after_freeze(self) -> None:
+        store = _FailingSettlementStore()
+        mesh = ConstitutionalMesh(
+            Constitution.default(),
+            peers_per_validation=3,
+            quorum=2,
+            seed=31,
+            settlement_store=store,
+        )
+        for i in range(5):
+            mesh.register_agent(f"agent-{i:02d}")
+
+        with pytest.raises(SettlementPersistenceError):
+            mesh.full_validation("agent-00", "safe output", "art-persist-2")
+
+        assert store.last_record is not None
+        result = mesh.get_result(store.last_record.assignment["assignment_id"])
+        assert result.settled is True
+        assert result.proof is not None
+        assert result.proof.verify() is True
+        assert store.load_pending() != []
+
+    def test_startup_reconciles_pending_jsonl_settlement(self, tmp_path) -> None:
+        constitution = Constitution.default()
+        source_mesh = ConstitutionalMesh(constitution, seed=41)
+        for i in range(5):
+            source_mesh.register_agent(f"agent-{i:02d}")
+
+        result = source_mesh.full_validation("agent-00", "safe output", "art-reconcile-jsonl")
+        assignment = source_mesh._assignments[result.assignment_id]
+        record = SettlementRecord(
+            assignment=source_mesh._serialize_assignment(assignment),
+            result=source_mesh._serialize_result(result),
+            constitutional_hash=result.constitutional_hash,
+        )
+
+        store = JSONLSettlementStore(tmp_path / "mesh.jsonl")
+        store.mark_pending(record)
+
+        reader = ConstitutionalMesh(constitution, seed=99, settlement_store=store)
+        restored = reader.get_result(result.assignment_id)
+        assert restored.settled is True
+        assert restored.proof is not None
+        assert restored.proof.verify() is True
+        assert store.load_pending() == []
+        assert any(
+            loaded.assignment["assignment_id"] == result.assignment_id
+            for loaded in store.load_all()
+        )
+
+    def test_startup_reconciles_pending_sqlite_settlement(self, tmp_path) -> None:
+        constitution = Constitution.default()
+        source_mesh = ConstitutionalMesh(constitution, seed=43)
+        for i in range(5):
+            source_mesh.register_agent(f"agent-{i:02d}")
+
+        result = source_mesh.full_validation("agent-00", "safe output", "art-reconcile-sqlite")
+        assignment = source_mesh._assignments[result.assignment_id]
+        record = SettlementRecord(
+            assignment=source_mesh._serialize_assignment(assignment),
+            result=source_mesh._serialize_result(result),
+            constitutional_hash=result.constitutional_hash,
+        )
+
+        store = SQLiteSettlementStore(tmp_path / "mesh.db")
+        store.mark_pending(record)
+
+        reader = ConstitutionalMesh(constitution, seed=101, settlement_store=store)
+        restored = reader.get_result(result.assignment_id)
+        assert restored.settled is True
+        assert restored.proof is not None
+        assert restored.proof.verify() is True
+        assert store.load_pending() == []
+        assert any(
+            loaded.assignment["assignment_id"] == result.assignment_id
+            for loaded in store.load_all()
+        )
+
+    def test_retry_pending_settlements_reconciles_journaled_record(self, tmp_path) -> None:
+        constitution = Constitution.default()
+        source_mesh = ConstitutionalMesh(constitution, seed=47)
+        for i in range(5):
+            source_mesh.register_agent(f"agent-{i:02d}")
+
+        result = source_mesh.full_validation("agent-00", "safe output", "art-reconcile-retry")
+        assignment = source_mesh._assignments[result.assignment_id]
+        record = SettlementRecord(
+            assignment=source_mesh._serialize_assignment(assignment),
+            result=source_mesh._serialize_result(result),
+            constitutional_hash=result.constitutional_hash,
+        )
+
+        store = JSONLSettlementStore(tmp_path / "mesh-retry.jsonl")
+        reader = ConstitutionalMesh(constitution, seed=103, settlement_store=store)
+        store.mark_pending(record)
+
+        report = reader.retry_pending_settlements()
+        restored = reader.get_result(result.assignment_id)
+
+        assert report["pending"] == 1
+        assert report["reconciled"] == 1
+        assert report["remaining"] == 0
+        assert report["failures"] == 0
+        assert restored.settled is True
+        assert restored.proof is not None
+        assert restored.proof.verify() is True

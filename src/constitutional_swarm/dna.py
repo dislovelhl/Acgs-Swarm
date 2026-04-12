@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -84,9 +85,14 @@ class AgentDNA:
     _violation_count: int = field(init=False, repr=False, default=0)
     _total_latency_ns: int = field(init=False, repr=False, default=0)
     _disabled: bool = field(init=False, repr=False, default=False)
+    # Per-instance lock protecting the mutable counter fields (_call_count,
+    # _violation_count, _total_latency_ns, _disabled).  Not included in repr
+    # or comparison; cannot be a field because threading.Lock is not picklable
+    # by default — we create it imperatively in __post_init__ instead.
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_engine", GovernanceEngine(self.constitution, strict=self.strict))
+        object.__setattr__(self, "_stats_lock", threading.Lock())
         if self.maci_role is not None:
             enforcer = MACIEnforcer()
             enforcer.assign_role(self.agent_id, self.maci_role)
@@ -169,16 +175,19 @@ class AgentDNA:
         While disabled, validate() raises DNADisabledError.
         EU AI Act Art. 14(3): human-initiated halt capability.
         """
-        object.__setattr__(self, "_disabled", True)
+        with self._stats_lock:
+            object.__setattr__(self, "_disabled", True)
 
     def enable(self) -> None:
         """Re-enable constitutional validation after a halt."""
-        object.__setattr__(self, "_disabled", False)
+        with self._stats_lock:
+            object.__setattr__(self, "_disabled", False)
 
     @property
     def is_disabled(self) -> bool:
         """Whether this DNA co-processor is currently disabled."""
-        return self._disabled
+        with self._stats_lock:
+            return self._disabled
 
     @property
     def hash(self) -> str:
@@ -187,16 +196,18 @@ class AgentDNA:
 
     @property
     def stats(self) -> dict[str, Any]:
-        """Governance statistics."""
+        """Governance statistics (thread-safe snapshot)."""
+        with self._stats_lock:
+            calls = self._call_count
+            violations = self._violation_count
+            total_latency = self._total_latency_ns
         return {
             "agent_id": self.agent_id,
             "constitutional_hash": self.hash,
             "maci_role": self.maci_role.value if self.maci_role else None,
-            "calls": self._call_count,
-            "violations": self._violation_count,
-            "avg_latency_ns": (
-                self._total_latency_ns // self._call_count if self._call_count > 0 else 0
-            ),
+            "calls": calls,
+            "violations": violations,
+            "avg_latency_ns": (total_latency // calls if calls > 0 else 0),
         }
 
     def validate(self, action: str) -> DNAValidationResult:
@@ -208,8 +219,14 @@ class AgentDNA:
         Raises:
             DNADisabledError: If the DNA co-processor has been disabled via kill switch.
         """
-        if self._disabled:
-            raise DNADisabledError(f"Agent {self.agent_id} DNA is disabled — all actions blocked")
+        # Read _disabled without the stats lock (fast path; booleans are
+        # atomically readable in CPython but we hold stats_lock for correctness
+        # on other runtimes and for correctness of the disable/enable protocol).
+        with self._stats_lock:
+            if self._disabled:
+                raise DNADisabledError(
+                    f"Agent {self.agent_id} DNA is disabled — all actions blocked"
+                )
 
         # Layer 1: semantic risk scoring (opt-in, ~1ms)
         risk_score = 0.0
@@ -226,11 +243,19 @@ class AgentDNA:
         try:
             result = self._engine.validate(action)
             elapsed = time.perf_counter_ns() - start
-            self._call_count += 1
-            self._total_latency_ns += elapsed
             violations = tuple(f"{v.rule_id}: {v.rule_text}" for v in result.violations)
-            if violations:
-                self._violation_count += 1
+            has_violations = bool(violations)
+
+            # Atomically update counters under the lock.
+            with self._stats_lock:
+                object.__setattr__(self, "_call_count", self._call_count + 1)
+                object.__setattr__(
+                    self, "_total_latency_ns", self._total_latency_ns + elapsed
+                )
+                if has_violations:
+                    object.__setattr__(
+                        self, "_violation_count", self._violation_count + 1
+                    )
 
             # Layer 3: Z3 formal verification (opt-in, ~50-500ms).
             # Only invoked for critical-risk actions to keep cost proportional.
@@ -251,9 +276,14 @@ class AgentDNA:
             )
         except ConstitutionalViolationError:
             elapsed = time.perf_counter_ns() - start
-            self._call_count += 1
-            self._violation_count += 1
-            self._total_latency_ns += elapsed
+            with self._stats_lock:
+                object.__setattr__(self, "_call_count", self._call_count + 1)
+                object.__setattr__(
+                    self, "_violation_count", self._violation_count + 1
+                )
+                object.__setattr__(
+                    self, "_total_latency_ns", self._total_latency_ns + elapsed
+                )
             raise
 
     def check_maci(self, action_type: str) -> None:

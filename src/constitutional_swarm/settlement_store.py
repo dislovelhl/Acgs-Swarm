@@ -14,12 +14,23 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
+class DuplicateSettlementError(ValueError):
+    """Raised when an append-only settlement store receives a duplicate key."""
+
+
 @dataclass(frozen=True, slots=True)
 class SettlementRecord:
-    """Serialized settled assignment/result snapshot."""
+    """Serialized settled assignment/result snapshot.
+
+    ``constitutional_hash`` captures the governance document SHA256 that was
+    active when the record was finalized.  This allows post-hoc audits to
+    verify that each settlement operated under the correct constitutional
+    version even if the constitution has been updated since.
+    """
 
     assignment: dict[str, Any]
     result: dict[str, Any]
+    constitutional_hash: str = ""
 
 
 class SettlementStore(Protocol):
@@ -28,6 +39,14 @@ class SettlementStore(Protocol):
     def append(self, record: SettlementRecord) -> None: ...
 
     def load_all(self) -> list[SettlementRecord]: ...
+
+    def mark_pending(self, record: SettlementRecord) -> None: ...
+
+    def clear_pending(self, assignment_id: str) -> None: ...
+
+    def load_pending(self) -> list[SettlementRecord]: ...
+
+    def pending_count(self) -> int: ...
 
     def describe(self) -> dict[str, Any]: ...
 
@@ -41,12 +60,14 @@ class JSONLSettlementStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self.pending_path = self.path.with_name(f"{self.path.name}.pending")
 
     def append(self, record: SettlementRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "assignment": record.assignment,
             "result": record.result,
+            "constitutional_hash": record.constitutional_hash,
         }
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
@@ -57,24 +78,98 @@ class JSONLSettlementStore:
 
         records: list[SettlementRecord] = []
         with self.path.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
+            lines = fh.readlines()
+
+        for lineno, line in enumerate(lines, start=1):
+            raw_line = line
+            line = line.strip()
+            if not line:
+                continue
+            try:
                 payload = json.loads(line)
-                records.append(
-                    SettlementRecord(
-                        assignment=dict(payload["assignment"]),
-                        result=dict(payload["result"]),
+            except json.JSONDecodeError:
+                is_terminal_line = lineno == len(lines)
+                # Salvage only the final truncated append. Earlier corruption
+                # remains fail-loud because it indicates a damaged log, not an
+                # interrupted final write.
+                if is_terminal_line and not raw_line.endswith("\n"):
+                    import warnings
+
+                    warnings.warn(
+                        f"{self.path}:{lineno}: terminal truncated JSON line skipped",
+                        stacklevel=2,
                     )
+                    continue
+                raise
+            records.append(
+                SettlementRecord(
+                    assignment=dict(payload.get("assignment", {})),
+                    result=dict(payload.get("result", {})),
+                    constitutional_hash=payload.get("constitutional_hash", ""),
                 )
+            )
         return records
+
+    def mark_pending(self, record: SettlementRecord) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payloads = self._load_pending_payloads()
+        assignment_id = str(record.assignment["assignment_id"])
+        payloads[assignment_id] = self._payload_from_record(record)
+        self._write_pending_payloads(payloads)
+
+    def clear_pending(self, assignment_id: str) -> None:
+        payloads = self._load_pending_payloads()
+        if assignment_id not in payloads:
+            return
+        payloads.pop(assignment_id, None)
+        self._write_pending_payloads(payloads)
+
+    def load_pending(self) -> list[SettlementRecord]:
+        return [
+            self._record_from_payload(payload)
+            for payload in self._load_pending_payloads().values()
+        ]
+
+    def pending_count(self) -> int:
+        return len(self._load_pending_payloads())
 
     def describe(self) -> dict[str, Any]:
         return {
             "backend": "jsonl",
             "path": str(self.path),
         }
+
+    def _load_pending_payloads(self) -> dict[str, dict[str, Any]]:
+        if not self.pending_path.exists():
+            return {}
+        with self.pending_path.open(encoding="utf-8") as fh:
+            payloads = json.load(fh)
+        return {str(key): dict(value) for key, value in dict(payloads).items()}
+
+    def _write_pending_payloads(self, payloads: dict[str, dict[str, Any]]) -> None:
+        if not payloads:
+            self.pending_path.unlink(missing_ok=True)
+            return
+        tmp_path = self.pending_path.with_name(f"{self.pending_path.name}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            json.dump(payloads, fh, separators=(",", ":"))
+        tmp_path.replace(self.pending_path)
+
+    @staticmethod
+    def _payload_from_record(record: SettlementRecord) -> dict[str, Any]:
+        return {
+            "assignment": record.assignment,
+            "result": record.result,
+            "constitutional_hash": record.constitutional_hash,
+        }
+
+    @classmethod
+    def _record_from_payload(cls, payload: dict[str, Any]) -> SettlementRecord:
+        return SettlementRecord(
+            assignment=dict(payload.get("assignment", {})),
+            result=dict(payload.get("result", {})),
+            constitutional_hash=payload.get("constitutional_hash", ""),
+        )
 
 
 class SQLiteSettlementStore:
@@ -96,36 +191,77 @@ class SQLiteSettlementStore:
                 CREATE TABLE IF NOT EXISTS mesh_settlements (
                     assignment_id TEXT PRIMARY KEY,
                     assignment_json TEXT NOT NULL,
-                    result_json TEXT NOT NULL
+                    result_json TEXT NOT NULL,
+                    constitutional_hash TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_settlements (
+                    assignment_id TEXT PRIMARY KEY,
+                    assignment_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    constitutional_hash TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            # Idempotently add constitutional_hash to databases created before
+            # this column was introduced (ALTER TABLE IF NOT EXISTS requires
+            # SQLite 3.37; use a try/except for broader compatibility).
+            try:
+                conn.execute(
+                    "ALTER TABLE mesh_settlements ADD COLUMN "
+                    "constitutional_hash TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute(
+                    "ALTER TABLE pending_settlements ADD COLUMN "
+                    "constitutional_hash TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.commit()
 
     def append(self, record: SettlementRecord) -> None:
+        """Append a settlement record.
+
+        Finalized records are immutable. Duplicate ``assignment_id`` values
+        raise a deterministic error instead of replacing or silently ignoring
+        the original settlement.
+        """
         assignment_id = str(record.assignment["assignment_id"])
         with sqlite3.connect(self.path) as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO mesh_settlements (
-                    assignment_id,
-                    assignment_json,
-                    result_json
-                ) VALUES (?, ?, ?)
-                """,
-                (
-                    assignment_id,
-                    json.dumps(record.assignment, separators=(",", ":")),
-                    json.dumps(record.result, separators=(",", ":")),
-                ),
-            )
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO mesh_settlements (
+                        assignment_id,
+                        assignment_json,
+                        result_json,
+                        constitutional_hash
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        assignment_id,
+                        json.dumps(record.assignment, separators=(",", ":")),
+                        json.dumps(record.result, separators=(",", ":")),
+                        record.constitutional_hash,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise DuplicateSettlementError(
+                    f"Settlement {assignment_id} already exists"
+                ) from exc
             conn.commit()
 
     def load_all(self) -> list[SettlementRecord]:
         with sqlite3.connect(self.path) as conn:
             rows = conn.execute(
                 """
-                SELECT assignment_json, result_json
+                SELECT assignment_json, result_json, constitutional_hash
                 FROM mesh_settlements
                 ORDER BY assignment_id
                 """
@@ -134,9 +270,62 @@ class SQLiteSettlementStore:
             SettlementRecord(
                 assignment=dict(json.loads(assignment_json)),
                 result=dict(json.loads(result_json)),
+                constitutional_hash=constitutional_hash,
             )
-            for assignment_json, result_json in rows
+            for assignment_json, result_json, constitutional_hash in rows
         ]
+
+    def mark_pending(self, record: SettlementRecord) -> None:
+        assignment_id = str(record.assignment["assignment_id"])
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pending_settlements (
+                    assignment_id,
+                    assignment_json,
+                    result_json,
+                    constitutional_hash
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    assignment_id,
+                    json.dumps(record.assignment, separators=(",", ":")),
+                    json.dumps(record.result, separators=(",", ":")),
+                    record.constitutional_hash,
+                ),
+            )
+            conn.commit()
+
+    def clear_pending(self, assignment_id: str) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                "DELETE FROM pending_settlements WHERE assignment_id = ?",
+                (assignment_id,),
+            )
+            conn.commit()
+
+    def load_pending(self) -> list[SettlementRecord]:
+        with sqlite3.connect(self.path) as conn:
+            rows = conn.execute(
+                """
+                SELECT assignment_json, result_json, constitutional_hash
+                FROM pending_settlements
+                ORDER BY assignment_id
+                """
+            ).fetchall()
+        return [
+            SettlementRecord(
+                assignment=dict(json.loads(assignment_json)),
+                result=dict(json.loads(result_json)),
+                constitutional_hash=constitutional_hash,
+            )
+            for assignment_json, result_json, constitutional_hash in rows
+        ]
+
+    def pending_count(self) -> int:
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM pending_settlements").fetchone()
+        return int(row[0]) if row is not None else 0
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -146,6 +335,7 @@ class SQLiteSettlementStore:
 
 
 __all__ = [
+    "DuplicateSettlementError",
     "JSONLSettlementStore",
     "SQLiteSettlementStore",
     "SettlementRecord",

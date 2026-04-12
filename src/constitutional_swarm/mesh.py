@@ -64,6 +64,10 @@ class MeshHaltedError(RuntimeError):
     """Mesh has been halted — all operations blocked until resumed."""
 
 
+class SettlementPersistenceError(RuntimeError):
+    """Raised when a settled result cannot be persisted after freeze."""
+
+
 # ---------------------------------------------------------------------------
 # Data structures (all frozen — immutable by design)
 # ---------------------------------------------------------------------------
@@ -233,6 +237,7 @@ class ConstitutionalMesh:
         if self._settlement_store is None and settlement_store_path is not None:
             self._settlement_store = JSONLSettlementStore(settlement_store_path)
         self._load_settlements()
+        self.retry_pending_settlements()
 
     def _check_halted(self) -> None:
         """Raise if mesh is halted."""
@@ -424,9 +429,11 @@ class ConstitutionalMesh:
 
             # Update reputations if quorum reached
             self._maybe_settle_reputations(assignment_id)
-            self._maybe_finalize_result(assignment_id)
 
-            return vote
+        if self._maybe_finalize_result(assignment_id):
+            self.settle(assignment_id)
+
+        return vote
 
     def get_result(self, assignment_id: str) -> MeshResult:
         """Get the validation result for an assignment.
@@ -445,7 +452,14 @@ class ConstitutionalMesh:
             return self._preview_result(assignment)
 
     def settle(self, assignment_id: str) -> MeshResult:
-        """Freeze a quorum result into an immutable proof snapshot."""
+        """Freeze a quorum result into an immutable proof snapshot.
+
+        The settlement snapshot is written to the backing store *outside* the
+        mesh lock so that slow or remote I/O in the store does not block
+        concurrent callers.  The in-memory ``_final_results`` entry is written
+        first so that concurrent readers see the settled result immediately
+        (read-your-writes), then the lock is released before persisting.
+        """
         with self._lock:
             final = self._final_results.get(assignment_id)
             if final is not None:
@@ -478,9 +492,26 @@ class ConstitutionalMesh:
                 settled=True,
                 settled_at=settled_at,
             )
-            self._final_results[assignment_id] = final
-            self._persist_settlement(assignment, final)
-            return final
+            record = self._build_settlement_record(assignment, final)
+        # Persist outside the lock — store I/O must not block mesh operations.
+        # A durable pending marker is written first so startup reconciliation can
+        # recover frozen-but-not-yet-durable settlements after a crash.
+        try:
+            if self._settlement_store is not None:
+                self._settlement_store.mark_pending(record)
+            with self._lock:
+                existing = self._final_results.get(assignment_id)
+                if existing is not None:
+                    return existing
+                self._final_results[assignment_id] = final
+            self._persist_settlement_record(record)
+            if self._settlement_store is not None:
+                self._settlement_store.clear_pending(assignment_id)
+        except Exception as exc:
+            raise SettlementPersistenceError(
+                f"Settlement {assignment_id} was frozen in memory but could not be persisted"
+            ) from exc
+        return final
 
     def validate_and_vote(
         self,
@@ -494,6 +525,7 @@ class ConstitutionalMesh:
         with the violation as the reason.
         """
         with self._lock:
+            self._check_halted()
             assignment = self._assignments.get(assignment_id)
             if assignment is None:
                 raise KeyError(f"Assignment {assignment_id} not found")
@@ -546,17 +578,22 @@ class ConstitutionalMesh:
             total_validations = len(self._assignments)
             total_votes = sum(len(v) for v in self._votes.values())
             settled = len(self._final_results)
-            settlement_storage = (
-                {"enabled": False, "backend": None}
-                if self._settlement_store is None
-                else {"enabled": True, **self._settlement_store.describe()}
-            )
+        pending_settlements = (
+            0 if self._settlement_store is None else self._settlement_store.pending_count()
+        )
+        settlement_storage = (
+            {"enabled": False, "backend": None, "pending": 0}
+            if self._settlement_store is None
+            else {"enabled": True, "pending": pending_settlements, **self._settlement_store.describe()}
+        )
+        with self._lock:
             return {
                 "agents": len(self._agents),
                 "constitutional_hash": self.constitutional_hash,
                 "total_validations": total_validations,
                 "settled": settled,
                 "pending": total_validations - settled,
+                "pending_settlements": pending_settlements,
                 "total_votes": total_votes,
                 "settlement_storage": settlement_storage,
                 "avg_reputation": (
@@ -644,19 +681,28 @@ class ConstitutionalMesh:
             total = sum(remaining_weights)
             if total <= 0:
                 pick = self._rng.choice(remaining_pool)
+                pick_idx = remaining_pool.index(pick)
             else:
                 r = self._rng.random() * total
                 cumulative = 0.0
-                pick = remaining_pool[-1]
+                pick_idx = len(remaining_pool) - 1
+                pick = remaining_pool[pick_idx]
                 for j, w in enumerate(remaining_weights):
                     cumulative += w
                     if cumulative >= r:
+                        pick_idx = j
                         pick = remaining_pool[j]
                         break
             selected.add(pick)
-            idx_in_pool = remaining_pool.index(pick)
-            remaining_pool.pop(idx_in_pool)
-            remaining_weights.pop(idx_in_pool)
+            # O(1) removal via swap-and-pop (order within remaining_pool does
+            # not matter — weighted selection re-evaluates the whole pool each
+            # iteration).
+            last = len(remaining_pool) - 1
+            if pick_idx != last:
+                remaining_pool[pick_idx] = remaining_pool[last]
+                remaining_weights[pick_idx] = remaining_weights[last]
+            remaining_pool.pop()
+            remaining_weights.pop()
 
         return list(selected)
 
@@ -729,16 +775,15 @@ class ConstitutionalMesh:
                             self._manifold.update_trust(producer_idx, voter_idx, -0.5)
                     self._manifold.project()
 
-    def _maybe_finalize_result(self, assignment_id: str) -> None:
-        """Freeze the first quorum-reaching result."""
-        if assignment_id in self._final_results:
-            return
-        assignment = self._assignments.get(assignment_id)
-        if assignment is None:
-            return
-        preview = self._preview_result(assignment)
-        if preview.quorum_met:
-            self.settle(assignment_id)
+    def _maybe_finalize_result(self, assignment_id: str) -> bool:
+        """Return whether the first quorum-reaching result should be frozen."""
+        with self._lock:
+            if assignment_id in self._final_results:
+                return False
+            assignment = self._assignments.get(assignment_id)
+            if assignment is None:
+                return False
+            return self._preview_result(assignment).quorum_met
 
     def _preview_result(self, assignment: PeerAssignment) -> MeshResult:
         """Compute the current non-final view of an assignment."""
@@ -794,14 +839,13 @@ class ConstitutionalMesh:
 
     def _persist_settlement(self, assignment: PeerAssignment, result: MeshResult) -> None:
         """Append a settled assignment/result snapshot to disk when configured."""
+        self._persist_settlement_record(self._build_settlement_record(assignment, result))
+
+    def _persist_settlement_record(self, record: SettlementRecord) -> None:
+        """Append a pre-built settlement record when configured."""
         if self._settlement_store is None:
             return
-        self._settlement_store.append(
-            SettlementRecord(
-                assignment=self._serialize_assignment(assignment),
-                result=self._serialize_result(result),
-            )
-        )
+        self._settlement_store.append(record)
 
     def _load_settlements(self) -> None:
         """Load settled assignments/results from disk when configured."""
@@ -818,6 +862,54 @@ class ConstitutionalMesh:
             self._assignments[assignment.assignment_id] = assignment
             self._votes.setdefault(assignment.assignment_id, [])
             self._final_results[assignment.assignment_id] = result
+
+    def retry_pending_settlements(self) -> dict[str, int]:
+        """Replay durable pending-journal settlements into the primary store."""
+        if self._settlement_store is None:
+            return {"pending": 0, "reconciled": 0, "remaining": 0, "failures": 0}
+
+        pending_records = self._settlement_store.load_pending()
+        reconciled = 0
+        failures = 0
+
+        for record in pending_records:
+            assignment = self._deserialize_assignment(record.assignment)
+            result = self._deserialize_result(record.result)
+            if assignment.constitutional_hash != self.constitutional_hash:
+                raise ValueError(
+                    "Persisted settlement constitutional hash does not match current mesh"
+                )
+
+            with self._lock:
+                self._assignments.setdefault(assignment.assignment_id, assignment)
+                self._votes.setdefault(assignment.assignment_id, [])
+                self._final_results.setdefault(assignment.assignment_id, result)
+
+            try:
+                self._persist_settlement_record(record)
+            except (OSError, RuntimeError, ValueError):
+                failures += 1
+                continue
+
+            self._settlement_store.clear_pending(assignment.assignment_id)
+            reconciled += 1
+
+        remaining = len(self._settlement_store.load_pending())
+        return {
+            "pending": len(pending_records),
+            "reconciled": reconciled,
+            "remaining": remaining,
+            "failures": failures,
+        }
+
+    def _build_settlement_record(
+        self, assignment: PeerAssignment, result: MeshResult
+    ) -> SettlementRecord:
+        return SettlementRecord(
+            assignment=self._serialize_assignment(assignment),
+            result=self._serialize_result(result),
+            constitutional_hash=assignment.constitutional_hash,
+        )
 
     @staticmethod
     def _serialize_assignment(assignment: PeerAssignment) -> dict[str, Any]:

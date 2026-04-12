@@ -17,6 +17,7 @@ Organized by component:
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1143,6 +1144,290 @@ class TestDNAKillSwitch:
         dna.disable()
         with pytest.raises(DNADisabledError):
             my_agent("test")
+
+
+class TestArtifactStoreConcurrency:
+    """Thread-safety hardening: concurrent publish, re-entrant watch callbacks."""
+
+    def test_concurrent_publish_from_multiple_threads(self) -> None:
+        """100 threads each publish a unique artifact — no loss, no races."""
+        store = ArtifactStore()
+        n = 100
+
+        def publish_one(i: int) -> None:
+            store.publish(
+                Artifact(
+                    artifact_id=f"art-{i}",
+                    task_id=f"t-{i}",
+                    agent_id=f"ag-{i}",
+                    content_type="text",
+                    content=f"content-{i}",
+                    domain="concurrent",
+                )
+            )
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = [pool.submit(publish_one, i) for i in range(n)]
+            for f in as_completed(futures):
+                f.result()
+
+        assert store.count == n
+        assert len(store.get_by_domain("concurrent")) == n
+
+    def test_concurrent_duplicate_publish_raises(self) -> None:
+        """Multiple threads racing to publish the same artifact_id — exactly
+        one succeeds; the rest raise ValueError (not silent data corruption)."""
+        store = ArtifactStore()
+        art = Artifact(
+            artifact_id="shared",
+            task_id="t1",
+            agent_id="ag1",
+            content_type="text",
+            content="hello",
+        )
+        success: list[int] = []
+        errors: list[Exception] = []
+
+        def try_publish() -> None:
+            try:
+                store.publish(art)
+                success.append(1)
+            except ValueError:
+                errors.append(ValueError())
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [pool.submit(try_publish) for _ in range(10)]
+            for f in as_completed(futures):
+                f.result()
+
+        assert len(success) == 1
+        assert len(errors) == 9
+
+    def test_watcher_callback_can_call_publish_without_deadlock(self) -> None:
+        """Watcher callbacks are fired outside the store lock — a callback
+        that itself publishes to the same store must not deadlock."""
+        store = ArtifactStore()
+        secondary_id = "secondary-art"
+
+        def reactive_publish(a: Artifact) -> None:
+            # Re-entrant publish into the same store — would deadlock if
+            # callbacks were fired while holding the store lock.
+            if a.artifact_id == "trigger":
+                store.publish(
+                    Artifact(
+                        artifact_id=secondary_id,
+                        task_id="t2",
+                        agent_id="ag2",
+                        content_type="text",
+                        content="derived",
+                        domain="secondary",
+                    )
+                )
+
+        store.watch("task-trigger", reactive_publish)
+        store.publish(
+            Artifact(
+                artifact_id="trigger",
+                task_id="task-trigger",
+                agent_id="ag1",
+                content_type="text",
+                content="initial",
+            )
+        )
+        # The reactive publish must have succeeded
+        assert store.get(secondary_id) is not None
+        assert store.count == 2
+
+    def test_submit_watcher_can_reenter_executor_without_deadlock(self) -> None:
+        """Executor submit must not hold its lock while watcher callbacks run."""
+        registry = CapabilityRegistry()
+        registry.register("agent-01", [Capability(name="work", domain="d")])
+        store = ArtifactStore()
+        executor = SwarmExecutor(registry, store)
+
+        dag = TaskDAG(goal="watcher-reentry")
+        dag = dag.add_node(TaskNode(node_id="A", title="A", domain="d"))
+        dag = dag.add_node(TaskNode(node_id="B", title="B", domain="d", depends_on=("A",)))
+        executor.load_dag(dag)
+        executor.claim("A", "agent-01")
+
+        callback_observations: list[list[str]] = []
+        watcher_called = threading.Event()
+        submit_returned = threading.Event()
+        watcher_errors: list[Exception] = []
+
+        def reenter_executor(_artifact: Artifact) -> None:
+            watcher_called.set()
+            try:
+                callback_observations.append(
+                    [task.node_id for task in executor.available_tasks("agent-01")]
+                )
+            except Exception as exc:  # pragma: no cover - failure path asserted below
+                watcher_errors.append(exc)
+
+        store.watch("A", reenter_executor)
+
+        def run_submit() -> None:
+            try:
+                executor.submit(
+                    "A",
+                    Artifact(
+                        artifact_id="art-A",
+                        task_id="A",
+                        agent_id="agent-01",
+                        content_type="text",
+                        content="done",
+                        domain="d",
+                    ),
+                )
+            finally:
+                submit_returned.set()
+
+        submit_thread = threading.Thread(target=run_submit, daemon=True)
+        submit_thread.start()
+
+        assert watcher_called.wait(timeout=1), "submit() never reached watcher dispatch"
+        assert submit_returned.wait(timeout=1), "submit() deadlocked during watcher re-entry"
+
+        assert watcher_errors == []
+        assert callback_observations == [["B"]]
+        assert executor.dag is not None
+        assert executor.dag.nodes["A"].status == ExecutionStatus.COMPLETED
+        assert executor.dag.nodes["B"].status == ExecutionStatus.READY
+
+
+class TestDNAConcurrentCounters:
+    """AgentDNA._stats_lock ensures thread-safe call/violation counters."""
+
+    def test_concurrent_validates_accurate_call_count(self) -> None:
+        """50 threads each call validate() once — call_count must equal 50."""
+        dna = AgentDNA.default(agent_id="concurrent-worker")
+        n = 50
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [pool.submit(dna.validate, f"safe action {i}") for i in range(n)]
+            for f in as_completed(futures):
+                f.result()
+
+        assert dna.stats["calls"] == n
+
+    def test_concurrent_validate_violations_counted_accurately(self) -> None:
+        """Half the threads pass safe content, half pass violating content.
+        Total calls == n, violations == n // 2 (within ±1 for race resolution)."""
+        dna = AgentDNA.default(agent_id="mixed-worker")
+        n = 40
+        violation_content = "api_key and password credentials"
+        safe_content = "implement the feature"
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = []
+            for i in range(n):
+                content = violation_content if i % 2 == 0 else safe_content
+                futures.append(pool.submit(dna.validate, content))
+
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except ConstitutionalViolationError:
+                    pass
+
+        stats = dna.stats
+        assert stats["calls"] == n
+        assert stats["violations"] == n // 2
+
+    def test_disable_enable_thread_safe(self) -> None:
+        """disable() and enable() are safe to call concurrently."""
+        dna = AgentDNA.default(agent_id="toggle-worker")
+
+        def toggle() -> None:
+            for _ in range(10):
+                dna.disable()
+                dna.enable()
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(toggle) for _ in range(5)]
+            for f in as_completed(futures):
+                f.result()
+
+        # After all toggles, the DNA must be enabled (last toggle is enable())
+        assert dna.is_disabled is False
+
+
+class TestSwarmExecutorAvailableTasksSnapshotIsolation:
+    """available_tasks() releases the lock before filtering — concurrent
+    callers are not serialised on capability lookup."""
+
+    def test_available_tasks_concurrent_callers(self) -> None:
+        """20 threads simultaneously call available_tasks(); all should see
+        the same set of READY tasks and no RuntimeError."""
+        registry = CapabilityRegistry()
+        for i in range(5):
+            registry.register(f"agent-{i}", [Capability(name="work", domain="d")])
+        store = ArtifactStore()
+        executor = SwarmExecutor(registry, store)
+
+        dag = TaskDAG(goal="snapshot-test")
+        for i in range(10):
+            dag = dag.add_node(TaskNode(node_id=f"task-{i}", title=f"T{i}", domain="d"))
+        executor.load_dag(dag)
+
+        results: list[int] = []
+        errors: list[Exception] = []
+
+        def call_available(agent_id: str) -> None:
+            try:
+                tasks = executor.available_tasks(agent_id)
+                results.append(len(tasks))
+            except Exception as exc:
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = [pool.submit(call_available, f"agent-{i % 5}") for i in range(20)]
+            for f in as_completed(futures):
+                f.result()
+
+        assert not errors, f"Errors from concurrent available_tasks: {errors}"
+        # All callers saw the same ready task count (10 tasks, none claimed)
+        assert all(c == 10 for c in results)
+
+    def test_available_tasks_and_claim_under_high_contention(self) -> None:
+        """High read contention plus racing claims must not double-claim tasks."""
+        registry = CapabilityRegistry()
+        for i in range(10):
+            registry.register(f"agent-{i}", [Capability(name="work", domain="d")])
+        store = ArtifactStore()
+        executor = SwarmExecutor(registry, store)
+
+        dag = TaskDAG(goal="high-contention")
+        for i in range(25):
+            dag = dag.add_node(TaskNode(node_id=f"task-{i}", title=f"T{i}", domain="d"))
+        executor.load_dag(dag)
+
+        claimed: list[str] = []
+        errors: list[Exception] = []
+
+        def race(agent_id: str) -> None:
+            for _ in range(10):
+                tasks = executor.available_tasks(agent_id)
+                if not tasks:
+                    return
+                try:
+                    receipt = executor.claim(tasks[0].node_id, agent_id)
+                    claimed.append(receipt.task_id)
+                except (ValueError, KeyError) as exc:
+                    errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=50) as pool:
+            futures = [pool.submit(race, f"agent-{i % 10}") for i in range(50)]
+            for future in as_completed(futures):
+                future.result()
+
+        assert len(claimed) == len(set(claimed))
+        assert len(claimed) == 25
+        assert executor.dag is not None
+        assert sum(
+            1 for node in executor.dag.nodes.values() if node.status == ExecutionStatus.CLAIMED
+        ) == 25
 
 
 class TestSwarmBenchmarkEdgeCases:

@@ -90,6 +90,12 @@ class TestMeshKillSwitch:
         with pytest.raises(MeshHaltedError):
             mesh.submit_vote(assignment.assignment_id, assignment.peers[0], approved=True)
 
+    def test_halt_blocks_validate_and_vote(self, mesh: ConstitutionalMesh) -> None:
+        assignment = mesh.request_validation("agent-00", "safe content", "art-validate")
+        mesh.halt()
+        with pytest.raises(MeshHaltedError):
+            mesh.validate_and_vote(assignment.assignment_id, assignment.peers[0])
+
     def test_halt_blocks_full_validation(self, mesh: ConstitutionalMesh) -> None:
         mesh.halt()
         with pytest.raises(MeshHaltedError):

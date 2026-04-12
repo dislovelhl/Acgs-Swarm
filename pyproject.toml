@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
 authors = [{name = "ACGS Team", email = "hello@acgs.dev"}]
-dependencies = ["acgs-lite>=2.5"]
+dependencies = ["acgs-lite>=2.7.2"]
 
 [project.urls]
 Homepage = "https://acgs.ai"

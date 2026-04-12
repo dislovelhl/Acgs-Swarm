@@ -32,9 +32,11 @@ from constitutional_swarm.mesh import (
     MeshProof,
     MeshResult,
     PeerAssignment,
+    SettlementPersistenceError,
     ValidationVote,
 )
 from constitutional_swarm.settlement_store import (
+    DuplicateSettlementError,
     JSONLSettlementStore,
     SettlementRecord,
     SettlementStore,
@@ -54,6 +56,7 @@ __all__ = [
     "ContractStatus",
     "DAGCompiler",
     "DNADisabledError",
+    "DuplicateSettlementError",
     "ExecutionStatus",
     "GoalSpec",
     "GovernanceManifold",
@@ -64,6 +67,7 @@ __all__ = [
     "MeshResult",
     "PeerAssignment",
     "SQLiteSettlementStore",
+    "SettlementPersistenceError",
     "SettlementRecord",
     "SettlementStore",
     "SwarmBenchmark",

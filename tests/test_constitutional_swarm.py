@@ -866,3 +866,60 @@ class TestByzantineMajorityReject:
         assert result.proof is not None
         assert result.proof.verify() is True
         assert result.votes_against >= 3
+
+    def test_byzantine_boundary_accepts_with_exact_floor_n_over_3_faulty_peers(self) -> None:
+        from constitutional_swarm.mesh import ConstitutionalMesh
+
+        constitution = Constitution.default()
+        mesh = ConstitutionalMesh(
+            constitution,
+            peers_per_validation=6,
+            quorum=4,
+            seed=7,
+        )
+
+        for name in (
+            "agent-a",
+            "agent-b",
+            "agent-c",
+            "agent-d",
+            "agent-e",
+            "agent-f",
+            "agent-g",
+        ):
+            mesh.register_agent(name)
+
+        assignment = mesh.request_validation(
+            producer_id="agent-a",
+            content="analyze code quality",
+            artifact_id="art-boundary-001",
+        )
+
+        faulty_peers = assignment.peers[:2]
+        honest_peers = assignment.peers[2:]
+        assert len(faulty_peers) == 2  # floor(6 / 3) tolerated Byzantine peers
+        assert len(honest_peers) == 4
+
+        for peer_id in faulty_peers:
+            mesh.submit_vote(
+                assignment.assignment_id,
+                peer_id,
+                approved=False,
+                reason="faulty peer reject",
+            )
+
+        for peer_id in honest_peers:
+            mesh.submit_vote(
+                assignment.assignment_id,
+                peer_id,
+                approved=True,
+                reason="honest peer approve",
+            )
+
+        result = mesh.get_result(assignment.assignment_id)
+        assert result.accepted is True
+        assert result.quorum_met is True
+        assert result.votes_for == 4
+        assert result.votes_against == 2
+        assert result.proof is not None
+        assert result.proof.verify() is True
