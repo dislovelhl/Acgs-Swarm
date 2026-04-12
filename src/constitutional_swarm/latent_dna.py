@@ -6,7 +6,7 @@ directly in the LLM residual stream, before tokens are sampled.
 
 Architecture
 ------------
-LatentDNAWrapper wraps any HuggingFace PreTrainedModel and registers a
+LatentDNAWrapper wraps any HuggingFace-compatible model and registers a
 forward hook on a specified transformer layer. At inference time, the hook:
 
 1. Projects each hidden state h onto the violation vector v_viol.
@@ -30,17 +30,22 @@ string validation catches adversarial sequences that survive steering.
 
 Requirements
 ------------
-- torch >= 2.0
-- transformers >= 4.40
+- torch >= 2.0  (required — raises ImportError if missing)
+- transformers >= 4.40  (optional — only needed for HuggingFace PreTrainedModel
+  integration and the extract_violation_vector helper)
 
-The module degrades gracefully if torch is not installed: importing
-LatentDNAWrapper will raise ImportError with a clear message.
+Install for real HuggingFace usage:
+    pip install "constitutional-swarm[latent]"
+
+The module accepts any duck-typed model with .config.model_type, .generate(),
+and indexable layers — no hard transformers dependency at import time.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 try:
     import torch
@@ -51,12 +56,31 @@ except ImportError as exc:
         "latent_dna requires torch. Install with: pip install torch>=2.0"
     ) from exc
 
-try:
-    from transformers import PreTrainedModel
-except ImportError as exc:
-    raise ImportError(
-        "latent_dna requires transformers. Install with: pip install transformers>=4.40"
-    ) from exc
+if TYPE_CHECKING:
+    # Only imported during static type checking — never at runtime.
+    # This keeps the module importable in torch-only environments.
+    try:
+        from transformers import PreTrainedModel
+    except ImportError:
+        pass
+
+
+def _transformers_available() -> bool:
+    """Return True if the transformers package is importable."""
+    return importlib.util.find_spec("transformers") is not None
+
+
+@runtime_checkable
+class _HFModelLike(Protocol):
+    """Minimal duck-type protocol for HuggingFace-compatible models.
+
+    Any object satisfying this protocol works with LatentDNAWrapper.
+    Real HuggingFace PreTrainedModel instances satisfy it automatically.
+    """
+
+    config: Any  # must have .model_type attribute
+
+    def generate(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
 class _BODESHook:
@@ -231,7 +255,7 @@ class LatentDNAWrapper:
 
     def __init__(
         self,
-        model: PreTrainedModel,
+        model: _HFModelLike,
         v_viol: Tensor,
         layer_idx: int,
         *,
@@ -362,7 +386,7 @@ class LatentDNAWrapper:
     # ──────────────────────────────────────────────────────────────────────
 
     @classmethod
-    def _auto_detect_path(cls, model: PreTrainedModel) -> str:
+    def _auto_detect_path(cls, model: _HFModelLike) -> str:
         arch = getattr(model.config, "model_type", "").lower()
         for key, path in cls._LAYER_PATHS.items():
             if key in arch:
@@ -374,7 +398,7 @@ class LatentDNAWrapper:
 
     @staticmethod
     def _resolve_layer(
-        model: PreTrainedModel, attr_path: str, layer_idx: int
+        model: _HFModelLike, attr_path: str, layer_idx: int
     ) -> nn.Module:
         obj: Any = model
         for part in attr_path.split("."):
@@ -394,7 +418,7 @@ class LatentDNAWrapper:
 
     @staticmethod
     def extract_violation_vector(
-        model: PreTrainedModel,
+        model: _HFModelLike,
         safe_inputs: list[dict[str, Tensor]],
         unsafe_inputs: list[dict[str, Tensor]],
         layer_idx: int,
@@ -464,7 +488,7 @@ class LatentDNAWrapper:
 
     @staticmethod
     def extract_violation_vector_pca(
-        model: PreTrainedModel,
+        model: _HFModelLike,
         safe_inputs: list[dict[str, Tensor]],
         unsafe_inputs: list[dict[str, Tensor]],
         layer_idx: int,
