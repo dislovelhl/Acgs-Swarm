@@ -656,6 +656,7 @@ class TestManifoldIntegration:
         # Manifold summary should report stable
         summary = manifold_mesh.manifold_summary()
         assert summary is not None
+        assert summary["manifold_type"] == "birkhoff"
         assert summary["is_stable"] is True
         assert summary["converged"] is True
 
@@ -671,6 +672,86 @@ class TestManifoldIntegration:
         assert matrix_after is not None
         assert manifold_mesh.agent_count == 4
         assert len(matrix_after) == 4
+
+    def test_spectral_manifold_flag_switch(self) -> None:
+        """Spectral manifold can be enabled without changing the default path."""
+        mesh = ConstitutionalMesh(
+            Constitution.default(),
+            seed=42,
+            use_manifold=True,
+            manifold_type="spectral",
+        )
+        for i in range(5):
+            mesh.register_agent(f"agent-{i:02d}", domain=f"domain-{i % 3}")
+
+        matrix = mesh.trust_matrix
+        summary = mesh.manifold_summary()
+
+        assert matrix is not None
+        assert len(matrix) == 5
+        assert summary is not None
+        assert summary["manifold_type"] == "spectral"
+        assert summary["num_agents"] == 5
+
+    def test_invalid_manifold_type_raises(self) -> None:
+        """Unknown manifold types must fail fast at construction."""
+        with pytest.raises(ValueError, match="manifold_type must be"):
+            ConstitutionalMesh(
+                Constitution.default(),
+                use_manifold=True,
+                manifold_type="unknown",  # type: ignore[arg-type]
+            )
+
+    def test_shadow_variance_diverges_from_birkhoff(self) -> None:
+        """Shadow spectral metrics should retain more variance than live Birkhoff."""
+        mesh = ConstitutionalMesh(
+            Constitution.default(),
+            seed=42,
+            use_manifold=True,
+            shadow_spectral=True,
+        )
+        for i in range(8):
+            mesh.register_agent(f"agent-{i:02d}", domain=f"domain-{i % 3}")
+
+        for idx in range(20):
+            producer = f"agent-{idx % 8:02d}"
+            mesh.full_validation(producer, f"shadow-safe-output-{idx}", f"shadow-art-{idx}")
+
+        summary = mesh.shadow_metrics_summary()
+        assert summary is not None
+        assert summary["count"] == 20
+        assert summary["spectral_variance"]["mean"] > summary["birkhoff_variance"]["mean"]
+
+    def test_shadow_mode_does_not_affect_routing(self) -> None:
+        """Shadow updates must leave the live peer-selection path unchanged."""
+        live = ConstitutionalMesh(Constitution.default(), seed=123, use_manifold=True)
+        shadow = ConstitutionalMesh(
+            Constitution.default(),
+            seed=123,
+            use_manifold=True,
+            shadow_spectral=True,
+        )
+        for mesh in (live, shadow):
+            for i in range(8):
+                mesh.register_agent(f"agent-{i:02d}", domain=f"domain-{i % 3}")
+
+        for idx in range(10):
+            producer = f"agent-{idx % 8:02d}"
+            assignment_live = live.request_validation(producer, f"route-content-{idx}", f"live-{idx}")
+            assignment_shadow = shadow.request_validation(
+                producer,
+                f"route-content-{idx}",
+                f"shadow-{idx}",
+            )
+            assert assignment_live.peers == assignment_shadow.peers
+
+            for peer in assignment_live.peers[:2]:
+                live.submit_vote(assignment_live.assignment_id, peer, approved=True)
+            for peer in assignment_shadow.peers[:2]:
+                shadow.submit_vote(assignment_shadow.assignment_id, peer, approved=True)
+
+        assert not hasattr(live, "_shadow_manifold")
+        assert shadow.shadow_metrics_summary() is not None
 
 
 # ---------------------------------------------------------------------------

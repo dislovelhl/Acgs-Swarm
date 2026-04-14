@@ -11,7 +11,6 @@ when torch is not installed.
 
 from __future__ import annotations
 
-import math
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -28,6 +27,13 @@ class _FakeLayer(nn.Module):
 
     def forward(self, x: Tensor) -> tuple[Tensor, None]:
         return x, None
+
+
+class _PlainTensorLayer(nn.Module):
+    """Identity layer that returns a plain tensor."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x
 
 
 class _FakeConfig:
@@ -48,6 +54,36 @@ class _FakeModel(nn.Module):
         for layer in self.model.layers:
             hidden_states, _ = layer(hidden_states)
         return hidden_states, None
+
+    def generate(self, input_ids: Tensor, *, max_new_tokens: int = 128, **_: object) -> Tensor:
+        hidden_states, _ = self.forward(input_ids)
+        if max_new_tokens <= 0:
+            return hidden_states
+        new_tokens = hidden_states[:, -1:, :].repeat(1, max_new_tokens, 1)
+        return torch.cat([input_ids, new_tokens], dim=1)
+
+
+class _PlainTensorModel(nn.Module):
+    """Minimal stub whose layers return plain tensors instead of tuples."""
+
+    def __init__(self, n_layers: int = 24, hidden_dim: int = 64) -> None:
+        super().__init__()
+        self.config = _FakeConfig()
+        self.model = nn.ModuleNamespace()
+        self.model.layers = nn.ModuleList([_PlainTensorLayer() for _ in range(n_layers)])
+        self._hidden_dim = hidden_dim
+
+    def forward(self, hidden_states: Tensor) -> Tensor:
+        for layer in self.model.layers:
+            hidden_states = layer(hidden_states)
+        return hidden_states
+
+    def generate(self, input_ids: Tensor, *, max_new_tokens: int = 128, **_: object) -> Tensor:
+        hidden_states = self.forward(input_ids)
+        if max_new_tokens <= 0:
+            return hidden_states
+        new_tokens = hidden_states[:, -1:, :].repeat(1, max_new_tokens, 1)
+        return torch.cat([input_ids, new_tokens], dim=1)
 
 
 class nn_ModuleNamespace(nn.Module):
@@ -197,6 +233,23 @@ def test_bodes_hook_rejects_2d_vector() -> None:
         _BODESHook(v)
 
 
+def test_bodes_hook_plain_tensor_output_branch() -> None:
+    """Hook must also steer plain-tensor layer outputs, not only tuple outputs."""
+    from constitutional_swarm.latent_dna import _BODESHook
+
+    hidden_dim = 64
+    v = _make_v_viol(hidden_dim)
+    hidden = (6.0 * v).unsqueeze(0).unsqueeze(0)
+
+    hook = _BODESHook(v, threshold=0.0, gamma=1.0)
+    result = hook(module=None, input=(), output=hidden.clone())
+
+    assert isinstance(result, Tensor)
+    proj_after = (result[0, 0] @ v).item()
+    assert abs(proj_after) < 1e-4
+    assert hook.interventions == 1
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # LatentDNAWrapper integration tests
 # ──────────────────────────────────────────────────────────────────────────────
@@ -266,6 +319,34 @@ def test_wrapper_intervention_stats() -> None:
     assert 0.0 <= stats["intervention_rate"] <= 1.0
 
 
+def test_wrapper_generate_governed_returns_stats_and_cleans_up() -> None:
+    """Governed generation must return tensor output, stats, and clean up its hook."""
+    from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+    hidden_dim = 64
+    model = _FakeModel(hidden_dim=hidden_dim)
+    v = _make_v_viol(hidden_dim)
+    wrapper = LatentDNAWrapper(model, v, layer_idx=0, threshold=0.0, gamma=1.0)
+
+    input_ids = (5.0 * v).reshape(1, 1, hidden_dim).repeat(1, 3, 1)
+
+    output_ids, stats = wrapper.generate_governed(input_ids, max_new_tokens=2)
+
+    assert isinstance(output_ids, Tensor)
+    assert output_ids.shape == (1, 5, hidden_dim)
+    assert {
+        "total_tokens",
+        "steered_tokens",
+        "intervention_rate",
+        "layer_idx",
+        "threshold",
+        "gamma",
+    }.issubset(stats)
+    assert stats["steered_tokens"] > 0
+    assert stats["intervention_rate"] > 0.0
+    assert not wrapper.enabled
+
+
 def test_wrapper_layer_idx_out_of_range() -> None:
     """Wrapper must raise IndexError for layer_idx beyond model depth."""
     from constitutional_swarm.latent_dna import LatentDNAWrapper
@@ -297,6 +378,27 @@ def test_wrapper_explicit_layer_path() -> None:
     # Should not raise
     wrapper = LatentDNAWrapper(model, v, layer_idx=5, layer_attr_path="model.layers")
     assert not wrapper.enabled
+
+
+def test_wrapper_intervention_stats_with_plain_tensor_layers() -> None:
+    """Wrapper stats must work when the hooked layer returns a plain tensor."""
+    from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+    hidden_dim = 64
+    model = _PlainTensorModel(hidden_dim=hidden_dim)
+    v = _make_v_viol(hidden_dim)
+    wrapper = LatentDNAWrapper(model, v, layer_idx=0, threshold=0.0, gamma=1.0)
+
+    hidden = (4.0 * v).reshape(1, 1, hidden_dim).repeat(2, 2, 1)
+
+    with wrapper:
+        output = model(hidden)
+
+    stats = wrapper.intervention_stats()
+    assert isinstance(output, Tensor)
+    assert stats["total_tokens"] == 4
+    assert stats["steered_tokens"] == 4
+    assert stats["intervention_rate"] == 1.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -361,6 +463,37 @@ def test_pca_extracts_unit_vector() -> None:
     assert v.shape[0] == hidden_dim
     norm = v.norm().item()
     assert abs(norm - 1.0) < 1e-4, f"v_viol should be unit-normalized, got ‖v‖={norm}"
+
+
+def test_mean_difference_extracts_known_direction() -> None:
+    """Mean-difference extraction must recover the unsafe-minus-safe direction."""
+    from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+    hidden_dim = 64
+    model = _FakeModel(n_layers=24, hidden_dim=hidden_dim)
+    known_direction = torch.zeros(hidden_dim)
+    known_direction[0] = 1.0
+
+    safe_inputs = [
+        {"hidden_states": torch.zeros(1, 4, hidden_dim)},
+        {"hidden_states": torch.ones(1, 4, hidden_dim)},
+    ]
+    unsafe_inputs = [
+        {"hidden_states": inp["hidden_states"] + 3.0 * known_direction.view(1, 1, -1)}
+        for inp in safe_inputs
+    ]
+
+    v = LatentDNAWrapper.extract_violation_vector(
+        model,
+        safe_inputs,
+        unsafe_inputs,
+        layer_idx=0,
+        layer_attr_path="model.layers",
+    )
+
+    assert v.shape == (hidden_dim,)
+    assert abs(v.norm().item() - 1.0) < 1e-4
+    assert torch.dot(v, known_direction).item() > 0.999
 
 
 def test_pca_multi_component() -> None:

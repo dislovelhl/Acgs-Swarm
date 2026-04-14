@@ -22,13 +22,14 @@ each other's work, with cryptographic proof, at sub-microsecond cost.
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from acgs_lite import Constitution
 from constitutional_swarm.dna import AgentDNA
@@ -38,6 +39,9 @@ from constitutional_swarm.settlement_store import (
     SettlementRecord,
     SettlementStore,
 )
+
+if TYPE_CHECKING:
+    import constitutional_swarm.spectral_sphere as spectral_sphere_mod
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -201,6 +205,8 @@ class ConstitutionalMesh:
         quorum: int = 2,
         seed: int | None = None,
         use_manifold: bool = False,
+        manifold_type: Literal["birkhoff", "spectral"] = "birkhoff",
+        shadow_spectral: bool = False,
         risk_scoring: bool = False,
         settlement_store_path: str | Path | None = None,
         settlement_store: SettlementStore | None = None,
@@ -208,6 +214,10 @@ class ConstitutionalMesh:
         if quorum > peers_per_validation:
             raise ValueError(
                 f"Quorum ({quorum}) cannot exceed peers_per_validation ({peers_per_validation})"
+            )
+        if manifold_type not in {"birkhoff", "spectral"}:
+            raise ValueError(
+                f"manifold_type must be 'birkhoff' or 'spectral', got {manifold_type!r}"
             )
         self._constitution = constitution
         self._dna = AgentDNA(
@@ -225,7 +235,12 @@ class ConstitutionalMesh:
         self._votes: dict[str, list[ValidationVote]] = {}
         self._final_results: dict[str, MeshResult] = {}
         self._use_manifold = use_manifold
-        self._manifold: GovernanceManifold | None = None
+        self._manifold_type = manifold_type
+        self._manifold: GovernanceManifold | spectral_sphere_mod.SpectralSphereManifold | None = None
+        self._shadow_spectral = use_manifold and manifold_type == "birkhoff" and shadow_spectral
+        if self._shadow_spectral:
+            self._shadow_manifold: spectral_sphere_mod.SpectralSphereManifold | None = None
+            self._shadow_metrics: list[dict[str, float | str]] = []
         self._agent_indices: dict[str, int] = {}
         # Trust persistence: keyed by (from_agent_id, to_agent_id)
         # Survives agent churn and constitution rotation when preserve_trust=True.
@@ -349,14 +364,13 @@ class ConstitutionalMesh:
             )
             if self._use_manifold:
                 if preserve_trust:
-                    # Rebuild keeps agent indices; restore will replay trust_store
-                    n = len(self._agent_indices)
-                    if n > 0:
-                        self._manifold = GovernanceManifold(n)
-                        self._restore_trust_from_store()
+                    self._rebuild_manifold()
                 else:
                     # Hard reset — null manifold first so _save_trust_to_store is a no-op
                     self._manifold = None
+                    if self._shadow_spectral:
+                        self._shadow_manifold = None
+                        self._shadow_metrics = []
                     self._trust_store = {}
                     self._rebuild_manifold()
 
@@ -664,7 +678,7 @@ class ConstitutionalMesh:
 
     @property
     def trust_matrix(self) -> tuple[tuple[float, ...], ...] | None:
-        """The projected doubly stochastic trust matrix, or None if manifold disabled."""
+        """The projected trust matrix, or None if manifold integration is disabled."""
         with self._lock:
             if self._manifold is None:
                 return None
@@ -675,7 +689,24 @@ class ConstitutionalMesh:
         with self._lock:
             if self._manifold is None:
                 return None
-            return self._manifold.summary()
+            return {
+                "manifold_type": self._manifold_type,
+                **self._manifold.summary(),
+            }
+
+    def shadow_metrics_summary(self) -> dict[str, Any] | None:
+        """Aggregate shadow manifold metrics, or None when shadow mode is inactive."""
+        with self._lock:
+            metrics = getattr(self, "_shadow_metrics", None)
+            if not metrics:
+                return None
+            return {
+                "count": len(metrics),
+                "birkhoff_variance": _summarize_metric(metrics, "birkhoff_variance"),
+                "spectral_variance": _summarize_metric(metrics, "spectral_variance"),
+                "birkhoff_spectral_norm": _summarize_metric(metrics, "birkhoff_spectral_norm"),
+                "spectral_spectral_norm": _summarize_metric(metrics, "spectral_spectral_norm"),
+            }
 
     def _select_peers(
         self,
@@ -702,7 +733,7 @@ class ConstitutionalMesh:
             return list(self._rng.sample(available, k=needed))
 
         proj = self._manifold.project()
-        if not proj.converged:
+        if not getattr(proj, "converged", True):
             return list(self._rng.sample(available, k=needed))
 
         producer_idx = self._agent_indices[producer_id]
@@ -795,15 +826,19 @@ class ConstitutionalMesh:
                 if val != 0.0:
                     self._trust_store[(aid, bid)] = val
 
-    def _restore_trust_from_store(self) -> None:
-        """Replay _trust_store into the freshly built manifold, applying decay for archived agents."""
-        if self._manifold is None:
+    def _restore_trust_from_store(
+        self,
+        manifold: GovernanceManifold | spectral_sphere_mod.SpectralSphereManifold | None = None,
+    ) -> None:
+        """Replay _trust_store into a freshly built manifold instance."""
+        target = self._manifold if manifold is None else manifold
+        if target is None:
             return
         for (aid, bid), val in self._trust_store.items():
             i = self._agent_indices.get(aid)
             j = self._agent_indices.get(bid)
             if i is not None and j is not None:
-                self._manifold._raw_trust[i][j] = val
+                target._raw_trust[i][j] = val
 
     def _restore_archive_for_agent(self, agent_id: str) -> None:
         """Restore archived trust for a returning agent with exponential decay."""
@@ -823,6 +858,10 @@ class ConstitutionalMesh:
             if decayed > 0.0:
                 self._manifold._raw_trust[i][j] = decayed
                 self._manifold._raw_trust[j][i] = decayed
+                shadow = getattr(self, "_shadow_manifold", None)
+                if shadow is not None:
+                    shadow._raw_trust[i][j] = decayed
+                    shadow._raw_trust[j][i] = decayed
 
     def _archive_trust_for_agent(self, agent_id: str) -> None:
         """Save departing agent's trust to archive (capped at _TRUST_ARCHIVE_MAX)."""
@@ -856,9 +895,26 @@ class ConstitutionalMesh:
         n = len(self._agent_indices)
         if n == 0:
             self._manifold = None
+            if self._shadow_spectral:
+                self._shadow_manifold = None
             return
-        self._manifold = GovernanceManifold(n)
+        self._manifold = self._build_manifold(n, self._manifold_type)
         self._restore_trust_from_store()
+        if self._shadow_spectral:
+            self._shadow_manifold = self._build_manifold(n, "spectral")
+            self._restore_trust_from_store(self._shadow_manifold)
+
+    def _build_manifold(
+        self,
+        n: int,
+        manifold_type: Literal["birkhoff", "spectral"],
+    ) -> GovernanceManifold | spectral_sphere_mod.SpectralSphereManifold:
+        """Instantiate the configured manifold type lazily."""
+        if manifold_type == "spectral":
+            import constitutional_swarm.spectral_sphere as spectral_sphere_mod_local
+
+            return spectral_sphere_mod_local.SpectralSphereManifold(num_agents=n, r=1.0)
+        return GovernanceManifold(n)
 
     # -- Internal ----------------------------------------------------------
 
@@ -907,6 +963,34 @@ class ConstitutionalMesh:
                         else:
                             self._manifold.update_trust(producer_idx, voter_idx, -0.5)
                     self._manifold.project()
+                    shadow = getattr(self, "_shadow_manifold", None)
+                    if shadow is not None:
+                        try:
+                            for vote in votes:
+                                voter_idx = self._agent_indices.get(vote.voter_id)
+                                if voter_idx is None:
+                                    continue
+                                if vote.approved == majority_approved:
+                                    shadow.update_trust(producer_idx, voter_idx, 0.1)
+                                else:
+                                    shadow.update_trust(producer_idx, voter_idx, -0.5)
+                            shadow.project()
+                            self._shadow_metrics.append(
+                                {
+                                    "assignment_id": assignment_id,
+                                    "birkhoff_variance": _trust_variance(self._manifold.trust_matrix),
+                                    "spectral_variance": _trust_variance(shadow.trust_matrix),
+                                    "birkhoff_spectral_norm": _matrix_spectral_norm(
+                                        self._manifold.trust_matrix
+                                    ),
+                                    "spectral_spectral_norm": _matrix_spectral_norm(
+                                        shadow.trust_matrix
+                                    ),
+                                }
+                            )
+                        except IndexError:
+                            # Shadow mode must never interfere with the live routing path.
+                            pass
 
     def _maybe_finalize_result(self, assignment_id: str) -> bool:
         """Return whether the first quorum-reaching result should be frozen."""
@@ -1170,3 +1254,51 @@ def _compute_merkle_root(
     # Root: combine leaf and votes
     root = hashlib.sha256(f"{leaf}:{votes_root}".encode()).hexdigest()[:32]
     return root
+
+
+def _trust_variance(matrix: tuple[tuple[float, ...], ...]) -> float:
+    """Variance of matrix entries around their mean."""
+    values = [value for row in matrix for value in row]
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    return sum((value - mean) ** 2 for value in values) / len(values)
+
+
+def _matrix_spectral_norm(
+    matrix: tuple[tuple[float, ...], ...],
+    *,
+    max_iterations: int = 20,
+    tol: float = 1e-8,
+) -> float:
+    """Estimate the matrix spectral norm via power iteration on M^T M."""
+    n = len(matrix)
+    if n == 0:
+        return 0.0
+    vector = [1.0 / math.sqrt(n)] * n
+    sigma = 0.0
+    for _ in range(max_iterations):
+        mv = [sum(matrix[i][j] * vector[j] for j in range(n)) for i in range(n)]
+        mtmv = [sum(matrix[j][i] * mv[j] for j in range(n)) for i in range(n)]
+        new_norm = math.sqrt(sum(value * value for value in mtmv))
+        if new_norm < 1e-14:
+            return 0.0
+        new_sigma = math.sqrt(new_norm)
+        vector = [value / new_norm for value in mtmv]
+        if abs(new_sigma - sigma) / (sigma + 1e-12) < tol:
+            return new_sigma
+        sigma = new_sigma
+    return sigma
+
+
+def _summarize_metric(
+    metrics: list[dict[str, float | str]],
+    key: str,
+) -> dict[str, float]:
+    """Return mean/min/max for one recorded shadow metric."""
+    values = [float(metric[key]) for metric in metrics]
+    return {
+        "mean": sum(values) / len(values),
+        "min": min(values),
+        "max": max(values),
+    }

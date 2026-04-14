@@ -20,7 +20,10 @@ Dependencies: torch (optional, same isolation as latent_dna.py).
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from constitutional_swarm.merkle_crdt import MerkleCRDT
 
 try:
     import torch
@@ -178,6 +181,7 @@ def integrate(
     residual_alpha: float = 0.1,
     max_power_iter: int = 20,
     record_every: int = 0,
+    crdt: MerkleCRDT | None = None,
 ) -> dict[str, Any]:
     """Integrate the swarm ODE from t_span[0] to t_span[1].
 
@@ -191,6 +195,8 @@ def integrate(
         max_power_iter: Power iterations for spectral norm.
         record_every: If > 0, record H and variance every k steps.
             If 0, only return the final state.
+        crdt: Optional MerkleCRDT replica that receives compact ODE snapshot
+            metadata at the same recording points as trajectory entries.
 
     Returns:
         dict with keys:
@@ -210,6 +216,15 @@ def integrate(
         if record_every > 0 and step % record_every == 0:
             var = _trust_variance_torch(H)
             trajectory.append((t, H.clone().detach(), var))
+            if crdt is not None:
+                import json
+
+                crdt.append(
+                    payload=json.dumps({"step": step, "t": t, "variance": var}),
+                    payload_type="ode_snapshot",
+                    bodes_passed=True,
+                    constitutional_hash="608508a9bd224290",
+                )
 
         H = projected_rk4_step(
             f, H, t, dt,
@@ -223,6 +238,15 @@ def integrate(
     if record_every > 0:
         var = _trust_variance_torch(H)
         trajectory.append((t, H.clone().detach(), var))
+        if crdt is not None:
+            import json
+
+            crdt.append(
+                payload=json.dumps({"step": n_steps, "t": t, "variance": var}),
+                payload_type="ode_snapshot",
+                bodes_passed=True,
+                constitutional_hash="608508a9bd224290",
+            )
 
     return {
         "H_final": H,
