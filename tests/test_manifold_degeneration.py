@@ -13,7 +13,9 @@ Expected result: FAIL — retention_ratio < 0.10 by cycle 50-100.
 """
 
 import random
+
 import pytest
+
 from constitutional_swarm.manifold import GovernanceManifold
 
 
