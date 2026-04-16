@@ -64,6 +64,10 @@ class JSONLSettlementStore:
 
     def append(self, record: SettlementRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        assignment_id = str(record.assignment["assignment_id"])
+        for existing in self.load_all():
+            if str(existing.assignment.get("assignment_id", "")) == assignment_id:
+                raise DuplicateSettlementError(f"Settlement {assignment_id} already exists")
         payload = {
             "assignment": record.assignment,
             "result": record.result,

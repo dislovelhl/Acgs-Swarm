@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from constitutional_swarm.swe_bench.agent import SWEBenchAgent, SWEPatch
 from constitutional_swarm.swe_bench.swarm_coordinator import SwarmCoordinator
 

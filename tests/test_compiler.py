@@ -33,9 +33,9 @@ class TestDeterministicNodeId:
     def test_different_titles_different_ids(self) -> None:
         assert _deterministic_node_id("hello") != _deterministic_node_id("world")
 
-    def test_id_is_8_hex_chars(self) -> None:
+    def test_id_is_16_hex_chars(self) -> None:
         node_id = _deterministic_node_id("test title")
-        assert len(node_id) == 8
+        assert len(node_id) == 16
         int(node_id, 16)  # must be valid hex
 
 

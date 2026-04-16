@@ -115,7 +115,7 @@ class ConstitutionalValidator:
         # Re-register all known miners in the new mesh
         for miner_uid in self._known_miners:
             domain = self._miner_domains.get(miner_uid, "")
-            self._mesh.register_agent(miner_uid, domain=domain)
+            self._mesh.register_local_signer(miner_uid, domain=domain)
         self._previous_hash = old_hash
 
     @property
@@ -138,7 +138,7 @@ class ConstitutionalValidator:
         Only miners registered via this method may submit judgments.
         """
         self._known_miners = self._known_miners | {miner_uid}
-        self._mesh.register_agent(miner_uid, domain=domain)
+        self._mesh.register_local_signer(miner_uid, domain=domain)
         self._miner_tiers = {**self._miner_tiers, miner_uid: tier}
         self._miner_domains = {**self._miner_domains, miner_uid: domain}
 

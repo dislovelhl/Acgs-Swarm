@@ -12,7 +12,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from constitutional_swarm.swe_bench.agent import SWEBenchAgent, SWEPatch
 from constitutional_swarm.swe_bench.harness import (
     SWEBenchHarness,

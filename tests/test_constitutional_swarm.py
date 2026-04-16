@@ -10,6 +10,7 @@ from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.contract import ContractStatus, TaskContract
 from constitutional_swarm.dna import AgentDNA, constitutional_dna
 from constitutional_swarm.execution import ExecutionStatus, WorkReceipt
+from constitutional_swarm.mesh import ConstitutionalMesh
 from constitutional_swarm.swarm import NodeStatus, SwarmExecutor, TaskDAG, TaskNode
 
 from acgs_lite import (
@@ -18,6 +19,28 @@ from acgs_lite import (
     MACIRole,
     Rule,
 )
+
+
+def _signed_mesh_vote(
+    mesh: ConstitutionalMesh,
+    assignment_id: str,
+    voter_id: str,
+    *,
+    approved: bool,
+    reason: str = "",
+):
+    return mesh.submit_vote(
+        assignment_id,
+        voter_id,
+        approved=approved,
+        reason=reason,
+        signature=mesh.sign_vote(
+            assignment_id,
+            voter_id,
+            approved=approved,
+            reason=reason,
+        ),
+    )
 
 # ---------------------------------------------------------------------------
 # Breakthrough A: Agent DNA
@@ -838,7 +861,7 @@ class TestByzantineMajorityReject:
 
         # Register 5 agents
         for name in ("agent-a", "agent-b", "agent-c", "agent-d", "agent-e"):
-            mesh.register_agent(name)
+            mesh.register_local_signer(name)
 
         # Producer agent-a requests validation for safe content
         assignment = mesh.request_validation(
@@ -851,7 +874,8 @@ class TestByzantineMajorityReject:
         # After 3 rejects the mesh auto-settles (quorum reached), so
         # we submit exactly 3 votes — the 4th would raise AssignmentSettledError.
         for peer_id in assignment.peers[:3]:
-            mesh.submit_vote(
+            _signed_mesh_vote(
+                mesh,
                 assignment.assignment_id,
                 peer_id,
                 approved=False,
@@ -887,7 +911,7 @@ class TestByzantineMajorityReject:
             "agent-f",
             "agent-g",
         ):
-            mesh.register_agent(name)
+            mesh.register_local_signer(name)
 
         assignment = mesh.request_validation(
             producer_id="agent-a",
@@ -901,7 +925,8 @@ class TestByzantineMajorityReject:
         assert len(honest_peers) == 4
 
         for peer_id in faulty_peers:
-            mesh.submit_vote(
+            _signed_mesh_vote(
+                mesh,
                 assignment.assignment_id,
                 peer_id,
                 approved=False,
@@ -909,7 +934,8 @@ class TestByzantineMajorityReject:
             )
 
         for peer_id in honest_peers:
-            mesh.submit_vote(
+            _signed_mesh_vote(
+                mesh,
                 assignment.assignment_id,
                 peer_id,
                 approved=True,
