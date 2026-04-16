@@ -535,3 +535,6 @@ async def simulate_ws_gossip_convergence(
         "sizes": sizes,
         "unique_cids": len(cid_sets[0]) if converged else -1,
     }
+
+# Backwards-compatible alias — CI smoke test imports this name
+GossipNode = SwarmNode
