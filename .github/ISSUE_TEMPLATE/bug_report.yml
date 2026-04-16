@@ -1,5 +1,5 @@
-name: Bug Report
-description: Report a package bug, regression, or broken workflow.
+name: Bug report
+description: Report a defect in the package, workflows, or docs.
 title: "[Bug]: "
 labels:
   - bug
@@ -7,66 +7,81 @@ body:
   - type: markdown
     attributes:
       value: |
-        Be concrete. File, function, command, observed result.
-  - type: input
-    id: version
+        Thanks for filing a report. Please include enough detail for us to reproduce the problem quickly.
+
+  - type: textarea
+    id: summary
     attributes:
-      label: Version or commit
-      description: Package version, branch, or commit SHA where you saw the bug.
-      placeholder: "0.2.0 or 8ce18ae"
+      label: Summary
+      description: What broke?
+      placeholder: A concise description of the bug.
     validations:
       required: true
+
   - type: textarea
-    id: environment
-    attributes:
-      label: Environment
-      description: Python version, OS, install extras, and anything else relevant.
-      placeholder: |
-        Python 3.12
-        Ubuntu 24.04
-        Installed with: pip install "constitutional-swarm[transport]"
-    validations:
-      required: true
-  - type: textarea
-    id: repro
+    id: reproduction
     attributes:
       label: Reproduction steps
-      description: Exact steps or commands to reproduce the problem.
+      description: Provide the smallest sequence of steps that reproduces the issue.
       placeholder: |
-        1. ...
-        2. ...
-        3. ...
+        1. Install ...
+        2. Run ...
+        3. Observe ...
     validations:
       required: true
+
   - type: textarea
     id: expected
     attributes:
       label: Expected behavior
+      placeholder: What did you expect to happen instead?
     validations:
       required: true
-  - type: textarea
-    id: actual
+
+  - type: input
+    id: version
     attributes:
-      label: Actual behavior
+      label: Package version
+      description: Include the released version or commit SHA you tested.
+      placeholder: 0.2.0
     validations:
       required: true
+
+  - type: dropdown
+    id: install_path
+    attributes:
+      label: Install path
+      options:
+        - pip install constitutional-swarm
+        - pip install "constitutional-swarm[transport]"
+        - pip install "constitutional-swarm[research]"
+        - editable install from source
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, and any relevant runtime details.
+      placeholder: Ubuntu 24.04, Python 3.12, local workstation
+    validations:
+      required: true
+
   - type: textarea
     id: logs
     attributes:
-      label: Logs, traceback, or failing output
+      label: Logs and traceback
+      description: Paste error output, logs, or screenshots if available.
       render: shell
-  - type: dropdown
-    id: area
+
+  - type: checkboxes
+    id: checks
     attributes:
-      label: Affected area
+      label: Pre-flight checks
       options:
-        - Agent DNA
-        - Mesh / peer validation
-        - Remote vote transport
-        - EvolutionLog
-        - DAG compiler / swarm executor
-        - Packaging / release
-        - Papers / docs
-        - Other
-    validations:
-      required: true
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I can reproduce this against the latest main branch or latest release.
+          required: true

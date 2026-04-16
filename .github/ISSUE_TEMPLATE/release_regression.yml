@@ -1,0 +1,83 @@
+name: Release regression report
+description: Report a regression introduced by a release, packaging change, or published artifact.
+title: "[Regression]: "
+labels:
+  - regression
+  - release
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when behavior changed between released versions, build artifacts, or published documentation.
+
+  - type: input
+    id: working_version
+    attributes:
+      label: Last known good version
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: broken_version
+    attributes:
+      label: First bad version
+      placeholder: 0.2.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: regression
+    attributes:
+      label: Regression summary
+      description: What changed between the working and broken versions?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Install version ...
+        2. Run ...
+        3. Observe regression ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: artifact
+    attributes:
+      label: Affected artifact
+      options:
+        - PyPI package
+        - Source distribution
+        - Wheel
+        - README / docs
+        - Paper / manuscript artifact
+        - GitHub workflow / release automation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Python version, OS, and install path.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add tracebacks, screenshots, artifact links, or release URLs.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I verified the regression against two released versions or a release and `main`.
+          required: true

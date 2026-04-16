@@ -1,49 +1,44 @@
 # Security Policy
 
-## Supported Versions
+## Supported versions
 
-Security fixes are applied to:
+Security fixes are prioritized for the latest published release line and the current `main` branch.
 
 | Version | Supported |
-| --- | --- |
-| `0.2.x` | Yes |
-| `main` | Yes |
-| `< 0.2.0` | No |
+| ------- | --------- |
+| Latest release | :white_check_mark: |
+| Older releases | :x: |
+| `main` | Best effort |
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-Prefer GitHub private vulnerability reporting for anything that could let an attacker:
+For suspected vulnerabilities, please use GitHub private vulnerability reporting for this repository when it is available:
 
-- bypass constitutional validation
-- forge or replay mesh votes
-- corrupt settlement persistence
-- exfiltrate prompts, artifacts, or private model state
-- abuse the WebSocket transport path
+- <https://github.com/dislovelhl/Acgs-Swarm/security/advisories/new>
 
-If private vulnerability reporting is enabled in the GitHub repo settings, use that.
+If you cannot access that flow, contact the maintainers at `hello@acgs.dev` with:
 
-If it is not enabled yet, email the maintainer listed in `pyproject.toml` or open a private coordination channel with the repo owner before publishing details.
+- a description of the issue and affected component
+- reproduction steps or a proof of concept
+- impact assessment
+- any suggested mitigations
 
-Do not open a public GitHub issue for a live security bug.
+Please do not open public issues for unpatched vulnerabilities.
 
-## What to Include
+## Response expectations
 
-Please include:
+We aim to:
 
-- affected version or commit SHA
-- exact file and function involved
-- reproduction steps
-- proof-of-concept payload or request, if safe to share privately
-- expected impact and attacker prerequisites
+- acknowledge new reports within 5 business days
+- provide an initial severity and triage update within 10 business days
+- coordinate disclosure after a fix or mitigation is available
 
-Good reports are concrete. File, line, request shape, observed behavior.
+## Scope
 
-## Response Expectations
+This policy covers:
 
-- initial triage target: within 5 business days
-- confirmed issues get a remediation plan and patch target
-- coordinated disclosure is preferred once a fix is available
+- the published Python package and source distribution
+- GitHub Actions workflows that build, test, or publish artifacts
+- release automation and package metadata in this repository
 
-## Scope Notes
-
-This repo ships a Python package and research/paper assets. Security reports should focus on shipped runtime behavior, build/release pipeline integrity, and exposed transport or persistence paths. Formatting issues in paper sources are out of scope unless they create a release or supply-chain risk.
+Third-party services and dependencies are handled according to their own security policies, though we still appreciate coordinated reports when they affect this package.

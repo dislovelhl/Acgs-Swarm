@@ -1,0 +1,21 @@
+* @dislovelhl
+
+# Core package
+/src/constitutional_swarm/ @dislovelhl
+/tests/ @dislovelhl
+/pyproject.toml @dislovelhl
+
+# Research and paper artifacts
+/paper/ @dislovelhl
+/papers/ @dislovelhl
+/docs/ @dislovelhl
+
+# Release and repository automation
+/.github/workflows/ @dislovelhl
+/.github/dependabot.yml @dislovelhl
+/.github/pull_request_template.md @dislovelhl
+
+# Repository policy and maintenance
+/CHANGELOG.md @dislovelhl
+/README.md @dislovelhl
+/SECURITY.md @dislovelhl

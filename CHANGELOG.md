@@ -7,7 +7,7 @@ The format is based on Keep a Changelog.
 ## [0.2.0] - 2026-04-16
 
 ### Added
-- Added `EvolutionLog`, a SQLite-backed append-only governance metric log so capability curves can reject regressions, gaps, and deceleration at write time.
+- Added `EvolutionLog`, a SQLite-backed append-only governance metric log whose SQLite triggers reject regressions, gaps, and deceleration at write time for capability-curve entries.
 - Added remote vote transport primitives so public-key-only peers can validate and sign mesh votes outside the producer process.
 - Added remote vote transport tests and evolution log tests, bringing the package test inventory from 38 to 40 files.
 - Added self-contained paper build assets so the ICLR 2027 and NDSS 2027 manuscripts compile directly from the repo.

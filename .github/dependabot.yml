@@ -5,37 +5,29 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
-      time: "08:00"
+      time: "06:00"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
-      - "python"
     commit-message:
-      prefix: "chore"
-      include: "scope"
+      prefix: "build"
     groups:
-      python-runtime:
+      python-minor-and-patch:
         patterns:
-          - "cryptography"
-          - "acgs-lite"
-          - "websockets"
-          - "torch"
-          - "transformers"
-      python-dev:
-        patterns:
-          - "pytest*"
-          - "ruff"
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-      time: "08:30"
+      time: "06:15"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
       - "github-actions"
     commit-message:
-      prefix: "chore"
-      include: "scope"
+      prefix: "ci"

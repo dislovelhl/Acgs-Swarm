@@ -1,42 +1,36 @@
 ## Summary
 
-- What changed?
-- Why does it matter to the package user?
-- Anything intentionally left out?
+- Describe the change.
+- Link the issue, discussion, or release driver when relevant.
 
-## Test Evidence
+## Validation
 
+- [ ] `python -m ruff check src/`
 - [ ] `python -m pytest tests/ --import-mode=importlib -q`
-- [ ] targeted tests for changed paths
-- [ ] `python -m build`
+- [ ] `python -m build --wheel --sdist`
+- [ ] Other relevant validation:
 
-Paste the actual command output or a short result summary.
+## Package and release impact
 
-## Release Impact
+- [ ] No package-facing change
+- [ ] Public API changed
+- [ ] Dependency or packaging metadata changed
+- [ ] Release notes / changelog update needed
 
-- [ ] package API changed
-- [ ] dependency set changed
-- [ ] version bump required
-- [ ] changelog updated
+Version or release notes details:
 
-If the package API changed, name the public symbols or behavior that changed.
+## Paper and docs impact
 
-## Security / Safety Check
+- [ ] No paper or docs changes
+- [ ] `README.md` updated
+- [ ] `CHANGELOG.md` updated
+- [ ] `paper/` or `papers/` artifacts updated
+- [ ] Other docs updated
 
-- [ ] no new trust boundary without validation
-- [ ] no generated artifacts or local state files included by accident
-- [ ] no secrets, tokens, or private credentials in the diff
+## Security and operations
 
-## Papers / Research Assets
+- [ ] No security-sensitive change
+- [ ] Touches authentication, signatures, transport, or release automation
+- [ ] Requires follow-up GitHub settings or environment changes
 
-- [ ] not applicable
-- [ ] paper source changed
-- [ ] paper build assets changed
-
-If paper files changed, note whether the LaTeX sources were rebuilt locally.
-
-## Checklist
-
-- [ ] CI should pass on this branch
-- [ ] docs match shipped behavior
-- [ ] reviewers know the highest-risk area of the diff
+Follow-up notes:

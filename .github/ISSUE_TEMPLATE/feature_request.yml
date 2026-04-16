@@ -1,5 +1,5 @@
-name: Feature Request
-description: Propose a new package capability or workflow improvement.
+name: Feature request
+description: Suggest an improvement to the package, docs, or release workflow.
 title: "[Feature]: "
 labels:
   - enhancement
@@ -7,49 +7,58 @@ body:
   - type: markdown
     attributes:
       value: |
-        Start from the user. What can they not do today that they should be able to do?
+        Please focus on the user problem, the expected outcome, and any API or release implications.
+
   - type: textarea
     id: problem
     attributes:
       label: Problem to solve
-      description: What concrete user pain or missing workflow are you seeing?
+      description: What user or maintainer problem does this request address?
+      placeholder: I'm trying to ...
     validations:
       required: true
+
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed solution
-      description: Describe the behavior you want, not just the implementation.
+      label: Proposed change
+      description: Describe the desired behavior or capability.
     validations:
       required: true
+
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
-      description: What are you doing today as a workaround?
+      description: List workarounds or competing approaches you've already considered.
+
   - type: dropdown
     id: area
     attributes:
-      label: Area
+      label: Affected area
       options:
-        - Agent DNA
-        - Mesh / peer validation
-        - Remote vote transport
-        - EvolutionLog
-        - DAG compiler / swarm executor
-        - Packaging / release
-        - Docs / onboarding
-        - Papers / research
+        - Core package API
+        - Mesh / remote voting
+        - Research stack
+        - Bittensor integration
+        - Documentation / paper
+        - CI / release automation
         - Other
     validations:
       required: true
-  - type: dropdown
-    id: breaking
+
+  - type: textarea
+    id: success
     attributes:
-      label: Would this change the public API?
+      label: Success criteria
+      description: What would make this request complete?
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
       options:
-        - "No"
-        - "Maybe"
-        - "Yes"
-    validations:
-      required: true
+        - label: I searched existing issues and discussions first.
+          required: true
+        - label: I explained the user value, not just the implementation idea.
+          required: true

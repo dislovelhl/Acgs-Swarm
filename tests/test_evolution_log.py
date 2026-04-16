@@ -5,21 +5,15 @@ All tests use :memory: SQLite databases so they are fast and isolated.
 
 from __future__ import annotations
 
-import pytest
 import sqlite3
 
+import pytest
 from constitutional_swarm.evolution_log import (
     DecelerationBlockedError,
-    DecelerationRecord,
-    DashboardRow,
     EvolutionLog,
-    GapRecord,
     MissingPriorEpochError,
-    MutationBlockedError,
     NonIncreasingValueError,
-    RegressionRecord,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
