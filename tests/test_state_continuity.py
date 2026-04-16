@@ -19,7 +19,7 @@ def _mesh_with_manifold(n: int) -> ConstitutionalMesh:
     constitution = Constitution.default()
     mesh = ConstitutionalMesh(constitution, use_manifold=True)
     for i in range(n):
-        mesh.register_agent(f"agent-{i}", domain="test")
+        mesh.register_local_signer(f"agent-{i}", domain="test")
     return mesh
 
 
@@ -65,7 +65,7 @@ class TestAgentChurn:
         trust_before = _trust_sum(mesh)
         assert trust_before > 0.0
 
-        mesh.register_agent("agent-new", domain="test")
+        mesh.register_local_signer("agent-new", domain="test")
         trust_after = _trust_sum(mesh)
 
         assert trust_after > 0.0, (
@@ -87,7 +87,7 @@ class TestAgentChurn:
         assert "agent-0" in mesh._trust_archive, "Trust archive should contain departed agent"
 
         # Re-register agent-0 — archive should be restored with decay
-        mesh.register_agent("agent-0", domain="test")
+        mesh.register_local_signer("agent-0", domain="test")
         idx_after = mesh._agent_indices.get("agent-0")
         assert idx_after is not None
 

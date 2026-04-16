@@ -32,7 +32,7 @@ class TaskNode:
     dependencies on parent nodes, and capability requirements.
     """
 
-    node_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    node_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
     title: str = ""
     description: str = ""
     domain: str = ""
@@ -69,6 +69,11 @@ class TaskDAG:
     def add_node(self, node: TaskNode) -> TaskDAG:
         """Add a node to the DAG. Returns new DAG (immutable pattern)."""
         new_nodes = dict(self.nodes)
+        existing = new_nodes.get(node.node_id)
+        if existing is not None:
+            raise ValueError(
+                f"Node ID collision for {node.node_id}: {existing.title!r} conflicts with {node.title!r}"
+            )
         new_nodes[node.node_id] = node
         return TaskDAG(dag_id=self.dag_id, goal=self.goal, nodes=new_nodes)
 

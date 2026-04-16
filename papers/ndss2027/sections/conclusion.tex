@@ -54,4 +54,8 @@ integrated.
 \paragraph{Reproducibility.}
 All protocol steps are implemented in the \texttt{constitutional\_swarm} package
 (constitutional hash \texttt{608508a9bd224290}).  Correctness tests for CID integrity,
-EEC convergence, and DP calibration pass in the Phase 2 test suite.
+EEC convergence, and DP calibration pass in the Phase 2 test suite (1018 tests, 2
+expected failures).  Per-metric governance evolution is recorded via the
+\texttt{EvolutionLog} component, which enforces strict monotonicity and strict
+acceleration on tracked metrics at write time, providing a structural audit trail
+complementary to the cryptographic guarantees of \fedsink{}.

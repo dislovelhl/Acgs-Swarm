@@ -12,7 +12,7 @@ pytestmark = pytest.mark.contract
 
 def _register_mesh_agents(mesh: ConstitutionalMesh, count: int = 5) -> None:
     for index in range(count):
-        mesh.register_agent(f"agent-{index}", domain=f"domain-{index % 2}")
+        mesh.register_local_signer(f"agent-{index}", domain=f"domain-{index % 2}")
 
 
 def test_public_api_accepts_acgs_lite_constitution_instances() -> None:

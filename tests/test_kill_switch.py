@@ -10,6 +10,22 @@ from constitutional_swarm.mesh import ConstitutionalMesh, DuplicateVoteError, Me
 
 from acgs_lite import Constitution
 
+
+def _vote_signature(
+    mesh: ConstitutionalMesh,
+    assignment_id: str,
+    voter_id: str,
+    *,
+    approved: bool,
+    reason: str = "",
+) -> str:
+    return mesh.sign_vote(
+        assignment_id,
+        voter_id,
+        approved=approved,
+        reason=reason,
+    )
+
 # ---------------------------------------------------------------------------
 # AgentDNA kill switch
 # ---------------------------------------------------------------------------
@@ -75,7 +91,7 @@ class TestMeshKillSwitch:
     def mesh(self) -> ConstitutionalMesh:
         m = ConstitutionalMesh(Constitution.default(), seed=42)
         for i in range(5):
-            m.register_agent(f"agent-{i:02d}")
+            m.register_local_signer(f"agent-{i:02d}")
         return m
 
     def test_halt_blocks_request_validation(self, mesh: ConstitutionalMesh) -> None:
@@ -88,7 +104,17 @@ class TestMeshKillSwitch:
         assignment = mesh.request_validation("agent-00", "safe content", "art-1")
         mesh.halt()
         with pytest.raises(MeshHaltedError):
-            mesh.submit_vote(assignment.assignment_id, assignment.peers[0], approved=True)
+            mesh.submit_vote(
+                assignment.assignment_id,
+                assignment.peers[0],
+                approved=True,
+                signature=_vote_signature(
+                    mesh,
+                    assignment.assignment_id,
+                    assignment.peers[0],
+                    approved=True,
+                ),
+            )
 
     def test_halt_blocks_validate_and_vote(self, mesh: ConstitutionalMesh) -> None:
         assignment = mesh.request_validation("agent-00", "safe content", "art-validate")
@@ -125,7 +151,7 @@ class TestMeshKillSwitch:
     def test_register_works_while_halted(self, mesh: ConstitutionalMesh) -> None:
         """Agent registration still works during halt (admin operation)."""
         mesh.halt()
-        mesh.register_agent("new-agent")
+        mesh.register_local_signer("new-agent")
         assert mesh.agent_count == 6
 
     def test_summary_works_while_halted(self, mesh: ConstitutionalMesh) -> None:
@@ -148,7 +174,7 @@ class TestMeshThreadSafety:
         def register_batch(start: int, count: int) -> None:
             try:
                 for i in range(start, start + count):
-                    mesh.register_agent(f"agent-{i:04d}")
+                    mesh.register_local_signer(f"agent-{i:04d}")
             except Exception as e:
                 errors.append(e)
 
@@ -165,7 +191,7 @@ class TestMeshThreadSafety:
         """Multiple threads running validations concurrently."""
         mesh = ConstitutionalMesh(Constitution.default(), seed=7)
         for i in range(20):
-            mesh.register_agent(f"agent-{i:02d}")
+            mesh.register_local_signer(f"agent-{i:02d}")
 
         results: list[bool] = []
         errors: list[Exception] = []
@@ -195,7 +221,7 @@ class TestMeshThreadSafety:
     def test_concurrent_duplicate_vote_same_voter(self) -> None:
         mesh = ConstitutionalMesh(Constitution.default(), seed=11)
         for i in range(5):
-            mesh.register_agent(f"agent-{i:02d}")
+            mesh.register_local_signer(f"agent-{i:02d}")
 
         assignment = mesh.request_validation("agent-00", "safe content", "art-dup")
         voter = assignment.peers[0]
@@ -208,7 +234,17 @@ class TestMeshThreadSafety:
             nonlocal successes
             try:
                 barrier.wait()
-                mesh.submit_vote(assignment.assignment_id, voter, approved=True)
+                mesh.submit_vote(
+                    assignment.assignment_id,
+                    voter,
+                    approved=True,
+                    signature=_vote_signature(
+                        mesh,
+                        assignment.assignment_id,
+                        voter,
+                        approved=True,
+                    ),
+                )
                 with lock:
                     successes += 1
             except DuplicateVoteError as exc:
@@ -242,7 +278,7 @@ class TestManifoldPeerSelection:
             use_manifold=True,
         )
         for i in range(5):
-            mesh.register_agent(f"agent-{i}", domain="test")
+            mesh.register_local_signer(f"agent-{i}", domain="test")
 
         # Record some interactions to populate the manifold
         assignment = mesh.request_validation("agent-0", content="test output", artifact_id="a1")
@@ -261,12 +297,22 @@ class TestManifoldPeerSelection:
         )
         # Register agents
         for i in range(4):
-            mesh.register_agent(f"a-{i}", domain="test")
+            mesh.register_local_signer(f"a-{i}", domain="test")
 
         # Create an initial validation so manifold gets trust data
         a1 = mesh.request_validation("a-0", content="first output", artifact_id="v1")
         # Submit only 1 vote (quorum=1) to build trust without settling early
-        mesh.submit_vote(a1.assignment_id, a1.peers[0], approved=True)
+        mesh.submit_vote(
+            a1.assignment_id,
+            a1.peers[0],
+            approved=True,
+            signature=_vote_signature(
+                mesh,
+                a1.assignment_id,
+                a1.peers[0],
+                approved=True,
+            ),
+        )
 
         # Now do multiple validations from a-0, track which peers get selected
         peer_counts: dict[str, int] = {}
@@ -290,7 +336,7 @@ class TestManifoldPeerSelection:
             seed=42,
         )
         for i in range(4):
-            mesh.register_agent(f"a-{i}", domain="test")
+            mesh.register_local_signer(f"a-{i}", domain="test")
         assignment = mesh.request_validation("a-0", content="test", artifact_id="u1")
         assert len(assignment.peers) == 2
         assert "a-0" not in assignment.peers

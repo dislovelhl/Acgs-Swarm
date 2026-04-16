@@ -16,6 +16,10 @@ SpectralSphere projection is implemented in PyTorch using
 Sinkhorn uses 20 iterations (matching mHC \cite{xie2025mhc}).
 The Neural ODE uses \texttt{torchdiffeq} with \texttt{dopri5} solver,
 \texttt{rtol=1e-3}, \texttt{atol=1e-6}.
+Per-cycle statistics (variance retention, topological capacity, DP noise level) are
+recorded to an \texttt{EvolutionLog} instance — an append-only SQLite store with
+write-time triggers that enforce contiguous epoch history and uniqueness, providing a
+tamper-evident audit trail for external reproducibility verification.
 
 \paragraph{Initialization.}
 Trust matrices are initialized from $\mathcal{N}(0, 1/n)$ (entries i.i.d.\ Gaussian,
@@ -98,6 +102,15 @@ retention exceeds $50\%$.
 
 Figure~\ref{fig:variance_comparison} visualizes variance retention trajectories for all
 methods across cycles $1$--$50$.
+
+\begin{figure}[t]
+  \centering
+  \input{figures/variance_comparison}
+  \caption{Variance retention at cycle $k=10$ across the evaluated methods. Sinkhorn
+    collapses to BUC, SpectralSphere with residual injection remains non-degenerate, and
+    the Neural ODE exposes much higher topological capacity.}
+  \label{fig:variance_comparison}
+\end{figure}
 
 \subsection{Neural ODE Topological Capacity (Q3)}
 \label{sec:experiments_ode}

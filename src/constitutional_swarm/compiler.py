@@ -35,7 +35,7 @@ class GoalSpec:
 
 def _deterministic_node_id(title: str) -> str:
     """Generate a deterministic node ID from a title hash."""
-    return hashlib.sha256(title.encode("utf-8")).hexdigest()[:8]
+    return hashlib.sha256(title.encode("utf-8")).hexdigest()[:16]
 
 
 def _detect_cycle(
@@ -119,6 +119,8 @@ class DAGCompiler:
         title_to_id: dict[str, str] = {
             step["title"]: _deterministic_node_id(step["title"]) for step in steps
         }
+        if len(set(title_to_id.values())) != len(title_to_id):
+            raise ValueError("Deterministic node ID collision detected; revise step titles")
 
         # Validate all dependency titles exist
         for step in steps:

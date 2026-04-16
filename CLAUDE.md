@@ -30,7 +30,7 @@ python -m ruff check src/
 # Format
 python -m ruff format src/
 
-# Test (943 tests, 2 xfailed — Birkhoff collapse, expected)
+# Test (1018 tests, 2 xfailed — Birkhoff collapse, expected)
 python -m pytest tests/ --import-mode=importlib -q
 
 # Test WebSocket transport (requires extra)
@@ -41,6 +41,7 @@ pip install -e ".[transport]" && python -m pytest tests/test_gossip_protocol.py 
 
 | Module | Purpose |
 |--------|---------|
+| `evolution_log.py` | Declarative evolution log — SQLite-backed, append-only, enforces strict monotonicity + acceleration at write time |
 | `latent_dna.py` | BODES hook + `LatentDNAWrapper.generate_governed()` — LLM residual steering |
 | `spectral_sphere.py` | SpectralSphereManifold — replaces Birkhoff, fixes uniformity collapse |
 | `merkle_crdt.py` | Content-addressed DAG artifact store (SHA-256 CIDs, set-union merge) |
