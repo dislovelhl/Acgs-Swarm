@@ -178,7 +178,7 @@ The package now includes an append-only `EvolutionLog` for governance metrics. I
 
 **Write-time guarantees:**
 - strict monotonicity, no plateaus or regressions
-- strict acceleration, improvement deltas must keep growing
+- strict acceleration, improvement deltas must keep growing once at least 3 epochs have been recorded
 - contiguous history, no skipped epochs
 - uniqueness, one `(epoch, metric)` record per slot
 - append-only persistence, `UPDATE` and `DELETE` stay blocked by triggers
