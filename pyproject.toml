@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "constitutional-swarm"
-version = "0.1.1"
+version = "0.2.0"
 description = "Constitutional Swarm Mesh — orchestrator-free multi-agent governance via embedded Agent DNA"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "AGPL-3.0-or-later"}
+license = "AGPL-3.0-or-later"
 authors = [{name = "ACGS Team", email = "hello@acgs.dev"}]
 dependencies = ["acgs-lite>=2.7.2", "cryptography>=44.0.2"]
 
