@@ -70,6 +70,20 @@ cd .worktrees/<branch-name>
 - TierManager and PrecedentStore are thread-safe via `threading.Lock`
 - Manifold peer selection is wired in `mesh.py:_select_peers()` — trust-weighted sampling with one exploration slot
 
+## Supporting docs
+
+- `README.md` — package overview, install paths, and public API examples
+- `CHANGELOG.md` — release notes for shipped package behavior
+- `paper/README.md` — entry point for the package paper draft and manuscript assets
+- `paper/constitutional_swarm_paper.md` — long-form Markdown paper draft for package claims and theory
+- `docs/maci_dp_protocol.md` — MCFS privacy and MACI protocol draft
+- `HANDOFF_CODEX.md` — historical implementation handoff for Codex/OMX
+- `security-audit-report.md` — focused security findings for remote voting and persistence
+- `test-coverage-report.md` — regression-gap analysis and targeted test coverage notes
+- `style-improvement-report.md` — API-surface and maintainability review
+- `delivery-hygiene-report.md` — release-shape and commit-structure audit
+- `SYSTEMIC_IMPROVEMENT.md` — cross-cutting improvement log for the current package line
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
