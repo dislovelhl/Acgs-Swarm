@@ -1,0 +1,64 @@
+name: Feature request
+description: Suggest an improvement to the package, docs, or release workflow.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please focus on the user problem, the expected outcome, and any API or release implications.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user or maintainer problem does this request address?
+      placeholder: I'm trying to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the desired behavior or capability.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: List workarounds or competing approaches you've already considered.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Core package API
+        - Mesh / remote voting
+        - Research stack
+        - Bittensor integration
+        - Documentation / paper
+        - CI / release automation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: success
+    attributes:
+      label: Success criteria
+      description: What would make this request complete?
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and discussions first.
+          required: true
+        - label: I explained the user value, not just the implementation idea.
+          required: true
