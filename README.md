@@ -386,5 +386,6 @@ AGPL-3.0-or-later.
 
 - [Changelog](CHANGELOG.md)
 - [Contributor notes](CLAUDE.md)
+- [Security policy](SECURITY.md)
 - [Paper draft index](paper/README.md)
 - [MACI + differential privacy protocol draft](docs/maci_dp_protocol.md)
