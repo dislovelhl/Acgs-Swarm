@@ -32,7 +32,7 @@ jobs:
         run: |
           python -m pytest tests/ \
             --import-mode=importlib \
-            -m "not slow and not benchmark and not e2e and not research" \
+            -m "not slow and not benchmark and not e2e and not research and not bittensor" \
             -v --tb=short
 
   test-research:
@@ -67,3 +67,29 @@ jobs:
         run: python -m build --wheel --sdist
       - name: Validate
         run: twine check dist/*
+      - name: Smoke test wheel install
+        run: pip install dist/*.whl && python -c "import constitutional_swarm; print('import OK')"
+
+  test-extras-bittensor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install with bittensor extras
+        run: pip install -e ".[dev,bittensor]"
+      - name: Verify bittensor extras import
+        run: python -c "from constitutional_swarm.bittensor.protocol import MinerConfig; print('bittensor extras OK')"
+
+  test-extras-transport:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install with transport extras
+        run: pip install -e ".[dev,transport]"
+      - name: Verify transport extras import
+        run: python -c "from constitutional_swarm.gossip_protocol import GossipNode; print('transport extras OK')"

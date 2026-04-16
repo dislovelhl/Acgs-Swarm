@@ -14,10 +14,10 @@ dependencies = ["acgs-lite>=2.7.2", "cryptography>=44.0.2"]
 
 [project.urls]
 Homepage = "https://acgs.ai"
-Documentation = "https://github.com/dislovelhl/constitutional-swarm"
-Repository = "https://github.com/dislovelhl/constitutional-swarm"
-Issues = "https://github.com/dislovelhl/constitutional-swarm/issues"
-Changelog = "https://github.com/dislovelhl/constitutional-swarm/releases"
+Documentation = "https://github.com/dislovelhl/Acgs-Swarm#readme"
+Repository = "https://github.com/dislovelhl/Acgs-Swarm"
+Issues = "https://github.com/dislovelhl/Acgs-Swarm/issues"
+Changelog = "https://github.com/dislovelhl/Acgs-Swarm/releases"
 PyPI = "https://pypi.org/project/constitutional-swarm/"
 
 [project.optional-dependencies]
@@ -40,5 +40,8 @@ markers = [
   "slow: marks tests as slow (800+ agent scale)",
   "integration: marks cross-package integration tests",
   "contract: marks stable cross-package contract tests",
-  "research: marks empirical research proof tests (expected to fail; excluded from release gating)"
+  "research: marks empirical research proof tests (expected to fail; excluded from release gating)",
+  "bittensor: marks tests that exercise the Bittensor subnet integration (excluded from dev matrix)",
+  "benchmark: marks performance benchmark tests",
+  "e2e: marks end-to-end tests requiring live external services"
 ]

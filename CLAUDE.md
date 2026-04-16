@@ -30,7 +30,7 @@ python -m ruff check src/
 # Format
 python -m ruff format src/
 
-# Test (1018 tests, 2 xfailed — Birkhoff collapse, expected)
+# Test (1019 tests, 2 xfailed — Birkhoff collapse, expected)
 python -m pytest tests/ --import-mode=importlib -q
 
 # Test WebSocket transport (requires extra)
@@ -51,6 +51,7 @@ pip install -e ".[transport]" && python -m pytest tests/test_gossip_protocol.py 
 | `manifold.py` | Birkhoff/Sinkhorn baseline — **do not fix**, collapse is the empirical proof |
 | `mesh.py` | Full swarm mesh + settlement store |
 | `bittensor/` | Bittensor subnet integration (`pip install .[bittensor]`) |
+| `examples/constitution.yaml` | Minimal sample constitution — 4 principles, 3 domains, quorum=0.6; required by `testnet_deploy.py --constitution` flag |
 
 ## Worktree workflow
 
