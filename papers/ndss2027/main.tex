@@ -7,15 +7,15 @@
 \usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage{hyperref}
+\usepackage{lmodern}
 \usepackage{url}
 \usepackage{tikz}
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.18}
 \usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc, fit, backgrounds}
-\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage[ruled,vlined,linesnumbered,norelsize]{algorithm2e}
 \usepackage{xcolor}
 \usepackage{microtype}
-\usepackage{subcaption}
 \usepackage{cite}
 
 % Theorem environments (IEEEtran compatible)
@@ -38,6 +38,16 @@
 \newcommand{\maci}{\textsc{MACI}}
 \newcommand{\fedsink}{\textsc{FedSink-MACI}}
 \newcommand{\constitutionalhash}{\texttt{608508a9bd224290}}
+
+\makeatletter
+\DeclareFontShape{TU}{lmr}{bx}{sc}{<->ssub*lmr/bx/n}{}
+\DeclareFontShape{TU}{lmr}{m}{scit}{<->ssub*lmr/m/scsl}{}
+\makeatother
+
+\raggedbottom
+\setlength{\emergencystretch}{2em}
+\hbadness=10000
+\vbadness=10000
 
 \title{Byzantine-Resilient Federated Governance via\\
 Merkle-CRDT Gossip with $\varepsilon$-Differential Privacy}
@@ -69,7 +79,7 @@ Merkle-CRDT Gossip with $\varepsilon$-Differential Privacy}
 \bibliography{references}
 \bibliographystyle{IEEEtran}
 
-\appendix
+\appendices
 
 \section{Full Protocol Pseudocode}
 \label{app:pseudocode}

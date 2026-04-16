@@ -33,7 +33,7 @@
     label style={font=\small},
     title style={font=\small\bfseries},
     title={Variance Retention at Cycle $k=10$ by Method},
-    grid=y,
+    ymajorgrids,
     grid style={line width=0.3pt, draw=gray!30},
     major grid style={line width=0.6pt, draw=gray!50},
     nodes near coords,
@@ -57,7 +57,7 @@
     ({SS+res $n{=}10$},   20)
     ({ODE+res $n{=}50$}, 2656)
   };
-  \addlegendentry{Variance Retention (\%)};
+  \addlegendentry{Variance Retention (\%)}
 
   %% Reference line at 100% (initial variance)
   \draw[dashed, black!60, line width=1pt]

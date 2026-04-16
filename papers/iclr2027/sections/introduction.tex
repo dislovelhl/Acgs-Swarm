@@ -33,6 +33,14 @@ Constitutional governance systems that rely on diversity of agent perspective
 agents interchangeable, the MACI separation of Proposer/Validator/Executor breaks down
 structurally.
 
+\begin{figure}[t]
+  \centering
+  \input{figures/birkhoff_collapse}
+  \caption{Iterated Sinkhorn normalization collapses variance retention to zero, while
+    SpectralSphere with residual injection converges to a non-degenerate equilibrium.}
+  \label{fig:birkhoff_collapse}
+\end{figure}
+
 \paragraph{Our approach.}
 We replace the Birkhoff projection with a \textbf{SpectralSphere Manifold}: trust
 matrices are projected onto the \emph{spectral-norm ball}
