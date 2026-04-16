@@ -34,8 +34,7 @@ from constitutional_swarm import AgentDNA
 from acgs_lite import Rule, Severity
 
 dna = AgentDNA.from_rules([
-    Rule(id="no-pii", pattern="SSN|date of birth", severity=Severity.CRITICAL,
-         description="Block PII"),
+    Rule(id="no-pii", text="Block PII", patterns=["SSN", "date of birth"], severity=Severity.CRITICAL),
 ])
 
 result = dna.validate("summarize patient notes")

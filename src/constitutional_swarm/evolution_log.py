@@ -41,6 +41,10 @@ class DecelerationBlockedError(EvolutionViolationError):
     """Raised when the new delta does not strictly exceed the prior delta."""
 
 
+class DuplicateRecordError(EvolutionViolationError):
+    """Raised when the (epoch, metric) pair already exists."""
+
+
 class MutationBlockedError(EvolutionViolationError):
     """Raised when an UPDATE or DELETE is attempted on the append-only table."""
 
@@ -304,7 +308,7 @@ class EvolutionLog:
             If the new value does not strictly exceed the prior value.
         DecelerationBlockedError
             If the new delta does not strictly exceed the prior delta.
-        sqlite3.IntegrityError
+        DuplicateRecordError
             If the (epoch, metric) pair already exists.
         """
         assert self._conn is not None
@@ -332,6 +336,10 @@ class EvolutionLog:
                 ) from exc
             if "UPDATES BLOCKED" in msg or "DELETES BLOCKED" in msg:
                 raise MutationBlockedError(msg) from exc
+            if "UNIQUE constraint failed" in msg:
+                raise DuplicateRecordError(
+                    f"(epoch={epoch}, metric='{metric}') already exists in evolution_log"
+                ) from exc
             raise
 
     # ------------------------------------------------------------------
