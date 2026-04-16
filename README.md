@@ -389,3 +389,24 @@ AGPL-3.0-or-later.
 - [Security policy](SECURITY.md)
 - [Paper draft index](paper/README.md)
 - [MACI + differential privacy protocol draft](docs/maci_dp_protocol.md)
+
+## References
+
+Core papers cited in this codebase and accompanying manuscripts. The full BibTeX file is [`references.bib`](references.bib).
+
+| Citation | Reference |
+|----------|-----------|
+| Xie et al., 2025 | [Manifold-Constrained Hyper-Connections (mHC)](https://arxiv.org/abs/2512.24880) — mathematical foundation for Birkhoff-polytope governance projection |
+| Anonymous, 2026 | [Spectral-Sphere-Constrained Hyper-Connections (sHC)](https://arxiv.org/abs/2603.20896) — spectral-norm-ball alternative to Birkhoff projection |
+| Zhu et al., 2024 | [Hyper-Connections](https://arxiv.org/abs/2409.19606) — expanded residual streams in transformers |
+| Bai et al., 2022 | [Constitutional AI: Harmlessness from AI Feedback](https://arxiv.org/abs/2212.08073) |
+| Wu et al., 2023 | [AutoGen: Enabling Next-Gen LLM Applications](https://arxiv.org/abs/2308.08155) |
+| Sinkhorn, 1964 | A Relationship Between Arbitrary Positive Matrices and Doubly Stochastic Matrices. *Ann. Math. Stat.* 35(2):876–879. [doi:10.1214/aoms/1177703591](https://doi.org/10.1214/aoms/1177703591) |
+| Sinkhorn & Knopp, 1967 | Concerning Nonnegative Matrices and Doubly Stochastic Matrices. *Pacific J. Math.* 21(2):343–348. [doi:10.2140/pjm.1967.21.343](https://doi.org/10.2140/pjm.1967.21.343) |
+| Castro & Liskov, 1999 | Practical Byzantine Fault Tolerance. *USENIX OSDI*, pp. 173–186 |
+| Dwork et al., 2006 | [Calibrating Noise to Sensitivity in Private Data Analysis](https://doi.org/10.1007/11681878_14). *TCC* |
+| Dwork & Roth, 2014 | [The Algorithmic Foundations of Differential Privacy](https://doi.org/10.1561/0400000042). *Found. Trends TCS* 9(3–4):211–407 |
+| Kleppmann & Beresford, 2022 | [Merkle-CRDTs: Merkle-DAGs Meet CRDTs](https://arxiv.org/abs/2004.00107) |
+| Anonymous, 2025 | [Federated Sinkhorn (arXiv:2502.07021)](https://arxiv.org/abs/2502.07021) |
+| Jimenez et al., 2024 | [SWE-bench](https://arxiv.org/abs/2310.06770) — software engineering benchmark used for swarm evaluation |
+| Buterin et al., 2023 | [MACI: Minimal Anti-Collusion Infrastructure](https://privacy-scaling-explorations.github.io/maci/) |
