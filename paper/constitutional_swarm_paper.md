@@ -24,7 +24,7 @@ We observe that multi-agent governance faces the same mathematical structure:
 | Spectral norm ≤ 1 | Bounded influence ≤ 1 |
 | 6.7% overhead | <1% governance overhead |
 
-We introduce **constitutional_swarm**, a framework built on four interlocking mechanisms:
+We introduce **constitutional_swarm**, a framework built on five interlocking mechanisms:
 
 **A. Agent DNA** — Each agent carries an embedded constitutional validator as a co-processor. Governance is local (443ns via Rust/PyO3), not networked. No central bus needed. Cost is O(1) per agent, regardless of swarm size.
 
@@ -33,6 +33,8 @@ We introduce **constitutional_swarm**, a framework built on four interlocking me
 **C. Constitutional Mesh** — Each agent's output is validated by 2–3 randomly assigned peers using their own embedded DNA. Byzantine fault tolerant (up to 1/3 faulty agents). Produces cryptographic Merkle proofs.
 
 **D. Governance Manifold** — Inter-agent trust is represented as an N×N matrix, projected onto the Birkhoff polytope via Sinkhorn-Knopp. This guarantees bounded influence, compositional closure, and trust conservation — the same mathematical properties that make mHC stable at depth.
+
+**E. Evolution Log** — Governance metrics are written to an append-only SQLite log that rejects gaps, regressions, and deceleration at write time. This turns capability progress into a durable contract instead of an after-the-fact dashboard.
 
 ---
 
@@ -170,6 +172,17 @@ Inter-agent trust is represented as an N×N matrix projected onto the Birkhoff p
 - Convergence within 20 iterations for N ≤ 100
 - Projection latency <100ms for N=100 (pure Python)
 
+### 4.5 Evolution Log (Breakthrough E)
+
+The package now includes an append-only `EvolutionLog` for governance metrics. Instead of relying on application code to notice drift later, the database rejects invalid trajectories when they are written.
+
+**Write-time guarantees:**
+- strict monotonicity, no plateaus or regressions
+- strict acceleration, improvement deltas must keep growing once at least 3 epochs have been recorded
+- contiguous history, no skipped epochs
+- uniqueness, one `(epoch, metric)` record per slot
+- append-only persistence, `UPDATE` and `DELETE` stay blocked by triggers
+
 ---
 
 ## 5. Experiments
@@ -213,18 +226,18 @@ Full pipeline (pre-check + 3 peer DNA + Merkle proof + storage): ~4ms. At 800 ag
 
 ### 5.5 Test Suite
 
-86 tests across 4 modules, all passing in 2.69 seconds:
-- Agent DNA: 13 tests (decorator, async, MACI, benchmark)
-- Swarm: 10 tests (DAG, executor, capability registry)
-- Mesh: 33 tests (peer validation, proof, reputation, scale)
-- Manifold: 18 tests (Sinkhorn-Knopp, composition, stability)
-- Integration: 12 tests (DNA + swarm, governed agents)
+1,021 tests collected across 40 files, with the latest package run passing 1,019 tests and 2 expected xfails:
+- Agent DNA and swarm execution coverage
+- Constitutional mesh, remote vote transport, and settlement persistence coverage
+- Governance manifold and degeneration coverage
+- Evolution log invariant coverage
+- Integration and cross-package contract coverage
 
 ---
 
 ## 6. Conclusion and Outlook
 
-We presented constitutional_swarm, a framework for governing multi-agent AI systems at scale through four interlocking mechanisms: embedded constitutional DNA, stigmergic task coordination, Byzantine peer validation, and manifold-constrained trust propagation. By drawing on the mathematical foundations of mHC (Xie et al., 2025), we proved that constitutional governance provides the same stability guarantees as manifold-constrained residual connections in deep networks: bounded influence, compositional closure, and signal conservation.
+We presented constitutional_swarm, a framework for governing multi-agent AI systems at scale through five interlocking mechanisms: embedded constitutional DNA, stigmergic task coordination, Byzantine peer validation, manifold-constrained trust propagation, and append-only evolution contracts. By drawing on the mathematical foundations of mHC (Xie et al., 2025), we proved that constitutional governance provides the same stability guarantees as manifold-constrained residual connections in deep networks: bounded influence, compositional closure, and signal conservation.
 
 The key insight is that **constitutional validation replaces inter-agent coordination**. Instead of agents communicating with each other (O(N²)), each agent independently validates against a shared constitution (O(N)). The constitution IS the coordination mechanism — analogous to how DNA coordinates trillions of cells without a central orchestrator.
 

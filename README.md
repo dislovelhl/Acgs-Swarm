@@ -6,7 +6,7 @@
 
 **Orchestrator-free multi-agent governance via embedded Agent DNA, stigmergic task coordination, constitutional peer validation, and manifold-constrained trust.**
 
-`constitutional-swarm` provides four composable patterns for governed multi-agent systems. All governance is local (443 ns/check), embedded in each agent — no central bus, no orchestrator, no network round-trips. The package depends only on `acgs-lite`.
+`constitutional-swarm` provides five composable patterns for governed multi-agent systems. Core constitutional checks stay local (443 ns/check), while remote/public-key peer validation remains available when you install the transport runtime. The core package depends on `acgs-lite` and `cryptography`, with optional extras for WebSocket transport and the MCFS research stack.
 
 ## Installation
 
@@ -347,3 +347,10 @@ AGPL-3.0-or-later.
 - [Homepage](https://acgs.ai)
 - [PyPI](https://pypi.org/project/constitutional-swarm/)
 - [Issues](https://github.com/dislovelhl/constitutional-swarm/issues)
+
+## Project Docs
+
+- [Changelog](CHANGELOG.md)
+- [Contributor notes](CLAUDE.md)
+- [Paper draft index](paper/README.md)
+- [MACI + differential privacy protocol draft](docs/maci_dp_protocol.md)

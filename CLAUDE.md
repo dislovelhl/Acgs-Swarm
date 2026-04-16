@@ -69,3 +69,32 @@ cd .worktrees/<branch-name>
 - ArweaveAuditLogger: two-phase commit — cache Phase 1 result in `_retry_state`, clear only on success
 - TierManager and PrecedentStore are thread-safe via `threading.Lock`
 - Manifold peer selection is wired in `mesh.py:_select_peers()` — trust-weighted sampling with one exploration slot
+
+## Supporting docs
+
+- `README.md` — package overview, install paths, and public API examples
+- `CHANGELOG.md` — release notes for shipped package behavior
+- `paper/README.md` — entry point for the package paper draft and manuscript assets
+- `paper/constitutional_swarm_paper.md` — long-form Markdown paper draft for package claims and theory
+- `docs/maci_dp_protocol.md` — MCFS privacy and MACI protocol draft
+- `HANDOFF_CODEX.md` — historical implementation handoff for Codex/OMX
+
+## Skill routing
+
+When the user's request matches an available skill, ALWAYS invoke it using the Skill
+tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
+The skill has specialized workflows that produce better results than ad-hoc answers.
+
+Key routing rules:
+- Product ideas, "is this worth building", brainstorming -> invoke office-hours
+- Bugs, errors, "why is this broken", 500 errors -> invoke investigate
+- Ship, deploy, push, create PR -> invoke ship
+- QA, test the site, find bugs -> invoke qa
+- Code review, check my diff -> invoke review
+- Update docs after shipping -> invoke document-release
+- Weekly retro -> invoke retro
+- Design system, brand -> invoke design-consultation
+- Visual audit, design polish -> invoke design-review
+- Architecture review -> invoke plan-eng-review
+- Save progress, checkpoint, resume -> invoke checkpoint
+- Code quality, health check -> invoke health
