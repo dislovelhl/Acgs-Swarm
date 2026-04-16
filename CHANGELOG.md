@@ -25,3 +25,33 @@ The format is based on Keep a Changelog.
 
 ### Removed
 - Removed the obsolete `HANDOFF_FORGECODE.md` handoff document.
+
+### Breaking Changes
+
+`register_agent()` has been split into two explicit methods. Code using the old API will receive a `DeprecationWarning` and will break in v0.3.0.
+
+**Before (0.1.x):**
+```python
+mesh.register_agent(
+    agent_id="agent-1",
+    domain="safety",
+    vote_public_key=my_pub_key,
+)
+```
+
+**After (0.2.x):**
+```python
+# For peers whose keys live outside this process:
+mesh.register_remote_agent(
+    agent_id="agent-1",
+    domain="safety",
+    vote_public_key=my_pub_key,
+)
+
+# For peers whose private key lives in this process:
+mesh.register_local_signer(
+    agent_id="agent-1",
+    domain="safety",
+    vote_private_key=my_priv_key,
+)
+```

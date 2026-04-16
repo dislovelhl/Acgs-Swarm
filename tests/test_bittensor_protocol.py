@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.bittensor
+
 from constitutional_swarm.bittensor.protocol import (
     TIER_REQUIREMENTS,
     TIER_TAO_MULTIPLIER,

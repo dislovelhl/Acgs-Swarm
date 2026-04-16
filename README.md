@@ -334,9 +334,43 @@ The log is append-only: `UPDATE` and `DELETE` are blocked by triggers. Single-ep
 | `SwarmBenchmark` | Measures DNA validation throughput at scale |
 | `BenchmarkResult` | Benchmark output: `agents`, `validations_per_second`, `p99_ns` |
 
+## Bittensor Integration
+
+Run constitutional governance miners and validators on a Bittensor subnet.
+
+```bash
+pip install "constitutional-swarm[bittensor]"
+```
+
+**Register a subnet on testnet:**
+```bash
+python scripts/testnet_deploy.py register \
+  --wallet-name my-wallet \
+  --wallet-hotkey default
+# prints: netuid=<id>
+```
+
+**Start a miner:**
+```bash
+python scripts/testnet_deploy.py miner \
+  --netuid <id> \
+  --constitution examples/constitution.yaml \
+  --wallet-name my-wallet
+```
+
+**Start a validator:**
+```bash
+python scripts/testnet_deploy.py validator \
+  --netuid <id> \
+  --constitution examples/constitution.yaml \
+  --wallet-name my-wallet
+```
+
+Testnet TAO faucet: https://test.taostats.io/faucet
+
 ## Runtime dependencies
 
-- `acgs-lite>=2.5`
+- `acgs-lite>=2.7.2`
 
 ## License
 
@@ -346,7 +380,7 @@ AGPL-3.0-or-later.
 
 - [Homepage](https://acgs.ai)
 - [PyPI](https://pypi.org/project/constitutional-swarm/)
-- [Issues](https://github.com/dislovelhl/constitutional-swarm/issues)
+- [Issues](https://github.com/dislovelhl/Acgs-Swarm/issues)
 
 ## Project Docs
 

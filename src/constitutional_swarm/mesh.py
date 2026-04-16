@@ -27,6 +27,7 @@ import random
 import threading
 import time
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -389,10 +390,21 @@ class ConstitutionalMesh:
     ) -> None:
         """Compatibility wrapper with no implicit private-key storage.
 
+        .. deprecated::
+            Use :meth:`register_remote_agent` or :meth:`register_local_signer` instead.
+            This method will be removed in v0.3.0.
+
         Callers must choose either ``register_remote_agent()`` or
         ``register_local_signer()``. This method only accepts an explicit
         public key and forwards to remote-agent registration.
         """
+        warnings.warn(
+            "register_agent() is deprecated and will be removed in v0.3.0. "
+            "Use register_remote_agent() for public-key-only peers or "
+            "register_local_signer() for locally managed signer peers.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if vote_private_key is not None:
             raise TypeError(
                 "register_agent() no longer accepts vote_private_key; "

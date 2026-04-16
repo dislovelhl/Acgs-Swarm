@@ -7,6 +7,8 @@ primitives. No actual Bittensor SDK required.
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.bittensor
 from constitutional_swarm.bittensor.miner import (
     ConstitutionalMiner,
     ConstitutionMismatchError,
