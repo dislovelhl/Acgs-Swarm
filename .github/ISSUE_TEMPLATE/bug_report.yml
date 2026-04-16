@@ -1,0 +1,72 @@
+name: Bug Report
+description: Report a package bug, regression, or broken workflow.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Be concrete. File, function, command, observed result.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Package version, branch, or commit SHA where you saw the bug.
+      placeholder: "0.2.0 or 8ce18ae"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python version, OS, install extras, and anything else relevant.
+      placeholder: |
+        Python 3.12
+        Ubuntu 24.04
+        Installed with: pip install "constitutional-swarm[transport]"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Exact steps or commands to reproduce the problem.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, traceback, or failing output
+      render: shell
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Agent DNA
+        - Mesh / peer validation
+        - Remote vote transport
+        - EvolutionLog
+        - DAG compiler / swarm executor
+        - Packaging / release
+        - Papers / docs
+        - Other
+    validations:
+      required: true

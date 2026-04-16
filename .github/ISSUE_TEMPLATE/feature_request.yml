@@ -1,0 +1,55 @@
+name: Feature Request
+description: Propose a new package capability or workflow improvement.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start from the user. What can they not do today that they should be able to do?
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What concrete user pain or missing workflow are you seeing?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior you want, not just the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What are you doing today as a workaround?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent DNA
+        - Mesh / peer validation
+        - Remote vote transport
+        - EvolutionLog
+        - DAG compiler / swarm executor
+        - Packaging / release
+        - Docs / onboarding
+        - Papers / research
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Would this change the public API?
+      options:
+        - "No"
+        - "Maybe"
+        - "Yes"
+    validations:
+      required: true
