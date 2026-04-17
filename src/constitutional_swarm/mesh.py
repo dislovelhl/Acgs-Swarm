@@ -8,7 +8,7 @@ Cryptographic proof chain:
   1. Producer creates output with constitutional hash
   2. Mesh assigns random peers (producer excluded — MACI)
   3. Each peer validates via embedded DNA (443ns, Rust engine)
-  4. Votes are signed with voter's constitutional hash
+  4. Votes are signed with the peer's Ed25519 private key
   5. Quorum result produces a Merkle proof linking:
      - Producer's output hash
      - Each peer's vote + constitutional hash
@@ -27,9 +27,17 @@ import random
 import threading
 import time
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 from acgs_lite import Constitution
 from constitutional_swarm.dna import AgentDNA
@@ -42,6 +50,7 @@ from constitutional_swarm.settlement_store import (
 
 if TYPE_CHECKING:
     import constitutional_swarm.spectral_sphere as spectral_sphere_mod
+    from constitutional_swarm.remote_vote_transport import RemoteVoteClient, RemoteVoteResponse
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -58,6 +67,10 @@ class DuplicateVoteError(Exception):
 
 class UnauthorizedVoterError(Exception):
     """Voter is not assigned to this validation."""
+
+
+class InvalidVoteSignatureError(Exception):
+    """Vote signature is missing or does not match the registered agent key."""
 
 
 class AssignmentSettledError(Exception):
@@ -93,12 +106,13 @@ class PeerAssignment:
 
 @dataclass(frozen=True, slots=True)
 class ValidationVote:
-    """A peer's vote on a producer's output."""
+    """A peer's Ed25519-signed vote on a producer's output."""
 
     assignment_id: str
     voter_id: str
     approved: bool
     reason: str
+    signature: str
     constitutional_hash: str
     content_hash: str
     timestamp: float
@@ -108,9 +122,25 @@ class ValidationVote:
         """Deterministic hash of this vote for proof chain."""
         payload = (
             f"{self.assignment_id}:{self.voter_id}:{self.approved}"
-            f":{self.constitutional_hash}:{self.content_hash}"
+            f":{self.reason}:{self.signature}:{self.constitutional_hash}:{self.content_hash}"
         )
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteVoteRequest:
+    """Signable vote request for a public-key-only remote peer."""
+
+    assignment_id: str
+    voter_id: str
+    producer_id: str
+    artifact_id: str
+    content: str
+    content_hash: str
+    constitutional_hash: str
+    voter_public_key: str
+    request_signer_public_key: str
+    request_signature: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +240,7 @@ class ConstitutionalMesh:
         risk_scoring: bool = False,
         settlement_store_path: str | Path | None = None,
         settlement_store: SettlementStore | None = None,
+        request_signing_private_key: Ed25519PrivateKey | bytes | str | None = None,
     ) -> None:
         if quorum > peers_per_validation:
             raise ValueError(
@@ -231,6 +262,14 @@ class ConstitutionalMesh:
         # Seeded randomness is only used for deterministic peer assignment in tests/benchmarks.
         self._rng = random.Random(seed) if seed is not None else random.SystemRandom()  # noqa: S311
         self._agents: dict[str, _AgentInfo] = {}
+        self._agent_vote_public_keys: dict[str, Ed25519PublicKey] = {}
+        self._agent_vote_private_keys: dict[str, Ed25519PrivateKey] = {}
+        self._request_signing_private_key = (
+            Ed25519PrivateKey.generate()
+            if request_signing_private_key is None
+            else self._coerce_private_key(request_signing_private_key)
+        )
+        self._request_signing_public_key = self._request_signing_private_key.public_key()
         self._assignments: dict[str, PeerAssignment] = {}
         self._votes: dict[str, list[ValidationVote]] = {}
         self._final_results: dict[str, MeshResult] = {}
@@ -258,7 +297,11 @@ class ConstitutionalMesh:
         if self._settlement_store is None and settlement_store_path is not None:
             self._settlement_store = JSONLSettlementStore(settlement_store_path)
         self._load_settlements()
-        self.retry_pending_settlements()
+        reconciliation_report = self.retry_pending_settlements()
+        if reconciliation_report["failures"] > 0 or reconciliation_report["remaining"] > 0:
+            raise SettlementPersistenceError(
+                "Pending settlement reconciliation did not complete successfully at startup"
+            )
 
     def _check_halted(self) -> None:
         """Raise if mesh is halted."""
@@ -299,23 +342,91 @@ class ConstitutionalMesh:
 
     # -- Agent management --------------------------------------------------
 
-    def register_agent(self, agent_id: str, domain: str = "") -> None:
-        """Register an agent as a mesh participant.
+    def register_remote_agent(
+        self,
+        agent_id: str,
+        domain: str = "",
+        *,
+        vote_public_key: Ed25519PublicKey | bytes | str,
+    ) -> None:
+        """Register a remote peer with a public key only.
 
-        If the agent previously existed and was unregistered, their archived
-        trust relationships are restored with exponential decay applied.
+        The mesh can verify this agent's votes but cannot sign on their behalf.
         """
         with self._lock:
             self._agents[agent_id] = _AgentInfo(agent_id=agent_id, domain=domain)
+            self._agent_vote_public_keys[agent_id] = self._coerce_public_key(vote_public_key)
+            self._agent_vote_private_keys.pop(agent_id, None)
             if self._use_manifold and agent_id not in self._agent_indices:
                 self._agent_indices[agent_id] = len(self._agent_indices)
                 self._rebuild_manifold()
                 self._restore_archive_for_agent(agent_id)
 
+    def register_local_signer(
+        self,
+        agent_id: str,
+        domain: str = "",
+        *,
+        vote_private_key: Ed25519PrivateKey | bytes | str | None = None,
+    ) -> None:
+        """Register an in-process signer whose private key is managed locally."""
+        with self._lock:
+            self._agents[agent_id] = _AgentInfo(agent_id=agent_id, domain=domain)
+            private_key = self._coerce_private_key(vote_private_key) if vote_private_key is not None else Ed25519PrivateKey.generate()
+            self._agent_vote_private_keys[agent_id] = private_key
+            self._agent_vote_public_keys[agent_id] = private_key.public_key()
+            if self._use_manifold and agent_id not in self._agent_indices:
+                self._agent_indices[agent_id] = len(self._agent_indices)
+                self._rebuild_manifold()
+                self._restore_archive_for_agent(agent_id)
+
+    def register_agent(
+        self,
+        agent_id: str,
+        domain: str = "",
+        *,
+        vote_public_key: Ed25519PublicKey | bytes | str | None = None,
+        vote_private_key: Ed25519PrivateKey | bytes | str | None = None,
+    ) -> None:
+        """Compatibility wrapper with no implicit private-key storage.
+
+        .. deprecated::
+            Use :meth:`register_remote_agent` or :meth:`register_local_signer` instead.
+            This method will be removed in v0.3.0.
+
+        Callers must choose either ``register_remote_agent()`` or
+        ``register_local_signer()``. This method only accepts an explicit
+        public key and forwards to remote-agent registration.
+        """
+        warnings.warn(
+            "register_agent() is deprecated and will be removed in v0.3.0. "
+            "Use register_remote_agent() for public-key-only peers or "
+            "register_local_signer() for locally managed signer peers.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if vote_private_key is not None:
+            raise TypeError(
+                "register_agent() no longer accepts vote_private_key; "
+                "use register_local_signer() for locally managed signer keys"
+            )
+        if vote_public_key is None:
+            raise TypeError(
+                "Use register_remote_agent() for public-key-only peers or "
+                "register_local_signer() for locally managed signer peers"
+            )
+        self.register_remote_agent(
+            agent_id,
+            domain=domain,
+            vote_public_key=vote_public_key,
+        )
+
     def unregister_agent(self, agent_id: str) -> None:
         """Remove an agent from the mesh, archiving their trust relationships."""
         with self._lock:
             self._agents.pop(agent_id, None)
+            self._agent_vote_public_keys.pop(agent_id, None)
+            self._agent_vote_private_keys.pop(agent_id, None)
             if self._use_manifold and agent_id in self._agent_indices:
                 self._archive_trust_for_agent(agent_id)
                 # Remove departing agent from trust_store entries
@@ -456,6 +567,7 @@ class ConstitutionalMesh:
         *,
         approved: bool,
         reason: str = "",
+        signature: str,
     ) -> ValidationVote:
         """Submit a peer's validation vote.
 
@@ -479,6 +591,27 @@ class ConstitutionalMesh:
                 raise UnauthorizedVoterError(
                     f"{voter_id} is not assigned to validation {assignment_id}"
                 )
+            if voter_id not in self._agents:
+                raise UnauthorizedVoterError(f"{voter_id} is not a registered mesh agent")
+            public_key = self._agent_vote_public_keys.get(voter_id)
+            if public_key is None:
+                raise UnauthorizedVoterError(f"{voter_id} has no registered vote public key")
+            try:
+                public_key.verify(
+                    bytes.fromhex(signature),
+                    self._vote_payload_bytes(
+                        assignment_id=assignment_id,
+                        voter_id=voter_id,
+                        approved=approved,
+                        reason=reason,
+                        constitutional_hash=self.constitutional_hash,
+                        content_hash=assignment.content_hash,
+                    ),
+                )
+            except (ValueError, InvalidSignature) as exc:
+                raise InvalidVoteSignatureError(
+                    f"Invalid vote signature for {voter_id} on {assignment_id}"
+                ) from exc
 
             existing = self._votes.get(assignment_id, [])
             if any(v.voter_id == voter_id for v in existing):
@@ -489,6 +622,7 @@ class ConstitutionalMesh:
                 voter_id=voter_id,
                 approved=approved,
                 reason=reason,
+                signature=signature,
                 constitutional_hash=self.constitutional_hash,
                 content_hash=assignment.content_hash,
                 timestamp=time.time(),
@@ -600,6 +734,12 @@ class ConstitutionalMesh:
             assignment = self._assignments.get(assignment_id)
             if assignment is None:
                 raise KeyError(f"Assignment {assignment_id} not found")
+            self._assert_assignment_payload_complete(assignment)
+            if voter_id not in self._agent_vote_private_keys:
+                raise UnauthorizedVoterError(
+                    f"{voter_id} is not a locally managed signer; "
+                    "use prepare_remote_vote() and submit_vote() for remote peers"
+                )
             content = assignment.content
 
         voter_dna = AgentDNA(
@@ -611,13 +751,28 @@ class ConstitutionalMesh:
 
         if result.valid:
             return self.submit_vote(
-                assignment_id, voter_id, approved=True, reason="constitutional check passed"
+                assignment_id,
+                voter_id,
+                approved=True,
+                reason="constitutional check passed",
+                signature=self.sign_vote(
+                    assignment_id,
+                    voter_id,
+                    approved=True,
+                    reason="constitutional check passed",
+                ),
             )
         return self.submit_vote(
             assignment_id,
             voter_id,
             approved=False,
             reason="; ".join(result.violations),
+            signature=self.sign_vote(
+                assignment_id,
+                voter_id,
+                approved=False,
+                reason="; ".join(result.violations),
+            ),
         )
 
     # -- Bulk operations ---------------------------------------------------
@@ -628,10 +783,15 @@ class ConstitutionalMesh:
         content: str,
         artifact_id: str,
     ) -> MeshResult:
-        """End-to-end validation: assign peers, auto-vote, return result.
+        """End-to-end validation for locally managed signer peers only.
 
-        Each peer runs constitutional DNA validation independently.
-        Returns the mesh result with cryptographic proof.
+        This path auto-runs peer validation and signatures in-process.
+        For remote public-key-only peers, use:
+          1. request_validation()
+          2. prepare_remote_vote()
+          3. remote signer validates + signs externally
+          4. submit_vote()
+          5. get_result()/settle()
         """
         assignment = self.request_validation(producer_id, content, artifact_id)
         for peer_id in assignment.peers:
@@ -640,6 +800,195 @@ class ConstitutionalMesh:
             except AssignmentSettledError:
                 break
         return self.settle(assignment.assignment_id)
+
+    async def collect_remote_votes(
+        self,
+        assignment_id: str,
+        *,
+        peer_routes: dict[str, tuple[str, int]],
+        client: RemoteVoteClient | None = None,
+        timeout: float = 5.0,
+    ) -> MeshResult:
+        """Collect votes for an existing assignment from local and remote peers.
+
+        Local signer peers are validated/signed in-process. Public-key-only peers
+        receive a `RemoteVoteRequest` over the supplied transport routes.
+        """
+        with self._lock:
+            assignment = self._assignments.get(assignment_id)
+            if assignment is None:
+                raise KeyError(f"Assignment {assignment_id} not found")
+            peer_ids = assignment.peers
+
+        try:
+            from constitutional_swarm.remote_vote_transport import RemoteVoteClient as _Client
+        except ImportError:
+            _Client = None
+
+        if client is None:
+            if _Client is None:
+                raise ImportError(
+                    "Remote vote collection requires constitutional_swarm.remote_vote_transport"
+                )
+            client = _Client()
+
+        for peer_id in peer_ids:
+            if assignment_id in self._final_results:
+                break
+            if peer_id in self._agent_vote_private_keys:
+                try:
+                    self.validate_and_vote(assignment_id, peer_id)
+                except AssignmentSettledError:
+                    break
+                continue
+
+            route = peer_routes.get(peer_id)
+            if route is None:
+                raise KeyError(f"Missing remote route for peer {peer_id}")
+            request = self.prepare_remote_vote(assignment_id, peer_id)
+            response = await client.request_vote(route[0], route[1], request, timeout=timeout)
+            self._submit_remote_vote_response(assignment_id, peer_id, response)
+
+        result = self.get_result(assignment_id)
+        if result.quorum_met and not result.settled:
+            return self.settle(assignment_id)
+        return result
+
+    async def full_validation_remote(
+        self,
+        producer_id: str,
+        content: str,
+        artifact_id: str,
+        *,
+        peer_routes: dict[str, tuple[str, int]],
+        client: RemoteVoteClient | None = None,
+        timeout: float = 5.0,
+    ) -> MeshResult:
+        """End-to-end validation that supports public-key-only remote peers."""
+        assignment = self.request_validation(producer_id, content, artifact_id)
+        return await self.collect_remote_votes(
+            assignment.assignment_id,
+            peer_routes=peer_routes,
+            client=client,
+            timeout=timeout,
+        )
+
+    def prepare_remote_vote(self, assignment_id: str, voter_id: str) -> RemoteVoteRequest:
+        """Build a signable vote request for a public-key-only remote peer."""
+        with self._lock:
+            assignment = self._assignments.get(assignment_id)
+            if assignment is None:
+                raise KeyError(f"Assignment {assignment_id} not found")
+            self._assert_assignment_payload_complete(assignment)
+            if voter_id not in assignment.peers:
+                raise UnauthorizedVoterError(
+                    f"{voter_id} is not assigned to validation {assignment_id}"
+                )
+            public_key = self._agent_vote_public_keys.get(voter_id)
+            if public_key is None:
+                raise UnauthorizedVoterError(f"{voter_id} has no registered vote public key")
+            request_signer_public_key = self.get_request_signing_public_key()
+            request_signature = self._request_signing_private_key.sign(
+                self.build_remote_vote_request_payload(
+                    assignment_id=assignment.assignment_id,
+                    voter_id=voter_id,
+                    producer_id=assignment.producer_id,
+                    artifact_id=assignment.artifact_id,
+                    content=assignment.content,
+                    content_hash=assignment.content_hash,
+                    constitutional_hash=assignment.constitutional_hash,
+                    voter_public_key=public_key.public_bytes(
+                        encoding=serialization.Encoding.Raw,
+                        format=serialization.PublicFormat.Raw,
+                    ).hex(),
+                )
+            ).hex()
+            return RemoteVoteRequest(
+                assignment_id=assignment.assignment_id,
+                voter_id=voter_id,
+                producer_id=assignment.producer_id,
+                artifact_id=assignment.artifact_id,
+                content=assignment.content,
+                content_hash=assignment.content_hash,
+                constitutional_hash=assignment.constitutional_hash,
+                voter_public_key=public_key.public_bytes(
+                    encoding=serialization.Encoding.Raw,
+                    format=serialization.PublicFormat.Raw,
+                ).hex(),
+                request_signer_public_key=request_signer_public_key,
+                request_signature=request_signature,
+            )
+
+    def _submit_remote_vote_response(
+        self,
+        assignment_id: str,
+        voter_id: str,
+        response: RemoteVoteResponse,
+    ) -> ValidationVote:
+        if response.assignment_id != assignment_id:
+            raise ValueError(
+                f"Remote vote response assignment mismatch: {response.assignment_id} != {assignment_id}"
+            )
+        if response.voter_id != voter_id:
+            raise ValueError(f"Remote vote response voter mismatch: {response.voter_id} != {voter_id}")
+        return self.submit_vote(
+            assignment_id,
+            voter_id,
+            approved=response.approved,
+            reason=response.reason,
+            signature=response.signature,
+        )
+
+    @staticmethod
+    def build_remote_vote_request_payload(
+        *,
+        assignment_id: str,
+        voter_id: str,
+        producer_id: str,
+        artifact_id: str,
+        content: str,
+        content_hash: str,
+        constitutional_hash: str,
+        voter_public_key: str,
+    ) -> bytes:
+        payload = (
+            f"{assignment_id}:{voter_id}:{producer_id}:{artifact_id}:"
+            f"{content}:{content_hash}:{constitutional_hash}:{voter_public_key}"
+        )
+        return payload.encode("utf-8")
+
+    @staticmethod
+    def verify_remote_vote_request(request: RemoteVoteRequest) -> bool:
+        """Verify a remote vote request signature."""
+        try:
+            public_key = ConstitutionalMesh._coerce_public_key(request.request_signer_public_key)
+            public_key.verify(
+                bytes.fromhex(request.request_signature),
+                ConstitutionalMesh.build_remote_vote_request_payload(
+                    assignment_id=request.assignment_id,
+                    voter_id=request.voter_id,
+                    producer_id=request.producer_id,
+                    artifact_id=request.artifact_id,
+                    content=request.content,
+                    content_hash=request.content_hash,
+                    constitutional_hash=request.constitutional_hash,
+                    voter_public_key=request.voter_public_key,
+                ),
+            )
+        except (ValueError, InvalidSignature):
+            return False
+        return True
+
+    @staticmethod
+    def _content_matches_hash(content: str, content_hash: str) -> bool:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:32] == content_hash
+
+    @classmethod
+    def _assert_assignment_payload_complete(cls, assignment: PeerAssignment) -> None:
+        if not cls._content_matches_hash(assignment.content, assignment.content_hash):
+            raise ValueError(
+                f"Assignment {assignment.assignment_id} payload is unavailable or does not match its content hash"
+            )
 
     # -- Stats -------------------------------------------------------------
 
@@ -1134,7 +1483,6 @@ class ConstitutionalMesh:
             "assignment_id": assignment.assignment_id,
             "producer_id": assignment.producer_id,
             "artifact_id": assignment.artifact_id,
-            "content": assignment.content,
             "content_hash": assignment.content_hash,
             "peers": list(assignment.peers),
             "constitutional_hash": assignment.constitutional_hash,
@@ -1147,7 +1495,7 @@ class ConstitutionalMesh:
             assignment_id=str(data["assignment_id"]),
             producer_id=str(data["producer_id"]),
             artifact_id=str(data["artifact_id"]),
-            content=str(data["content"]),
+            content=str(data.get("content", "")),
             content_hash=str(data["content_hash"]),
             peers=tuple(str(peer) for peer in data["peers"]),
             constitutional_hash=str(data["constitutional_hash"]),
@@ -1209,6 +1557,137 @@ class ConstitutionalMesh:
             settled=bool(data.get("settled", False)),
             settled_at=(float(data["settled_at"]) if data.get("settled_at") is not None else None),
         )
+
+    def sign_vote(
+        self,
+        assignment_id: str,
+        voter_id: str,
+        *,
+        approved: bool,
+        reason: str = "",
+    ) -> str:
+        """Create an Ed25519 vote signature for a registered voter.
+
+        This convenience method exists for local/in-process agents and tests.
+        In distributed deployments, agents should hold their own private key and
+        produce the same signature client-side.
+        """
+        with self._lock:
+            assignment = self._assignments.get(assignment_id)
+            if assignment is None:
+                raise KeyError(f"Assignment {assignment_id} not found")
+            signing_key = self._agent_vote_private_keys.get(voter_id)
+            if signing_key is None:
+                raise UnauthorizedVoterError(f"{voter_id} has no registered vote signing key")
+            return signing_key.sign(
+                self._vote_payload_bytes(
+                    assignment_id=assignment_id,
+                    voter_id=voter_id,
+                    approved=approved,
+                    reason=reason,
+                    constitutional_hash=self.constitutional_hash,
+                    content_hash=assignment.content_hash,
+                )
+            ).hex()
+
+    def get_vote_public_key(self, agent_id: str) -> str:
+        """Return the registered Ed25519 public key as a hex string."""
+        with self._lock:
+            public_key = self._agent_vote_public_keys.get(agent_id)
+            if public_key is None:
+                raise KeyError(f"Agent {agent_id} not registered")
+            return public_key.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            ).hex()
+
+    def get_request_signing_public_key(self) -> str:
+        """Return the mesh request-signing public key as a hex string."""
+        return self._request_signing_public_key.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        ).hex()
+
+    @classmethod
+    def verify_vote_signature(
+        cls,
+        *,
+        public_key: Ed25519PublicKey | bytes | str,
+        assignment_id: str,
+        voter_id: str,
+        approved: bool,
+        reason: str,
+        constitutional_hash: str,
+        content_hash: str,
+        signature: str,
+    ) -> bool:
+        """Verify a detached Ed25519 vote signature."""
+        key = cls._coerce_public_key(public_key)
+        try:
+            key.verify(
+                bytes.fromhex(signature),
+                cls._vote_payload_bytes(
+                    assignment_id=assignment_id,
+                    voter_id=voter_id,
+                    approved=approved,
+                    reason=reason,
+                    constitutional_hash=constitutional_hash,
+                    content_hash=content_hash,
+                ),
+            )
+        except (ValueError, InvalidSignature):
+            return False
+        return True
+
+    @classmethod
+    def build_vote_payload(
+        cls,
+        *,
+        assignment_id: str,
+        voter_id: str,
+        approved: bool,
+        reason: str,
+        constitutional_hash: str,
+        content_hash: str,
+    ) -> bytes:
+        """Build the canonical byte payload that remote peers must sign."""
+        return cls._vote_payload_bytes(
+            assignment_id=assignment_id,
+            voter_id=voter_id,
+            approved=approved,
+            reason=reason,
+            constitutional_hash=constitutional_hash,
+            content_hash=content_hash,
+        )
+
+    @staticmethod
+    def _coerce_public_key(value: Ed25519PublicKey | bytes | str) -> Ed25519PublicKey:
+        if isinstance(value, Ed25519PublicKey):
+            return value
+        raw = bytes.fromhex(value) if isinstance(value, str) else value
+        return Ed25519PublicKey.from_public_bytes(raw)
+
+    @staticmethod
+    def _coerce_private_key(value: Ed25519PrivateKey | bytes | str) -> Ed25519PrivateKey:
+        if isinstance(value, Ed25519PrivateKey):
+            return value
+        raw = bytes.fromhex(value) if isinstance(value, str) else value
+        return Ed25519PrivateKey.from_private_bytes(raw)
+
+    @staticmethod
+    def _vote_payload_bytes(
+        *,
+        assignment_id: str,
+        voter_id: str,
+        approved: bool,
+        reason: str,
+        constitutional_hash: str,
+        content_hash: str,
+    ) -> bytes:
+        payload = (
+            f"{assignment_id}:{voter_id}:{approved}:{reason}:{constitutional_hash}:{content_hash}"
+        )
+        return payload.encode("utf-8")
 
 
 # ---------------------------------------------------------------------------

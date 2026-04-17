@@ -39,19 +39,37 @@ def cmd_register(args: argparse.Namespace) -> None:
     import bittensor as bt
 
     wallet = bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
-    subtensor = bt.subtensor(network="test")
+
+    try:
+        subtensor = bt.subtensor(network="test")
+    except Exception as exc:
+        print(f"ERROR: Could not connect to Bittensor testnet: {exc}")
+        print("  Check: network connectivity, testnet RPC availability.")
+        sys.exit(1)
 
     print(f"Registering subnet on testnet with wallet {wallet.name}...")
     print(f"  Wallet coldkey: {wallet.coldkeypub.ss58_address}")
     print("  Network: test")
 
-    success = subtensor.register_subnet(wallet=wallet)
-    if success:
-        print("Subnet registered successfully.")
-        print("  Use --netuid flag with the assigned netuid for miner/validator commands.")
-    else:
-        print("ERROR: Subnet registration failed.")
+    try:
+        result = subtensor.register_subnet(wallet=wallet)
+    except Exception as exc:
+        print(f"ERROR: Subnet registration failed: {exc}")
+        print("  Check: TAO balance (need ~1 TAO for registration), wallet configuration.")
+        print("  Testnet faucet: https://test.taostats.io/faucet")
         sys.exit(1)
+
+    if not result:
+        print("ERROR: Subnet registration returned failure.")
+        sys.exit(1)
+
+    if isinstance(result, int):
+        print(f"  Subnet registered. netuid={result}")
+        print(f"  Use --netuid {result} with the miner/validator commands.")
+    else:
+        print("  Subnet registered successfully.")
+        print("  Check the Bittensor dashboard for your assigned netuid,")
+        print("  then use --netuid <id> with the miner/validator commands.")
 
 
 def cmd_miner(args: argparse.Namespace) -> None:
@@ -64,8 +82,20 @@ def cmd_miner(args: argparse.Namespace) -> None:
     from constitutional_swarm.bittensor.miner import ConstitutionalMiner
     from constitutional_swarm.bittensor.protocol import MinerConfig
 
+    import os
+
+    if not os.path.exists(args.constitution):
+        print(f"ERROR: Constitution file not found: {args.constitution}")
+        print("  Create a constitution.yaml or use the sample in examples/constitution.yaml")
+        sys.exit(1)
+
     wallet = bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
-    subtensor = bt.subtensor(network="test")
+
+    try:
+        subtensor = bt.subtensor(network="test")
+    except Exception as exc:
+        print(f"ERROR: Could not connect to Bittensor testnet: {exc}")
+        sys.exit(1)
 
     print(f"Starting Constitutional Miner on testnet (netuid={args.netuid})...")
     print(f"  Constitution: {args.constitution}")
@@ -124,13 +154,17 @@ def cmd_miner(args: argparse.Namespace) -> None:
     print(f"  Axon serving on port {args.port}")
     print("  Miner is running. Press Ctrl+C to stop.")
 
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         bt.logging.info("Miner running...")
-        asyncio.get_event_loop().run_forever()
+        loop.run_forever()
     except KeyboardInterrupt:
         print("\nShutting down miner...")
         axon.stop()
         print(f"  Final stats: {miner.stats}")
+    finally:
+        loop.close()
 
 
 def cmd_validator(args: argparse.Namespace) -> None:
@@ -140,7 +174,6 @@ def cmd_validator(args: argparse.Namespace) -> None:
     import time
 
     import bittensor as bt
-    from constitutional_swarm.bittensor.dendrite_client import ValidatorDendriteClient
     from constitutional_swarm.bittensor.protocol import ValidatorConfig
     from constitutional_swarm.bittensor.subnet_owner import SubnetOwner
     from constitutional_swarm.bittensor.synapse_adapter import (
@@ -150,8 +183,20 @@ def cmd_validator(args: argparse.Namespace) -> None:
     )
     from constitutional_swarm.bittensor.validator import ConstitutionalValidator
 
+    import os
+
+    if not os.path.exists(args.constitution):
+        print(f"ERROR: Constitution file not found: {args.constitution}")
+        print("  Create a constitution.yaml or use the sample in examples/constitution.yaml")
+        sys.exit(1)
+
     wallet = bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
-    subtensor = bt.subtensor(network="test")
+
+    try:
+        subtensor = bt.subtensor(network="test")
+    except Exception as exc:
+        print(f"ERROR: Could not connect to Bittensor testnet: {exc}")
+        sys.exit(1)
 
     print(f"Starting Constitutional Validator on testnet (netuid={args.netuid})...")
     print(f"  Constitution: {args.constitution}")
@@ -165,10 +210,6 @@ def cmd_validator(args: argparse.Namespace) -> None:
 
     validator = ConstitutionalValidator(config=config)
     owner = SubnetOwner(args.constitution)
-    ValidatorDendriteClient(
-        constitution_path=args.constitution,
-        wallet=wallet,
-    )
 
     print(f"  Constitution hash: {validator.constitution_hash}")
 
@@ -180,11 +221,20 @@ def cmd_validator(args: argparse.Namespace) -> None:
     print("  Validator is running. Press Ctrl+C to stop.")
 
     dendrite = bt.Dendrite(wallet=wallet)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     try:
         while True:
-            # Refresh metagraph
-            metagraph.sync()
+            # Refresh metagraph with retry/backoff
+            for _attempt in range(3):
+                try:
+                    metagraph.sync()
+                    break
+                except Exception as _exc:
+                    if _attempt == 2:
+                        print(f"  WARNING: metagraph.sync() failed after 3 attempts: {_exc}")
+                    time.sleep(2 ** _attempt)
 
             # Register any new miners we discover
             for uid in range(metagraph.n):
@@ -200,13 +250,17 @@ def cmd_validator(args: argparse.Namespace) -> None:
                 )
                 bt_syn = deliberation_to_bt(case.synapse)
 
-                responses = asyncio.get_event_loop().run_until_complete(
-                    dendrite(
-                        axons=metagraph.axons,
-                        synapse=bt_syn,
-                        timeout=args.epoch_seconds * 0.8,
+                try:
+                    responses = loop.run_until_complete(
+                        dendrite(
+                            axons=metagraph.axons,
+                            synapse=bt_syn,
+                            timeout=args.epoch_seconds * 0.8,
+                        )
                     )
-                )
+                except Exception as _exc:
+                    print(f"  WARNING: dendrite query failed: {_exc}")
+                    responses = []
 
                 for resp in responses:
                     if not isinstance(resp, GovernanceDeliberation):
@@ -225,13 +279,16 @@ def cmd_validator(args: argparse.Namespace) -> None:
             if weights:
                 uids = list(range(metagraph.n))
                 weight_values = [weights.get(metagraph.hotkeys[uid], 0.0) for uid in uids]
-                subtensor.set_weights(
-                    wallet=wallet,
-                    netuid=args.netuid,
-                    uids=uids,
-                    weights=weight_values,
-                )
-                print(f"  Set weights for {len(weights)} miners")
+                try:
+                    subtensor.set_weights(
+                        wallet=wallet,
+                        netuid=args.netuid,
+                        uids=uids,
+                        weights=weight_values,
+                    )
+                    print(f"  Set weights for {len(weights)} miners")
+                except Exception as _exc:
+                    print(f"  WARNING: set_weights failed: {_exc}")
 
             print(f"  Stats: {validator.stats}")
             time.sleep(args.epoch_seconds)
@@ -239,6 +296,8 @@ def cmd_validator(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\nShutting down validator...")
         print(f"  Final stats: {validator.stats}")
+    finally:
+        loop.close()
 
 
 def main() -> None:

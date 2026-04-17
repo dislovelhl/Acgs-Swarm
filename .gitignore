@@ -5,3 +5,16 @@ __pycache__/
 .mypy_cache/
 htmlcov/
 coverage.xml
+dist/
+*.egg-info/
+build/
+.omc/
+.omx/
+.codex
+.worktrees/
+papers/*/main.pdf
+
+# Session-generated artifacts — not distribution content
+*-report.md
+SYSTEMIC_IMPROVEMENT.md
+HANDOFF_*.md

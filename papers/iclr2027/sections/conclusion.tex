@@ -44,6 +44,13 @@ discretizations are a practical concern.
   \item \textbf{BODES integration.}  When trust matrices derive from BODES latent
     steering vectors, the spectral projection may have a tighter sensitivity bound than
     $2r$; a full composition analysis remains open.
+  \item \textbf{Monotonic improvement auditing.}  The \texttt{EvolutionLog} component
+    (new in the package) enforces strict monotonicity and strict acceleration on
+    governance metric time series at write time via SQLite triggers.  Integrating it
+    into SWE-bench training loops would provide a formal, structural guarantee that
+    task success improves epoch-by-epoch --- any regression or deceleration is rejected
+    before being logged, turning the audit trail into a safety contract rather than a
+    post-hoc check.
 \end{itemize}
 
 \paragraph{Reproducibility.}

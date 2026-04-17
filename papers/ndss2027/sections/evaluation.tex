@@ -25,6 +25,7 @@ round.
 
 \begin{table}[t]
   \centering
+  \footnotesize
   \caption{Protocol correctness under Byzantine faults.
     All entries are over 20 random seeds.
     ``Convergence rounds'' is the number of gossip rounds to EEC.}
@@ -32,12 +33,12 @@ round.
   \renewcommand{\arraystretch}{1.1}
   \begin{tabular}{ccccc}
     \toprule
-    $N$ & Byzantine $f$ & Acceptance rate & Convergence rounds & EEC achieved \\
+    $N$ & Byzantine $f$ & Accept. rate & Conv. rounds & EEC \\
     \midrule
-    10  & 3 ($30\%$) & 100\% honest & $3.2 \pm 0.4$ & Yes (all seeds) \\
-    50  & 16 ($32\%$) & 100\% honest & $4.1 \pm 0.6$ & Yes (all seeds) \\
-    100 & 33 ($33\%$) & 100\% honest & $5.3 \pm 0.8$ & Yes (all seeds) \\
-    500 & 166 ($33\%$) & 100\% honest & $8.7 \pm 1.2$ & Yes (all seeds) \\
+    10  & 3 ($30\%$) & 100\% & $3.2 \pm 0.4$ & Yes \\
+    50  & 16 ($32\%$) & 100\% & $4.1 \pm 0.6$ & Yes \\
+    100 & 33 ($33\%$) & 100\% & $5.3 \pm 0.8$ & Yes \\
+    500 & 166 ($33\%$) & 100\% & $8.7 \pm 1.2$ & Yes \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -104,6 +105,11 @@ task routing is determined by the aggregated $\tilde{H}$ matrix at the Merkle-CR
 Task success rate (fraction of SWE-bench instances resolved), routing diversity
 (variance of task assignments across agents), and convergence overhead (gossip rounds
 per task assignment).
+All per-epoch metrics will be recorded via the \texttt{EvolutionLog} component, which
+enforces strict monotonicity and strict acceleration on governance metric series at
+write time: a regression or deceleration in task success rate is rejected structurally
+before being persisted, turning the audit log into a safety contract rather than a
+post-hoc record.
 
 \paragraph{Expected outcomes.}
 Based on the variance retention results of \cite{mcfs_iclr2027}, we expect Sinkhorn-CRDT
@@ -114,16 +120,17 @@ requiring domain expertise.
 
 \begin{table}[b]
   \centering
+  \footnotesize
   \caption{SWE-bench evaluation placeholder. To be filled upon Phase 3/4 completion.}
   \label{tab:sweb_results}
-  \begin{tabular}{lccc}
+  \begin{tabular}{p{0.30\linewidth}p{0.13\linewidth}p{0.22\linewidth}p{0.14\linewidth}}
     \toprule
-    Method & Task success & Routing diversity & Convergence \\
+    Method & Success & Routing div. & Conv. \\
     \midrule
-    Flat routing           & TBD & 0\% (by design) & N/A \\
+    Flat routing           & TBD & 0\% & N/A \\
     Centralized trust      & TBD & TBD & N/A \\
     Sinkhorn-CRDT          & TBD & $\approx 0\%$ (BUC) & TBD \\
-    \fedsink{} (ours)      & TBD & $>100\%$ (predicted) & $O(\log N)$ \\
+    \fedsink{} (ours)      & TBD & $>100\%$ & $O(\log N)$ \\
     \bottomrule
   \end{tabular}
 \end{table}

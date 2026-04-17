@@ -19,6 +19,18 @@ from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.compiler import DAGCompiler, GoalSpec
 from constitutional_swarm.contract import ContractStatus, TaskContract
 from constitutional_swarm.dna import AgentDNA, DNADisabledError, constitutional_dna
+from constitutional_swarm.evolution_log import (
+    DashboardRow,
+    DecelerationBlockedError,
+    DecelerationRecord,
+    EvolutionLog,
+    EvolutionViolationError,
+    GapRecord,
+    MissingPriorEpochError,
+    MutationBlockedError,
+    NonIncreasingValueError,
+    RegressionRecord,
+)
 from constitutional_swarm.execution import ExecutionStatus, WorkReceipt
 from constitutional_swarm.manifold import (
     GovernanceManifold,
@@ -28,12 +40,20 @@ from constitutional_swarm.manifold import (
 from constitutional_swarm.mesh import (
     AssignmentSettledError,
     ConstitutionalMesh,
+    InvalidVoteSignatureError,
     MeshHaltedError,
     MeshProof,
     MeshResult,
     PeerAssignment,
+    RemoteVoteRequest,
     SettlementPersistenceError,
     ValidationVote,
+)
+from constitutional_swarm.remote_vote_transport import (
+    LocalRemotePeer,
+    RemoteVoteClient,
+    RemoteVoteResponse,
+    RemoteVoteServer,
 )
 from constitutional_swarm.settlement_store import (
     DuplicateSettlementError,
@@ -56,16 +76,32 @@ __all__ = [
     "ContractStatus",
     "DAGCompiler",
     "DNADisabledError",
+    "DashboardRow",
+    "DecelerationBlockedError",
+    "DecelerationRecord",
     "DuplicateSettlementError",
+    "EvolutionLog",
+    "EvolutionViolationError",
     "ExecutionStatus",
+    "GapRecord",
     "GoalSpec",
     "GovernanceManifold",
+    "InvalidVoteSignatureError",
     "JSONLSettlementStore",
+    "LocalRemotePeer",
     "ManifoldProjectionResult",
     "MeshHaltedError",
     "MeshProof",
     "MeshResult",
+    "MissingPriorEpochError",
+    "MutationBlockedError",
+    "NonIncreasingValueError",
     "PeerAssignment",
+    "RegressionRecord",
+    "RemoteVoteClient",
+    "RemoteVoteRequest",
+    "RemoteVoteResponse",
+    "RemoteVoteServer",
     "SQLiteSettlementStore",
     "SettlementPersistenceError",
     "SettlementRecord",

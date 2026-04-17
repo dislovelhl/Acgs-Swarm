@@ -12,7 +12,7 @@ pytestmark = pytest.mark.integration
 
 def _register_mesh_agents(mesh: ConstitutionalMesh, count: int = 5) -> None:
     for index in range(count):
-        mesh.register_agent(f"agent-{index}", domain=f"domain-{index % 2}")
+        mesh.register_local_signer(f"agent-{index}", domain=f"domain-{index % 2}")
 
 
 def test_default_constitution_flows_through_dna_and_mesh() -> None:
