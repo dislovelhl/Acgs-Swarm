@@ -51,9 +51,8 @@ try:
     import torch.nn as nn
     from torch import Tensor
 except ImportError as exc:
-    raise ImportError(
-        "latent_dna requires torch. Install with: pip install torch>=2.0"
-    ) from exc
+    raise ImportError("latent_dna requires torch. Install with: pip install torch>=2.0") from exc
+
 
 def _transformers_available() -> bool:
     """Return True if the transformers package is importable."""
@@ -101,9 +100,7 @@ class _BODESHook:
         gamma: float = 1.0,
     ) -> None:
         if v_viol.dim() != 1:
-            raise ValueError(
-                f"v_viol must be 1D [hidden_dim], got shape {tuple(v_viol.shape)}"
-            )
+            raise ValueError(f"v_viol must be 1D [hidden_dim], got shape {tuple(v_viol.shape)}")
         norm = v_viol.norm().item()
         if abs(norm - 1.0) > 1e-4:
             raise ValueError(
@@ -148,7 +145,7 @@ class _BODESHook:
 
         # Projection: [batch, seq_len]
         # proj[b, s] = hidden[b, s] · v_viol
-        proj = (hidden @ v)  # [batch, seq_len]
+        proj = hidden @ v  # [batch, seq_len]
 
         # CBF condition: steer where proj > threshold
         mask = proj > self.threshold  # [batch, seq_len], bool
@@ -161,7 +158,7 @@ class _BODESHook:
             # proj_expanded: [batch, seq_len, 1]
             proj_clamped = torch.where(mask, proj, torch.zeros_like(proj))
             proj_expanded = proj_clamped.unsqueeze(-1)  # [batch, seq_len, 1]
-            v_expanded = v.unsqueeze(0).unsqueeze(0)    # [1, 1, hidden_dim]
+            v_expanded = v.unsqueeze(0).unsqueeze(0)  # [1, 1, hidden_dim]
 
             # steering_delta: [batch, seq_len, hidden_dim]
             steering_delta = self.gamma * proj_expanded * v_expanded
@@ -365,10 +362,8 @@ class LatentDNAWrapper:
             )
         stats = self.intervention_stats()
         if tokenizer is not None:
-            new_ids = output_ids[:, input_ids.shape[-1]:]
-            stats["generated_text"] = tokenizer.batch_decode(
-                new_ids, skip_special_tokens=True
-            )
+            new_ids = output_ids[:, input_ids.shape[-1] :]
+            stats["generated_text"] = tokenizer.batch_decode(new_ids, skip_special_tokens=True)
         return output_ids, stats
 
     # ──────────────────────────────────────────────────────────────────────
@@ -387,9 +382,7 @@ class LatentDNAWrapper:
         )
 
     @staticmethod
-    def _resolve_layer(
-        model: _HFModelLike, attr_path: str, layer_idx: int
-    ) -> nn.Module:
+    def _resolve_layer(model: _HFModelLike, attr_path: str, layer_idx: int) -> nn.Module:
         obj: Any = model
         for part in attr_path.split("."):
             obj = getattr(obj, part)
@@ -443,9 +436,7 @@ class LatentDNAWrapper:
 
         activations: list[Tensor] = []
 
-        def _capture_hook(
-            module: nn.Module, input: tuple[Any, ...], output: Any
-        ) -> None:
+        def _capture_hook(module: nn.Module, input: tuple[Any, ...], output: Any) -> None:
             h = output[0] if isinstance(output, tuple) else output
             # Mean over seq_len: [batch, hidden_dim]
             activations.append(h.mean(dim=1).detach().cpu())
@@ -468,8 +459,8 @@ class LatentDNAWrapper:
         finally:
             handle.remove()
 
-        safe_mean = torch.cat(safe_acts, dim=0).mean(dim=0)     # [hidden_dim]
-        unsafe_mean = torch.cat(unsafe_acts, dim=0).mean(dim=0) # [hidden_dim]
+        safe_mean = torch.cat(safe_acts, dim=0).mean(dim=0)  # [hidden_dim]
+        unsafe_mean = torch.cat(unsafe_acts, dim=0).mean(dim=0)  # [hidden_dim]
 
         v_viol = unsafe_mean - safe_mean
         v_viol = v_viol / v_viol.norm()
@@ -532,9 +523,7 @@ class LatentDNAWrapper:
 
         activations: list[Tensor] = []
 
-        def _capture_hook(
-            module: nn.Module, input: tuple[Any, ...], output: Any
-        ) -> None:
+        def _capture_hook(module: nn.Module, input: tuple[Any, ...], output: Any) -> None:
             h = output[0] if isinstance(output, tuple) else output
             activations.append(h.mean(dim=1).detach().cpu())
 
@@ -556,12 +545,12 @@ class LatentDNAWrapper:
         finally:
             handle.remove()
 
-        safe_cat = torch.cat(safe_acts, dim=0)     # [N, hidden_dim]
+        safe_cat = torch.cat(safe_acts, dim=0)  # [N, hidden_dim]
         unsafe_cat = torch.cat(unsafe_acts, dim=0)  # [N, hidden_dim]
 
         # Contrastive PCA: SVD on centered paired differences
-        diffs = unsafe_cat - safe_cat                              # [N, hidden_dim]
-        diffs_centered = diffs - diffs.mean(dim=0, keepdim=True)   # center
+        diffs = unsafe_cat - safe_cat  # [N, hidden_dim]
+        diffs_centered = diffs - diffs.mean(dim=0, keepdim=True)  # center
         _U, _S, Vh = torch.linalg.svd(diffs_centered, full_matrices=False)
 
         if n_components == 1:

@@ -130,8 +130,7 @@ class JSONLSettlementStore:
 
     def load_pending(self) -> list[SettlementRecord]:
         return [
-            self._record_from_payload(payload)
-            for payload in self._load_pending_payloads().values()
+            self._record_from_payload(payload) for payload in self._load_pending_payloads().values()
         ]
 
     def pending_count(self) -> int:

@@ -26,6 +26,7 @@ def _random_trust_matrix(n: int, seed: int = 42) -> Tensor:
     torch.manual_seed(seed)
     H = torch.rand(n, n)
     from constitutional_swarm.swarm_ode import spectral_project_torch
+
     return spectral_project_torch(H, r=1.0)
 
 
@@ -113,8 +114,13 @@ def test_spectral_bound_maintained_throughout() -> None:
     f = TrustDecayField(n, decay=0.05)
 
     result = integrate(
-        f, H0, t_span=(0, 5), n_steps=200,
-        r=r, residual_alpha=0.1, record_every=10,
+        f,
+        H0,
+        t_span=(0, 5),
+        n_steps=200,
+        r=r,
+        residual_alpha=0.1,
+        record_every=10,
     )
 
     for t, H, _var in result["trajectory"]:
@@ -137,8 +143,12 @@ def test_residual_injection_active() -> None:
     f = TrustDecayField(n, decay=0.1)
 
     result = integrate(
-        f, H0, t_span=(0, 2), n_steps=100,
-        r=1.0, residual_alpha=alpha,
+        f,
+        H0,
+        t_span=(0, 2),
+        n_steps=100,
+        r=1.0,
+        residual_alpha=alpha,
     )
 
     H_final = result["H_final"]
@@ -147,8 +157,7 @@ def test_residual_injection_active() -> None:
     # With zero-start and residual injection, diagonal should be biased toward alpha
     # (exact value depends on dynamics, but should be positive and nonzero)
     assert (diag > 0).all(), (
-        f"Residual alpha={alpha} should keep diagonal entries positive.\n"
-        f"Diagonal: {diag.tolist()}"
+        f"Residual alpha={alpha} should keep diagonal entries positive.\nDiagonal: {diag.tolist()}"
     )
 
 
@@ -176,8 +185,13 @@ def test_continuous_ode_retains_variance() -> None:
 
     f = TrustDecayField(n, decay=0.05, seed=42)
     result = integrate(
-        f, H0, t_span=(0, 10), n_steps=500,
-        r=1.0, residual_alpha=0.1, record_every=50,
+        f,
+        H0,
+        t_span=(0, 10),
+        n_steps=500,
+        r=1.0,
+        residual_alpha=0.1,
+        record_every=50,
     )
 
     H_final = result["H_final"]
@@ -209,8 +223,13 @@ def test_continuous_variance_is_stable() -> None:
     f = TrustDecayField(n, decay=0.05, seed=99)
 
     result = integrate(
-        f, H0, t_span=(0, 20), n_steps=1000,
-        r=1.0, residual_alpha=0.1, record_every=100,
+        f,
+        H0,
+        t_span=(0, 20),
+        n_steps=1000,
+        r=1.0,
+        residual_alpha=0.1,
+        record_every=100,
     )
 
     traj = result["trajectory"]
@@ -219,8 +238,10 @@ def test_continuous_variance_is_stable() -> None:
         _, _, var_prev = traj[-2]
         _, _, var_last = traj[-1]
         rel_change = abs(var_last - var_prev) / (var_prev + 1e-12)
-        print(f"\nStability check: var[-2]={var_prev:.6f}, var[-1]={var_last:.6f}, "
-              f"change={rel_change:.2%}")
+        print(
+            f"\nStability check: var[-2]={var_prev:.6f}, var[-1]={var_last:.6f}, "
+            f"change={rel_change:.2%}"
+        )
         assert rel_change < 0.15, (
             f"Variance still changing at end of integration "
             f"(prev={var_prev:.6f}, last={var_last:.6f}, change={rel_change:.1%}). "

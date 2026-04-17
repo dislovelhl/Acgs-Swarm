@@ -319,13 +319,17 @@ class TestHashCommitmentProver:
         """Changing escalated_decisions changes the proof (all fields are committed)."""
         prover = HashCommitmentProver(secret_key="test-secret")
         s1 = ComplianceSnapshot(
-            total_decisions=100, passed_decisions=99,
-            escalated_decisions=1, auto_resolved_decisions=0,
+            total_decisions=100,
+            passed_decisions=99,
+            escalated_decisions=1,
+            auto_resolved_decisions=0,
             constitutional_hash=CONST_HASH,
         )
         s2 = ComplianceSnapshot(
-            total_decisions=100, passed_decisions=99,
-            escalated_decisions=5, auto_resolved_decisions=0,
+            total_decisions=100,
+            passed_decisions=99,
+            escalated_decisions=5,
+            auto_resolved_decisions=0,
             constitutional_hash=CONST_HASH,
         )
         assert prover.prove(s1, 0.99, CONST_HASH) != prover.prove(s2, 0.99, CONST_HASH)

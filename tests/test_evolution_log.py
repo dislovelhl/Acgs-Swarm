@@ -142,9 +142,9 @@ class TestStrictAcceleration:
         """delta(3) = delta(2) should be blocked."""
         with EvolutionLog(":memory:") as log:
             log.record(1, "x", 0.0)
-            log.record(2, "x", 5.0)   # delta=5
+            log.record(2, "x", 5.0)  # delta=5
             with pytest.raises(DecelerationBlockedError):
-                log.record(3, "x", 10.0)   # delta=5 = prior delta → not strictly greater
+                log.record(3, "x", 10.0)  # delta=5 = prior delta → not strictly greater
 
     def test_strict_acceleration_accepted(self) -> None:
         """Guide §1.5: epoch 6 value=40, delta=10 > prior delta=8 → accepted."""

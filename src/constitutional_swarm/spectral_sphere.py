@@ -42,9 +42,7 @@ class SpectralProjectionResult:
     power_iterations: int
 
 
-def _mat_mul(
-    a: list[list[float]], b: list[list[float]], n: int
-) -> list[list[float]]:
+def _mat_mul(a: list[list[float]], b: list[list[float]], n: int) -> list[list[float]]:
     """O(n³) matrix multiply — pure Python, no numpy required."""
     return [[sum(a[i][k] * b[k][j] for k in range(n)) for j in range(n)] for i in range(n)]
 
@@ -263,9 +261,7 @@ class SpectralSphereManifold:
         if self._n != other._n:
             raise ValueError("Cannot compose manifolds of different sizes")
         if abs(self._r - other._r) > 1e-10:
-            raise ValueError(
-                f"Spectral sphere radii must match: {self._r} != {other._r}"
-            )
+            raise ValueError(f"Spectral sphere radii must match: {self._r} != {other._r}")
         if not 0.0 <= residual_alpha < 1.0:
             raise ValueError(f"residual_alpha must be in [0, 1), got {residual_alpha}")
 
@@ -279,10 +275,7 @@ class SpectralSphereManifold:
             # Inject residual identity: alpha * I + (1 - alpha) * (A @ B)
             beta = 1.0 - residual_alpha
             product = [
-                [
-                    beta * product[i][j] + (residual_alpha if i == j else 0.0)
-                    for j in range(n)
-                ]
+                [beta * product[i][j] + (residual_alpha if i == j else 0.0) for j in range(n)]
                 for i in range(n)
             ]
 

@@ -143,9 +143,7 @@ class ArtifactStore:
     def _collect_callbacks_unlocked(self, artifact: Artifact) -> tuple[Any, ...]:
         """Collect callbacks for an artifact while the store lock is held."""
         return tuple(
-            cb
-            for key in (artifact.task_id, artifact.domain)
-            for cb in self._watchers.get(key, [])
+            cb for key in (artifact.task_id, artifact.domain) for cb in self._watchers.get(key, [])
         )
 
     def verify_integrity(self, artifact_id: str) -> bool:

@@ -275,7 +275,9 @@ class ConstitutionalMesh:
         self._final_results: dict[str, MeshResult] = {}
         self._use_manifold = use_manifold
         self._manifold_type = manifold_type
-        self._manifold: GovernanceManifold | spectral_sphere_mod.SpectralSphereManifold | None = None
+        self._manifold: GovernanceManifold | spectral_sphere_mod.SpectralSphereManifold | None = (
+            None
+        )
         self._shadow_spectral = use_manifold and manifold_type == "birkhoff" and shadow_spectral
         if self._shadow_spectral:
             self._shadow_manifold: spectral_sphere_mod.SpectralSphereManifold | None = None
@@ -372,7 +374,11 @@ class ConstitutionalMesh:
         """Register an in-process signer whose private key is managed locally."""
         with self._lock:
             self._agents[agent_id] = _AgentInfo(agent_id=agent_id, domain=domain)
-            private_key = self._coerce_private_key(vote_private_key) if vote_private_key is not None else Ed25519PrivateKey.generate()
+            private_key = (
+                self._coerce_private_key(vote_private_key)
+                if vote_private_key is not None
+                else Ed25519PrivateKey.generate()
+            )
             self._agent_vote_private_keys[agent_id] = private_key
             self._agent_vote_public_keys[agent_id] = private_key.public_key()
             if self._use_manifold and agent_id not in self._agent_indices:
@@ -930,7 +936,9 @@ class ConstitutionalMesh:
                 f"Remote vote response assignment mismatch: {response.assignment_id} != {assignment_id}"
             )
         if response.voter_id != voter_id:
-            raise ValueError(f"Remote vote response voter mismatch: {response.voter_id} != {voter_id}")
+            raise ValueError(
+                f"Remote vote response voter mismatch: {response.voter_id} != {voter_id}"
+            )
         return self.submit_vote(
             assignment_id,
             voter_id,
@@ -1004,7 +1012,11 @@ class ConstitutionalMesh:
         settlement_storage = (
             {"enabled": False, "backend": None, "pending": 0}
             if self._settlement_store is None
-            else {"enabled": True, "pending": pending_settlements, **self._settlement_store.describe()}
+            else {
+                "enabled": True,
+                "pending": pending_settlements,
+                **self._settlement_store.describe(),
+            }
         )
         with self._lock:
             return {
@@ -1327,7 +1339,9 @@ class ConstitutionalMesh:
                             self._shadow_metrics.append(
                                 {
                                     "assignment_id": assignment_id,
-                                    "birkhoff_variance": _trust_variance(self._manifold.trust_matrix),
+                                    "birkhoff_variance": _trust_variance(
+                                        self._manifold.trust_matrix
+                                    ),
                                     "spectral_variance": _trust_variance(shadow.trust_matrix),
                                     "birkhoff_spectral_norm": _matrix_spectral_norm(
                                         self._manifold.trust_matrix

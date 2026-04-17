@@ -247,11 +247,7 @@ class LocalRemotePeer:
 
         result = self._dna.validate(request.content)
         approved = result.valid
-        reason = (
-            "constitutional check passed"
-            if result.valid
-            else "; ".join(result.violations)
-        )
+        reason = "constitutional check passed" if result.valid else "; ".join(result.violations)
         signature = self._private_key.sign(
             ConstitutionalMesh.build_vote_payload(
                 assignment_id=request.assignment_id,
