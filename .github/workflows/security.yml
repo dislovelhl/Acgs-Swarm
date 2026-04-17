@@ -1,0 +1,47 @@
+name: security-regression
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/security/**'
+      - 'scripts/generate_security_report.py'
+      - '.github/workflows/security.yml'
+  push:
+    branches: [main]
+
+# Each past security-audit-report.md finding is encoded as a test in
+# tests/security/test_finding_*.py. The pytest exit code is the structural
+# regression gate — a finding that silently regresses will turn its test red.
+# The generated markdown report is an always-fresh CI artifact (not committed,
+# since *-report.md is .gitignore'd by project convention).
+
+jobs:
+  security-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          pip install -e ".[dev,transport]"
+          pip install pytest-json-report
+      - name: Run security tests
+        run: |
+          mkdir -p .artifacts
+          python -m pytest tests/security/ -m security \
+            --json-report --json-report-file=.artifacts/security.json \
+            -v --tb=short
+      - name: Regenerate report
+        if: always()
+        run: |
+          python scripts/generate_security_report.py .artifacts/security.json \
+            > .artifacts/security-audit-report.md || true
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: .artifacts/

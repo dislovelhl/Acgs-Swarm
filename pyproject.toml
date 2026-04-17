@@ -43,5 +43,6 @@ markers = [
   "research: marks empirical research proof tests (expected to fail; excluded from release gating)",
   "bittensor: marks tests that exercise the Bittensor subnet integration (excluded from dev matrix)",
   "benchmark: marks performance benchmark tests",
-  "e2e: marks end-to-end tests requiring live external services"
+  "e2e: marks end-to-end tests requiring live external services",
+  "security: marks security regression tests (one test per audit finding — report auto-generated)"
 ]
