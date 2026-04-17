@@ -22,6 +22,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+_BT_RUNTIME_ERRORS = (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError)
+
 
 def _check_bittensor() -> None:
     """Verify bittensor package is installed."""
@@ -42,7 +44,7 @@ def cmd_register(args: argparse.Namespace) -> None:
 
     try:
         subtensor = bt.subtensor(network="test")
-    except Exception as exc:
+    except _BT_RUNTIME_ERRORS as exc:
         print(f"ERROR: Could not connect to Bittensor testnet: {exc}")
         print("  Check: network connectivity, testnet RPC availability.")
         sys.exit(1)
@@ -53,7 +55,7 @@ def cmd_register(args: argparse.Namespace) -> None:
 
     try:
         result = subtensor.register_subnet(wallet=wallet)
-    except Exception as exc:
+    except _BT_RUNTIME_ERRORS as exc:
         print(f"ERROR: Subnet registration failed: {exc}")
         print("  Check: TAO balance (need ~1 TAO for registration), wallet configuration.")
         print("  Testnet faucet: https://test.taostats.io/faucet")
@@ -76,13 +78,12 @@ def cmd_miner(args: argparse.Namespace) -> None:
     """Start a constitutional governance miner on testnet."""
     _check_bittensor()
     import asyncio
+    import os
 
     import bittensor as bt
     from constitutional_swarm.bittensor.axon_server import MinerAxonServer
     from constitutional_swarm.bittensor.miner import ConstitutionalMiner
     from constitutional_swarm.bittensor.protocol import MinerConfig
-
-    import os
 
     if not os.path.exists(args.constitution):
         print(f"ERROR: Constitution file not found: {args.constitution}")
@@ -93,7 +94,7 @@ def cmd_miner(args: argparse.Namespace) -> None:
 
     try:
         subtensor = bt.subtensor(network="test")
-    except Exception as exc:
+    except _BT_RUNTIME_ERRORS as exc:
         print(f"ERROR: Could not connect to Bittensor testnet: {exc}")
         sys.exit(1)
 
@@ -171,6 +172,7 @@ def cmd_validator(args: argparse.Namespace) -> None:
     """Start a constitutional governance validator on testnet."""
     _check_bittensor()
     import asyncio
+    import os
     import time
 
     import bittensor as bt
@@ -183,8 +185,6 @@ def cmd_validator(args: argparse.Namespace) -> None:
     )
     from constitutional_swarm.bittensor.validator import ConstitutionalValidator
 
-    import os
-
     if not os.path.exists(args.constitution):
         print(f"ERROR: Constitution file not found: {args.constitution}")
         print("  Create a constitution.yaml or use the sample in examples/constitution.yaml")
@@ -194,7 +194,7 @@ def cmd_validator(args: argparse.Namespace) -> None:
 
     try:
         subtensor = bt.subtensor(network="test")
-    except Exception as exc:
+    except _BT_RUNTIME_ERRORS as exc:
         print(f"ERROR: Could not connect to Bittensor testnet: {exc}")
         sys.exit(1)
 
@@ -231,10 +231,10 @@ def cmd_validator(args: argparse.Namespace) -> None:
                 try:
                     metagraph.sync()
                     break
-                except Exception as _exc:
+                except _BT_RUNTIME_ERRORS as _exc:
                     if _attempt == 2:
                         print(f"  WARNING: metagraph.sync() failed after 3 attempts: {_exc}")
-                    time.sleep(2 ** _attempt)
+                    time.sleep(2**_attempt)
 
             # Register any new miners we discover
             for uid in range(metagraph.n):
@@ -258,7 +258,7 @@ def cmd_validator(args: argparse.Namespace) -> None:
                             timeout=args.epoch_seconds * 0.8,
                         )
                     )
-                except Exception as _exc:
+                except _BT_RUNTIME_ERRORS as _exc:
                     print(f"  WARNING: dendrite query failed: {_exc}")
                     responses = []
 
@@ -287,7 +287,7 @@ def cmd_validator(args: argparse.Namespace) -> None:
                         weights=weight_values,
                     )
                     print(f"  Set weights for {len(weights)} miners")
-                except Exception as _exc:
+                except _BT_RUNTIME_ERRORS as _exc:
                     print(f"  WARNING: set_weights failed: {_exc}")
 
             print(f"  Stats: {validator.stats}")
