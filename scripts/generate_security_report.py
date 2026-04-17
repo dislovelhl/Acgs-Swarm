@@ -10,10 +10,11 @@ Usage
 
 CI contract
 -----------
-The workflow runs the two steps above, then diffs the generated report
-against the checked-in one. Any drift (new finding, status change,
-removed test) fails the build. This makes the report itself derived
-data — humans fix tests, the report updates automatically.
+The structural regression gate is the pytest exit code from `pytest -m security`
+(one test per audit finding). If any finding regresses, its test turns red and
+the workflow fails. The generated markdown is uploaded as a CI artifact; it is
+NOT diffed against a checked-in copy because `*-report.md` is .gitignore'd by
+project convention. To inspect, download the `security-report` artifact.
 """
 
 from __future__ import annotations

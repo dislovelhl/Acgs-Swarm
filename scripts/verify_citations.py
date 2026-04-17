@@ -124,6 +124,12 @@ def _scan(root: pathlib.Path) -> list[Citation]:
 
 _ALLOWED_URL_PREFIXES = ("https://arxiv.org/", "https://doi.org/")
 
+# Known follow-up: urllib follows 301/302 by default, so a DOI redirect to a
+# malicious publisher URL would complete the request. Not exploitable from
+# outside CI (URLs come from committed repo files, not runtime input), but
+# defence-in-depth would disable following + validate final resp.url against
+# a publisher allowlist. Tracked separately to avoid scope creep in this PR.
+
 
 def _verify_one(c: Citation, timeout: float) -> Citation:
     # URLs are constructed internally from scanned arXiv/DOI identifiers, but
@@ -137,19 +143,23 @@ def _verify_one(c: Citation, timeout: float) -> Citation:
         headers={"User-Agent": "constitutional-swarm-cite-verify/1.0"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — same
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — allowlisted
             c.status = resp.status
             c.ok = c.status == 200
     except urllib.error.HTTPError as e:
         c.status = e.code
-        # DOI resolver returns 302/301 — treat as OK
-        c.ok = e.code in (301, 302) or (c.kind == "doi" and e.code in (301, 302))
+        # DOI/arXiv may return 301/302 before follow; treat as OK (the citation
+        # resolves, which is what we care about).
+        c.ok = e.code in (301, 302)
         if not c.ok:
             c.error = f"HTTP {e.code}"
     except urllib.error.URLError as e:
-        c.error = str(e.reason)
-    except Exception as e:  # noqa: BLE001 — intentional catch-all for any transport fault
-        c.error = type(e).__name__ + ": " + str(e)
+        # e.reason may include filesystem paths on some platforms — log only
+        # the type to avoid leaking /etc/resolv.conf style details in CI logs.
+        c.error = f"URLError: {type(e.reason).__name__}"
+    except Exception as e:  # noqa: BLE001 — intentional catch-all for transport faults
+        # Log only the exception TYPE — str(e) may include sensitive paths.
+        c.error = type(e).__name__
     return c
 
 
