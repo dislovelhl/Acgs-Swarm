@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[${{ matrix.extras }}]"
+        run: pip install -e ".[${{ matrix.extras }},transport]"
       - name: Lint
         run: ruff check src/constitutional_swarm/
       - name: Test
