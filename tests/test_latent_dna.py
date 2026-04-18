@@ -88,6 +88,7 @@ class _PlainTensorModel(nn.Module):
 
 class nn_ModuleNamespace(nn.Module):
     """Shim: plain nn.Module used as a namespace for .layers attribute."""
+
     pass
 
 
@@ -201,17 +202,15 @@ def test_bodes_hook_batch_safe() -> None:
     # Ensure all projections are positive by adding v component
     hidden = hidden + 2.0 * v.unsqueeze(0).unsqueeze(0)
 
-    proj_before = (hidden @ v)  # [batch, seq_len]
+    proj_before = hidden @ v  # [batch, seq_len]
     assert (proj_before > 0).all(), "Test setup: all projections should be positive"
 
     output = (hidden.clone(), None)
     result = hook(module=None, input=(), output=output)
     modified = result[0]
 
-    proj_after = (modified @ v)  # [batch, seq_len]
-    assert (proj_after <= 1e-3).all(), (
-        "After full steering, all projections should be ≤ 0"
-    )
+    proj_after = modified @ v  # [batch, seq_len]
+    assert (proj_after <= 1e-3).all(), "After full steering, all projections should be ≤ 0"
     assert hook.total_tokens == batch * seq_len
 
 
@@ -406,9 +405,7 @@ def test_wrapper_intervention_stats_with_plain_tensor_layers() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _collect_activations(
-    model: _FakeModel, inputs: list[Tensor], layer_idx: int
-) -> Tensor:
+def _collect_activations(model: _FakeModel, inputs: list[Tensor], layer_idx: int) -> Tensor:
     """Helper: collect mean-pooled activations at a layer for a batch of inputs."""
     target = model.model.layers[layer_idx]
     acts: list[Tensor] = []
@@ -454,7 +451,9 @@ def test_pca_extracts_unit_vector() -> None:
     unsafe_dicts = [{"hidden_states": u} for u in unsafe_inputs]
 
     v = LatentDNAWrapper.extract_violation_vector_pca(
-        model, safe_dicts, unsafe_dicts,
+        model,
+        safe_dicts,
+        unsafe_dicts,
         layer_idx=0,
         layer_attr_path="model.layers",
     )
@@ -512,7 +511,9 @@ def test_pca_multi_component() -> None:
     unsafe_dicts = [{"hidden_states": u} for u in unsafe_inputs]
 
     components = LatentDNAWrapper.extract_violation_vector_pca(
-        model, safe_dicts, unsafe_dicts,
+        model,
+        safe_dicts,
+        unsafe_dicts,
         layer_idx=0,
         layer_attr_path="model.layers",
         n_components=3,

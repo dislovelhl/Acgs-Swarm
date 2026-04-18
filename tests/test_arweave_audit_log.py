@@ -366,9 +366,7 @@ class TestArweaveAuditLogger:
         """Two-phase commit: if chain submitter raises, entries remain pending."""
 
         class FailingSubmitter:
-            def submit(
-                self, batch_root: str, constitutional_hash: str, proof_count: int
-            ) -> int:
+            def submit(self, batch_root: str, constitutional_hash: str, proof_count: int) -> int:
                 raise RuntimeError("chain unavailable")
 
         arweave = InMemoryArweaveClient()
@@ -392,9 +390,7 @@ class TestArweaveAuditLogger:
         call_count = 0
 
         class FailOnceThenSucceedSubmitter:
-            def submit(
-                self, batch_root: str, constitutional_hash: str, proof_count: int
-            ) -> int:
+            def submit(self, batch_root: str, constitutional_hash: str, proof_count: int) -> int:
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:

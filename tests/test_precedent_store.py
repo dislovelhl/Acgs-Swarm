@@ -579,8 +579,13 @@ class TestPrecedentStoreScale:
         random.seed(42)
 
         dims = (
-            "safety", "security", "privacy", "fairness",
-            "reliability", "transparency", "efficiency",
+            "safety",
+            "security",
+            "privacy",
+            "fairness",
+            "reliability",
+            "transparency",
+            "efficiency",
         )
         esc_types = list(EscalationType)
 
@@ -619,8 +624,13 @@ class TestPrecedentStoreScale:
 
         # Query with a known vector (biased toward privacy)
         query_vector = {
-            "safety": 0.1, "security": 0.1, "privacy": 0.95,
-            "fairness": 0.1, "reliability": 0.1, "transparency": 0.1, "efficiency": 0.1,
+            "safety": 0.1,
+            "security": 0.1,
+            "privacy": 0.95,
+            "fairness": 0.1,
+            "reliability": 0.1,
+            "transparency": 0.1,
+            "efficiency": 0.1,
         }
 
         start = _time.monotonic()

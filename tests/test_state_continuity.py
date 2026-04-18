@@ -93,9 +93,7 @@ class TestAgentChurn:
 
         raw_after = mesh._manifold._raw_trust[idx_after]  # type: ignore[index]
         restored = sum(raw_after)
-        assert restored > 0.0, (
-            "Returning agent should have non-zero trust restored from archive"
-        )
+        assert restored > 0.0, "Returning agent should have non-zero trust restored from archive"
         assert "agent-0" not in mesh._trust_archive, "Archive should be cleared after restore"
 
 

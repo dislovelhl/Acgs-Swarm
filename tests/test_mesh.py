@@ -737,7 +737,9 @@ class TestManifoldIntegration:
 
         for idx in range(10):
             producer = f"agent-{idx % 8:02d}"
-            assignment_live = live.request_validation(producer, f"route-content-{idx}", f"live-{idx}")
+            assignment_live = live.request_validation(
+                producer, f"route-content-{idx}", f"live-{idx}"
+            )
             assignment_shadow = shadow.request_validation(
                 producer,
                 f"route-content-{idx}",
