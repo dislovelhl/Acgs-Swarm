@@ -57,24 +57,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from acgs_lite.constitution.claim_lifecycle import (
+from acgs_lite import (
+    AuditPolicy,
     CaseConfig,
     CaseManager,
     CaseRecord,
-)
-from acgs_lite.constitution.spot_check import (
-    AuditPolicy,
+    SelectionPolicy,
+    SelectionResult,
     SpotCheckAuditor,
     SpotCheckResult,
     TrustAdjustment,
-)
-from acgs_lite.constitution.trust_score import (
     TrustConfig,
     TrustScoreManager,
-)
-from acgs_lite.constitution.validator_selection import (
-    SelectionPolicy,
-    SelectionResult,
     ValidatorPool,
     ValidatorSelector,
 )

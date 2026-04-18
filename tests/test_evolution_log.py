@@ -10,6 +10,7 @@ import sqlite3
 import pytest
 from constitutional_swarm.evolution_log import (
     DecelerationBlockedError,
+    DuplicateRecordError,
     EvolutionLog,
     MissingPriorEpochError,
     NonIncreasingValueError,
@@ -58,7 +59,7 @@ class TestSchemaAndBasicInsert:
     def test_uniqueness_blocks_duplicate(self) -> None:
         with EvolutionLog(":memory:") as log:
             log.record(1, "x", 10.0)
-            with pytest.raises(sqlite3.IntegrityError):
+            with pytest.raises(DuplicateRecordError):
                 log.record(1, "x", 99.0)
 
     def test_epoch_zero_rejected_by_check_constraint(self) -> None:
