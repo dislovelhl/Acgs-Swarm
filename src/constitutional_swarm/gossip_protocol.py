@@ -52,6 +52,10 @@ from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT
 
 log = logging.getLogger(__name__)
 
+# Maximum bytes allowed in a single node's metadata field.
+# Prevents memory exhaustion via oversized gossip payloads (DoS defence).
+MAX_METADATA_BYTES = 65_536  # 64 KiB
+
 # ---------------------------------------------------------------------------
 # Wire serialization helpers
 # ---------------------------------------------------------------------------
@@ -75,7 +79,21 @@ def _wire_to_node(data: dict[str, Any]) -> DAGNode:
 
     The node's CID is taken from the wire — verify_cid() on the receiver
     ensures integrity before insertion into the replica.
+
+    Raises ValueError if the metadata field exceeds MAX_METADATA_BYTES to
+    prevent memory exhaustion via oversized gossip payloads.
     """
+    raw_metadata = data.get("metadata", {})
+    if isinstance(raw_metadata, dict):
+        metadata_size = len(json.dumps(raw_metadata).encode())
+        if metadata_size > MAX_METADATA_BYTES:
+            raise ValueError(
+                f"Gossip node metadata exceeds {MAX_METADATA_BYTES} bytes "
+                f"({metadata_size} bytes from agent '{data.get('agent_id', '?')}')"
+            )
+    else:
+        raw_metadata = {}
+
     return DAGNode(
         cid=data["cid"],
         agent_id=data["agent_id"],
@@ -84,7 +102,7 @@ def _wire_to_node(data: dict[str, Any]) -> DAGNode:
         parent_cids=tuple(data.get("parent_cids", [])),
         bodes_passed=data.get("bodes_passed", False),
         constitutional_hash=data.get("constitutional_hash", ""),
-        metadata=data.get("metadata", {}),
+        metadata=raw_metadata,
     )
 
 

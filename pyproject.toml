@@ -10,10 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
 authors = [{name = "ACGS Team", email = "hello@acgs.dev"}]
-# acgs-lite >=2.9.0 required: top-level exports of constitution lifecycle
+# acgs-lite >=2.8.1 required: top-level exports of constitution lifecycle
 # symbols (CaseManager, SpotCheckAuditor, TrustScoreManager, ValidatorSelector,
-# and related). See acgs-lite PR #9.
-dependencies = ["acgs-lite>=2.9.0", "cryptography>=44.0.2"]
+# and related). Shipped in acgs-lite v2.8.1 via PRs #9 and #10.
+dependencies = ["acgs-lite>=2.8.1", "cryptography>=44.0.2"]
 
 [project.urls]
 Homepage = "https://acgs.ai"

@@ -20,6 +20,7 @@ Dependencies: torch (optional, same isolation as latent_dna.py).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -260,3 +261,61 @@ def _trust_variance_torch(H: Tensor) -> float:
     """Variance of trust matrix entries around their mean."""
     mean = H.mean()
     return ((H - mean) ** 2).mean().item()
+
+
+# ---------------------------------------------------------------------------
+# Differential Privacy helpers (NDSS 2027, §3.4)
+# ---------------------------------------------------------------------------
+
+
+def calibrate_sigma(
+    r: float,
+    residual_alpha: float,
+    epsilon: float,
+    delta: float,
+) -> float:
+    """Compute Gaussian noise std-dev for (ε,δ)-DP gossip (NDSS Lemma 4.3).
+
+    Global sensitivity Δg = 2·(1-α)·r, derived from the fact that the
+    residual injection reduces the Lipschitz constant of the update map
+    from 2r (plain projection) to 2(1-α)r.
+
+    Args:
+        r: Spectral radius bound (SpectralSphere parameter).
+        residual_alpha: Identity injection coefficient α ∈ (0,1).
+        epsilon: Privacy budget ε > 0.
+        delta: Privacy failure probability δ ∈ (0,1).
+
+    Returns:
+        σ such that the Gaussian mechanism H̃ = H_proj + N(0,σ²I) satisfies
+        (ε,δ)-DP per round.
+    """
+    if not (0 < residual_alpha < 1):
+        raise ValueError(f"residual_alpha must be in (0,1), got {residual_alpha}")
+    if epsilon <= 0 or delta <= 0 or delta >= 1:
+        raise ValueError(f"Invalid DP parameters: ε={epsilon}, δ={delta}")
+
+    sensitivity = 2.0 * (1.0 - residual_alpha) * r
+    return sensitivity * math.sqrt(2.0 * math.log(1.25 / delta)) / epsilon
+
+
+def add_dp_noise(H_proj: Tensor, sigma: float) -> Tensor:
+    """Add calibrated Gaussian noise for DP gossip broadcast (NDSS Eq. 3).
+
+    Step 4 of Algorithm 1: Z ~ N(0, σ²·I_{n×n}), H̃ = H_proj + Z.
+
+    This must be called AFTER spectral projection and BEFORE broadcast.
+    The noise is additive; the receiver re-projects to maintain the
+    spectral-sphere constraint (post-processing does not hurt DP).
+
+    Args:
+        H_proj: Projected trust matrix (already on spectral sphere).
+        sigma: Noise standard deviation from calibrate_sigma().
+
+    Returns:
+        Noisy matrix H̃ with the same shape as H_proj.
+    """
+    if sigma <= 0:
+        raise ValueError(f"sigma must be positive, got {sigma}")
+    noise = torch.randn_like(H_proj) * sigma
+    return H_proj + noise

@@ -23,6 +23,7 @@ No external dependencies — pure Python with hashlib and asyncio.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import threading
@@ -299,9 +300,8 @@ class MerkleCRDT:
                 if cid in node.parent_cids:
                     in_degree[node.cid] -= 1
                     if in_degree[node.cid] == 0:
-                        # Insert sorted for determinism
-                        queue.append(node.cid)
-                        queue.sort()
+                        # Insert in sorted order for determinism — O(log n) vs O(n log n)
+                        bisect.insort(queue, node.cid)
 
         return result
 

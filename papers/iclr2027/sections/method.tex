@@ -55,7 +55,7 @@ the eigenvalue distribution of $H$.
   \lambda_2 < 1$ (strict inequality for primitive matrices).  Repeated application of
   $\mathrm{Sink}_t$ preserves doubly stochastic structure and contracts all non-Perron
   components by $\lambda_2^t$ per iteration.  The full proof is in
-  Appendix~\ref{app:proof_main}.
+  Appendix~\ref{app:proof_sinkhorn}.
 \end{proof}
 
 \subsection{SpectralSphere Manifold}
@@ -96,8 +96,8 @@ leaky integrator, ensuring the identity is always represented in the limit.
   \[
     \mathrm{Var}\!\left(H^{(k)}\right) \;\geq\; V_\infty \;>\; 0 \quad \forall k \geq 0,
   \]
-  where $V_\infty = \alpha^2 \cdot \mathrm{Var}(I)$ is the variance of the residual
-  attractor.  In particular, BUC does not occur.
+  where $V_\infty = (1-\alpha)^2\,\mathrm{Var}\!\left(\Pi_r(H^*)\right) > 0$ is the
+  eigenvalue variance of the fixed point.  In particular, BUC does not occur.
 \end{theorem}
 
 \begin{proof}[Proof sketch]
@@ -126,8 +126,8 @@ constraint penalty and $\alpha(I - H)$ is the continuous-time residual injection
   \[
     V(H) = \frac{1}{2}\left\|H - H^*\right\|_F^2
   \]
-  satisfies $\dot{V}(H) \leq -\alpha V(H)$ along trajectories, establishing global
-  exponential stability with rate $\alpha$.
+  satisfies $\dot{V}(H) \leq -2\alpha V(H)$ along trajectories, establishing global
+  exponential stability with rate $2\alpha$.
 \end{theorem}
 
 \begin{proof}[Proof sketch]
