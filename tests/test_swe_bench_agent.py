@@ -12,14 +12,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from constitutional_swarm.swe_bench.agent import SWEBenchAgent, SWEPatch
 from constitutional_swarm.swe_bench.harness import (
     SWEBenchHarness,
     _load_jsonl,
     load_swe_bench_lite,
 )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures
