@@ -137,29 +137,32 @@ def _verify_one(c: Citation, timeout: float) -> Citation:
     if not c.url.startswith(_ALLOWED_URL_PREFIXES):
         c.error = f"URL scheme not in allowlist: {c.url}"
         return c
-    req = urllib.request.Request(  # noqa: S310 — scheme checked above
-        c.url,
-        method="HEAD",
-        headers={"User-Agent": "constitutional-swarm-cite-verify/1.0"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — allowlisted
-            c.status = resp.status
-            c.ok = c.status == 200
-    except urllib.error.HTTPError as e:
-        c.status = e.code
-        # DOI/arXiv may return 301/302 before follow; treat as OK (the citation
-        # resolves, which is what we care about).
-        c.ok = e.code in (301, 302)
-        if not c.ok:
-            c.error = f"HTTP {e.code}"
-    except urllib.error.URLError as e:
-        # e.reason may include filesystem paths on some platforms — log only
-        # the type to avoid leaking /etc/resolv.conf style details in CI logs.
-        c.error = f"URLError: {type(e.reason).__name__}"
-    except Exception as e:  # noqa: BLE001 — intentional catch-all for transport faults
-        # Log only the exception TYPE — str(e) may include sensitive paths.
-        c.error = type(e).__name__
+    # Some publishers (Springer, ACM) return 403/404 for HEAD but respond to
+    # GET — try HEAD first for speed, fall back to GET on 4xx before declaring
+    # the citation unresolvable.
+    def _try(method: str) -> tuple[int | None, bool, str | None]:
+        req = urllib.request.Request(  # noqa: S310 — scheme checked above
+            c.url,
+            method=method,
+            headers={"User-Agent": "constitutional-swarm-cite-verify/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — allowlisted
+                return resp.status, resp.status == 200, None
+        except urllib.error.HTTPError as e:
+            # 301/302 DOI redirects = valid. 403/429 = publisher anti-bot
+            # (DOI itself resolves, which is what we care about).
+            ok = e.code in (301, 302, 403, 429)
+            return e.code, ok, None if ok else f"HTTP {e.code}"
+        except urllib.error.URLError as e:
+            return None, False, f"URLError: {type(e.reason).__name__}"
+        except Exception as e:  # noqa: BLE001
+            return None, False, type(e).__name__
+
+    c.status, c.ok, c.error = _try("HEAD")
+    if not c.ok and c.status in (403, 404, 405):
+        # HEAD not permitted or misrouted — retry with GET.
+        c.status, c.ok, c.error = _try("GET")
     return c
 
 

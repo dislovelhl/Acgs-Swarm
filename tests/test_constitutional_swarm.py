@@ -110,6 +110,7 @@ class TestAgentDNA:
         assert result.valid is False
         assert len(result.violations) > 0
 
+    @pytest.mark.benchmark
     def test_benchmark_latency(self) -> None:
         dna = AgentDNA.default(agent_id="bench-01")
         n = 10_000
