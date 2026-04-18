@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
 authors = [{name = "ACGS Team", email = "hello@acgs.dev"}]
-dependencies = ["acgs-lite>=2.7.2", "cryptography>=44.0.2"]
+# acgs-lite >=2.8.1 required: top-level exports of constitution lifecycle
+# symbols (CaseManager, SpotCheckAuditor, TrustScoreManager, ValidatorSelector,
+# and related). Shipped in acgs-lite v2.8.1 via PRs #9 and #10.
+dependencies = ["acgs-lite>=2.8.1", "cryptography>=44.0.2"]
 
 [project.urls]
 Homepage = "https://acgs.ai"
@@ -43,5 +46,6 @@ markers = [
   "research: marks empirical research proof tests (expected to fail; excluded from release gating)",
   "bittensor: marks tests that exercise the Bittensor subnet integration (excluded from dev matrix)",
   "benchmark: marks performance benchmark tests",
-  "e2e: marks end-to-end tests requiring live external services"
+  "e2e: marks end-to-end tests requiring live external services",
+  "security: marks security regression tests (one test per audit finding — report auto-generated)"
 ]
