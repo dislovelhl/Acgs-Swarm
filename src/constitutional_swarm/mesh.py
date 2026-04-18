@@ -236,7 +236,9 @@ class ConstitutionalMesh:
         self._final_results: dict[str, MeshResult] = {}
         self._use_manifold = use_manifold
         self._manifold_type = manifold_type
-        self._manifold: GovernanceManifold | spectral_sphere_mod.SpectralSphereManifold | None = None
+        self._manifold: GovernanceManifold | spectral_sphere_mod.SpectralSphereManifold | None = (
+            None
+        )
         self._shadow_spectral = use_manifold and manifold_type == "birkhoff" and shadow_spectral
         if self._shadow_spectral:
             self._shadow_manifold: spectral_sphere_mod.SpectralSphereManifold | None = None
@@ -655,7 +657,11 @@ class ConstitutionalMesh:
         settlement_storage = (
             {"enabled": False, "backend": None, "pending": 0}
             if self._settlement_store is None
-            else {"enabled": True, "pending": pending_settlements, **self._settlement_store.describe()}
+            else {
+                "enabled": True,
+                "pending": pending_settlements,
+                **self._settlement_store.describe(),
+            }
         )
         with self._lock:
             return {
@@ -978,7 +984,9 @@ class ConstitutionalMesh:
                             self._shadow_metrics.append(
                                 {
                                     "assignment_id": assignment_id,
-                                    "birkhoff_variance": _trust_variance(self._manifold.trust_matrix),
+                                    "birkhoff_variance": _trust_variance(
+                                        self._manifold.trust_matrix
+                                    ),
                                     "spectral_variance": _trust_variance(shadow.trust_matrix),
                                     "birkhoff_spectral_norm": _matrix_spectral_norm(
                                         self._manifold.trust_matrix

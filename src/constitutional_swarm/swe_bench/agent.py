@@ -148,9 +148,7 @@ class SWEBenchAgent:
     # Extension point: override in subclasses or test doubles
     # ──────────────────────────────────────────────────────────────────────
 
-    def _generate_patch(
-        self, task: dict[str, Any]
-    ) -> tuple[str, dict[str, Any]]:
+    def _generate_patch(self, task: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Generate a unified-diff patch for ``task``.
 
         Default implementation is a no-op stub that returns an empty patch.

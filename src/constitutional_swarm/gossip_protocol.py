@@ -377,7 +377,7 @@ class SwarmNode:
         if self._gossip_batch_size > 0:
             # Sort by CID for determinism, take last N
             nodes.sort(key=lambda n: n.cid)
-            nodes = nodes[-self._gossip_batch_size:]
+            nodes = nodes[-self._gossip_batch_size :]
         return nodes
 
     async def gossip_round(
@@ -508,9 +508,7 @@ async def simulate_ws_gossip_convergence(
                     )
 
             # Gossip round (all nodes push to n_peers)
-            await asyncio.gather(
-                *[node.gossip_round(n_peers=n_peers, rng=rng) for node in nodes]
-            )
+            await asyncio.gather(*[node.gossip_round(n_peers=n_peers, rng=rng) for node in nodes])
             # Small pause to let receivers process
             await asyncio.sleep(0.02)
 

@@ -249,13 +249,9 @@ class AgentDNA:
             # Atomically update counters under the lock.
             with self._stats_lock:
                 object.__setattr__(self, "_call_count", self._call_count + 1)
-                object.__setattr__(
-                    self, "_total_latency_ns", self._total_latency_ns + elapsed
-                )
+                object.__setattr__(self, "_total_latency_ns", self._total_latency_ns + elapsed)
                 if has_violations:
-                    object.__setattr__(
-                        self, "_violation_count", self._violation_count + 1
-                    )
+                    object.__setattr__(self, "_violation_count", self._violation_count + 1)
 
             # Layer 3: Z3 formal verification (opt-in, ~50-500ms).
             # Only invoked for critical-risk actions to keep cost proportional.
@@ -278,12 +274,8 @@ class AgentDNA:
             elapsed = time.perf_counter_ns() - start
             with self._stats_lock:
                 object.__setattr__(self, "_call_count", self._call_count + 1)
-                object.__setattr__(
-                    self, "_violation_count", self._violation_count + 1
-                )
-                object.__setattr__(
-                    self, "_total_latency_ns", self._total_latency_ns + elapsed
-                )
+                object.__setattr__(self, "_violation_count", self._violation_count + 1)
+                object.__setattr__(self, "_total_latency_ns", self._total_latency_ns + elapsed)
             raise
 
     def check_maci(self, action_type: str) -> None:
