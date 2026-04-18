@@ -24,6 +24,10 @@ from constitutional_swarm.execution import (
 NodeStatus = ExecutionStatus
 
 
+def _neg_priority(node: "TaskNode") -> int:
+    return -node.priority
+
+
 @dataclass
 class TaskNode:
     """A node in the task DAG.
@@ -208,11 +212,73 @@ class SwarmExecutor:
         self._store = store
         self._dag: TaskDAG | None = None
         self._lock = threading.Lock()
+        self._ready_ids: set[str] = set()
+        # Parallel list of TaskNode refs for O(1) snapshot-ready output.
+        # Membership in this list equals membership in _ready_ids. Append on
+        # submit (child newly-ready); swap-remove on claim.
+        self._ready_list: list[TaskNode] = []
+        self._ready_index: dict[str, int] = {}  # node_id -> position in _ready_list
+        self._caps_cache: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+        self._pending_deps: dict[str, int] = {}
+        self._children: dict[str, list[str]] = {}
+        self._completed_count: int = 0
+        self._total_count: int = 0
+        # Track whether every ready node has empty required_capabilities.
+        # When True (typical for benchmark DAGs), skip per-task cap filtering.
+        self._all_ready_unconstrained: bool = True
+        # Whether the DAG has any constrained nodes at all. Set once at load.
+        self._dag_has_constrained: bool = False
+
+    def _rebuild_ready_index(self) -> None:
+        self._ready_ids = set()
+        self._ready_list = []
+        self._ready_index = {}
+        if self._dag is None:
+            return
+        for nid, node in self._dag.nodes.items():
+            if node.status == ExecutionStatus.READY:
+                self._ready_index[nid] = len(self._ready_list)
+                self._ready_list.append(node)
+                self._ready_ids.add(nid)
+
+    def _build_dep_index(self) -> None:
+        self._pending_deps = {}
+        self._children = {}
+        self._completed_count = 0
+        if self._dag is None:
+            self._total_count = 0
+            return
+        nodes = self._dag.nodes
+        self._total_count = len(nodes)
+        for nid, node in nodes.items():
+            pending = 0
+            for dep in node.depends_on:
+                if dep not in nodes:
+                    raise KeyError(
+                        f"Node {nid} depends on missing node {dep}"
+                    )
+                self._children.setdefault(dep, []).append(nid)
+                if nodes[dep].status != ExecutionStatus.COMPLETED:
+                    pending += 1
+            self._pending_deps[nid] = pending
+            if node.status == ExecutionStatus.COMPLETED:
+                self._completed_count += 1
 
     def load_dag(self, dag: TaskDAG) -> None:
         """Load a task DAG for execution."""
         with self._lock:
             self._dag = dag.mark_ready()
+            self._rebuild_ready_index()
+            self._build_dep_index()
+            self._dag_has_constrained = any(
+                node.required_capabilities for node in self._dag.nodes.values()
+            )
+            if self._dag_has_constrained:
+                self._all_ready_unconstrained = not any(
+                    self._dag.nodes[nid].required_capabilities for nid in self._ready_ids
+                )
+            else:
+                self._all_ready_unconstrained = True
 
     def available_tasks(self, agent_id: str) -> list[TaskNode]:
         """Get tasks an agent can claim based on its capabilities.
@@ -225,34 +291,68 @@ class SwarmExecutor:
         so concurrent callers are not serialised on registry I/O.
         """
         with self._lock:
-            dag = self._dag  # snapshot — TaskDAG is immutable
-        if dag is None:
-            return []
-        agent_caps = self._registry.get_agent_capabilities(agent_id)
-        cap_names = {c.name.lower() for c in agent_caps}
-        cap_domains = {c.domain for c in agent_caps}
+            if self._dag is None or not self._ready_ids:
+                return []
+            cached = self._caps_cache.get(agent_id)
+            if cached is None:
+                agent_caps = self._registry.get_agent_capabilities(agent_id)
+                cap_names = frozenset(c.name.lower() for c in agent_caps)
+                cap_domains = frozenset(c.domain for c in agent_caps)
+                self._caps_cache[agent_id] = (cap_names, cap_domains)
+            else:
+                cap_names, cap_domains = cached
 
-        available = []
-        for node in dag.nodes.values():
-            if node.status != ExecutionStatus.READY:
-                continue
-            if not node.required_capabilities:
-                available.append(node)
-                continue
-            has_caps = any(rc.lower() in cap_names for rc in node.required_capabilities)
-            in_domain = node.domain in cap_domains
-            if has_caps or in_domain:
-                available.append(node)
+            # INVARIANT: _ready_list mirrors _ready_ids and holds live
+            # TaskNode refs (maintained in-place by claim/submit). When every
+            # ready task is unconstrained, return a copy directly — no dict
+            # lookup, no cap filtering.
+            if self._all_ready_unconstrained:
+                available = list(self._ready_list)
+            else:
+                available = []
+                for node in self._ready_list:
+                    caps = node.required_capabilities
+                    if not caps:
+                        available.append(node)
+                        continue
+                    if node.domain in cap_domains:
+                        available.append(node)
+                        continue
+                    for rc in caps:
+                        if rc.lower() in cap_names:
+                            available.append(node)
+                            break
 
-        return sorted(available, key=lambda n: -n.priority)
+        if len(available) > 1:
+            first_priority = available[0].priority
+            for node in available:
+                if node.priority != first_priority:
+                    available.sort(key=_neg_priority)
+                    break
+        return available
 
     def claim(self, node_id: str, agent_id: str) -> WorkReceipt:
         """Agent claims a task. Returns the immutable work receipt."""
         with self._lock:
             if self._dag is None:
                 raise RuntimeError("No DAG loaded")
-            self._dag = self._dag.claim_node(node_id, agent_id)
-            node = self._dag.nodes[node_id]
+            nodes = self._dag.nodes
+            node = nodes.get(node_id)
+            if node is None:
+                raise KeyError(f"Node {node_id} not found")
+            if node.status != ExecutionStatus.READY:
+                raise ValueError(f"Node {node_id} is {node.status.value}, not ready")
+            node.status = ExecutionStatus.CLAIMED
+            node.claimed_by = agent_id
+            self._ready_ids.discard(node_id)
+            idx = self._ready_index.pop(node_id, -1)
+            if idx >= 0:
+                last = len(self._ready_list) - 1
+                if idx != last:
+                    moved = self._ready_list[last]
+                    self._ready_list[idx] = moved
+                    self._ready_index[moved.node_id] = idx
+                self._ready_list.pop()
             return WorkReceipt(
                 task_id=node.node_id,
                 title=node.title,
@@ -274,23 +374,44 @@ class SwarmExecutor:
         with self._lock:
             if self._dag is None:
                 raise RuntimeError("No DAG loaded")
-            node = self._dag.nodes.get(node_id)
+            nodes = self._dag.nodes
+            node = nodes.get(node_id)
             if node is None:
                 raise KeyError(f"Node {node_id} not found")
             if node.claimed_by is not None and artifact.agent_id != node.claimed_by:
                 raise PermissionError(
                     f"Agent {artifact.agent_id} cannot submit for node claimed by {node.claimed_by}"
                 )
+            if node.status not in (ExecutionStatus.CLAIMED, ExecutionStatus.RUNNING):
+                raise ValueError(f"Node {node_id} is {node.status.value}, not claimed")
             callbacks = self._store.publish_deferred(artifact)
-            self._dag = self._dag.complete_node(node_id, artifact.artifact_id)
-            self._dag = self._dag.mark_ready()
+            node.status = ExecutionStatus.COMPLETED
+            node.artifact_id = artifact.artifact_id
+            self._completed_count += 1
+            # Incremental ready propagation: only visit children of the just-completed node
+            for child_id in self._children.get(node_id, ()):
+                remaining = self._pending_deps.get(child_id, 0) - 1
+                self._pending_deps[child_id] = remaining
+                if remaining <= 0:
+                    child = nodes.get(child_id)
+                    if child is not None and child.status == ExecutionStatus.BLOCKED:
+                        child.status = ExecutionStatus.READY
+                        self._ready_ids.add(child_id)
+                        self._ready_index[child_id] = len(self._ready_list)
+                        self._ready_list.append(child)
+                        if child.required_capabilities:
+                            self._all_ready_unconstrained = False
         self._store.dispatch_callbacks(artifact, callbacks)
 
     @property
     def is_complete(self) -> bool:
         """Check if the entire DAG is done."""
+        if self._dag is None:
+            return False
+        if self._total_count > 0:
+            return self._completed_count >= self._total_count
         with self._lock:
-            return self._dag is not None and self._dag.is_complete
+            return self._dag.is_complete
 
     @property
     def progress(self) -> dict[str, int]:
