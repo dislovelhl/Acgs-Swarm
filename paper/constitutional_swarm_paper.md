@@ -252,16 +252,18 @@ The key insight is that **constitutional validation replaces inter-agent coordin
 
 ## References
 
-- Bai, Y., et al. "Constitutional AI: Harmlessness from AI Feedback." arXiv:2212.08073, 2022.
-- Castro, M. & Liskov, B. "Practical Byzantine Fault Tolerance." OSDI, 1999.
-- Erman, L.D., et al. "The Hearsay-II Speech Understanding System." Computing Surveys, 1980.
-- Rao, A.S. & Georgeff, M.P. "BDI Agents: From Theory to Practice." ICMAS, 1995.
-- Sinkhorn, R. "A Relationship Between Arbitrary Positive Matrices and Doubly Stochastic Matrices." Annals of Mathematical Statistics, 1964.
-- Sinkhorn, R. & Knopp, P. "Concerning Nonnegative Matrices and Doubly Stochastic Matrices." Pacific Journal of Mathematics, 1967.
-- Smith, R.G. "The Contract Net Protocol." IEEE Transactions on Computers, 1980.
-- Wu, Q., et al. "AutoGen: Enabling Next-Gen LLM Applications." arXiv:2308.08155, 2023.
-- Xie, Z., et al. "mHC: Manifold-Constrained Hyper-Connections." arXiv:2512.24880, 2025.
-- Zhu, H., et al. "Hyper-Connections." arXiv:2409.19606, 2024.
+- Bai, Y., Jones, A., Ndousse, K., et al. "Constitutional AI: Harmlessness from AI Feedback." arXiv:2212.08073, 2022.
+- Castro, M. & Liskov, B. "Practical Byzantine Fault Tolerance." *USENIX OSDI*, pp. 173–186, 1999.
+- Erman, L. D., Hayes-Roth, F., Lesser, V. R., & Reddy, D. R. "The Hearsay-II Speech-Understanding System: Integrating Knowledge to Resolve Uncertainty." *ACM Computing Surveys*, 12(2):213–253, 1980. doi:10.1145/356810.356816
+- Rao, A. S. & Georgeff, M. P. "BDI Agents: From Theory to Practice." *ICMAS*, pp. 312–319, 1995.
+- Sinkhorn, R. "A Relationship Between Arbitrary Positive Matrices and Doubly Stochastic Matrices." *Annals of Mathematical Statistics*, 35(2):876–879, 1964. doi:10.1214/aoms/1177703591
+- Sinkhorn, R. & Knopp, P. "Concerning Nonnegative Matrices and Doubly Stochastic Matrices." *Pacific Journal of Mathematics*, 21(2):343–348, 1967. doi:10.2140/pjm.1967.21.343
+- Smith, R. G. "The Contract Net Protocol: High-Level Communication and Control in a Distributed Problem Solver." *IEEE Transactions on Computers*, 29(12):1104–1113, 1980. doi:10.1109/TC.1980.1675516
+- Wu, Q., Bansal, G., Zhang, J., et al. "AutoGen: Enabling Next-Generation LLM Applications via Multi-Agent Conversation." arXiv:2308.08155, 2023.
+- Xie, Z., et al. "Manifold-Constrained Hyper-Connections (mHC)." arXiv:2512.24880, 2025.
+- Zhu, D., et al. "Hyper-Connections." arXiv:2409.19606, 2024.
+
+> The master BibTeX file for all references above is [`references.bib`](../references.bib) at the repository root.
 
 ---
 

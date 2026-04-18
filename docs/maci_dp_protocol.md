@@ -284,10 +284,13 @@ lowers the DP noise floor — these are not competing tradeoffs, they compound.
 
 ## References
 
-- Dwork et al. (2006) — Calibrating Noise to Sensitivity in Private Data Analysis
-- Kleppmann (2022) — Making CRDTs Byzantine Fault Tolerant  
-- Zou et al. (2025) — Representation Engineering (RepE)  
-- arXiv:2603.20896 — sHC: Spectral-Sphere-Constrained Hyper-Connections  
-- arXiv:2512.24880 — mHC: Manifold-Constrained Hyper-Connections  
-- arXiv:2502.07021 — Federated Sinkhorn (distributed scaling, row-partitioned)  
-- MACI v1 spec — Minimal Anti-Collusion Infrastructure (Privacy & Scaling Explorations)
+- Dwork, C., McSherry, F., Nissim, K., & Smith, A. "Calibrating Noise to Sensitivity in Private Data Analysis." *Theory of Cryptography Conference (TCC)*, pp. 265–284, 2006. doi:10.1007/11681878_14
+- Dwork, C. & Roth, A. "The Algorithmic Foundations of Differential Privacy." *Foundations and Trends in Theoretical Computer Science*, 9(3–4):211–407, 2014. doi:10.1561/0400000042
+- Kleppmann, M. & Beresford, A. R. "Merkle-CRDTs: Merkle-DAGs Meet CRDTs." arXiv:2004.00107, 2022.
+- Shapiro, M., Preguiça, N., Baquero, C., & Zawirski, M. "Conflict-Free Replicated Data Types." *Stabilization, Safety, and Security of Distributed Systems*, pp. 386–400, 2011. doi:10.1007/978-3-642-24550-3_29
+- Anonymous. "Spectral-Sphere-Constrained Hyper-Connections (sHC)." arXiv:2603.20896, 2026.
+- Xie, Z., et al. "Manifold-Constrained Hyper-Connections (mHC)." arXiv:2512.24880, 2025.
+- Anonymous. "Federated Sinkhorn: Distributed Doubly-Stochastic Matrix Scaling Under Differential Privacy." arXiv:2502.07021, 2025.
+- Buterin, V., et al. "MACI: Minimal Anti-Collusion Infrastructure." Privacy & Scaling Explorations, 2023. <https://privacy-scaling-explorations.github.io/maci/>
+
+> The master BibTeX file for all references above is [`references.bib`](../references.bib) at the repository root.
