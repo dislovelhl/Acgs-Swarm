@@ -103,6 +103,15 @@ from constitutional_swarm.spectral_sphere import (
     spectral_sphere_project,
 )
 from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
+from constitutional_swarm.violation_subspace import (
+    DimensionMismatchError,
+    InsufficientSamplesError,
+    RiskAdaptiveSteering,
+    ViolationSubspace,
+    adversarial_score,
+    fit_leace,
+    fit_subspace,
+)
 
 __all__ = [
     "AgentCredential",
@@ -127,6 +136,7 @@ __all__ = [
     "DebateResolver",
     "DecelerationBlockedError",
     "DecelerationRecord",
+    "DimensionMismatchError",
     "DuplicateRecordError",
     "DuplicateSettlementError",
     "EvolutionLog",
@@ -140,6 +150,7 @@ __all__ = [
     "GoalSpec",
     "GovernanceManifold",
     "InsufficientQuorumError",
+    "InsufficientSamplesError",
     "InvalidCertificateError",
     "InvalidVoteSignatureError",
     "JSONLSettlementStore",
@@ -164,6 +175,7 @@ __all__ = [
     "RemoteVoteRequest",
     "RemoteVoteResponse",
     "RemoteVoteServer",
+    "RiskAdaptiveSteering",
     "SQLiteSettlementStore",
     "SettlementPersistenceError",
     "SettlementRecord",
@@ -181,11 +193,15 @@ __all__ = [
     "ValidatorIdentity",
     "ValidatorSet",
     "VerdictOutcome",
+    "ViolationSubspace",
     "WorkReceipt",
+    "adversarial_score",
     "build_certificate",
     "build_vote_message",
     "constitutional_dna",
     "detect_conflict",
+    "fit_leace",
+    "fit_subspace",
     "sinkhorn_knopp",
     "spectral_sphere_project",
     "verify_certificate",
