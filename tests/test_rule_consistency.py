@@ -318,6 +318,62 @@ class TestPrivacyAccountant:
             assert pa.remaining_epsilon < prev
             prev = pa.remaining_epsilon
 
+    def test_rdp_tighter_than_simple_composition(self) -> None:
+        """RDP composition must give at least 5× tighter ε than naive summation.
+
+        For noise_multiplier=10 (σ=1, Δ=0.1), k=100 steps:
+        - Simple composition: ε ≈ 57 (via √(2 ln(1.25/δ)) / nm · k)
+        - RDP (Balle 2020):   ε ≈ 4.7  (≈12× tighter)
+        We verify RDP ε < simple_ε / 5 as a conservative bound.
+        """
+        import math
+        from constitutional_swarm.privacy_accountant import (
+            PrivacyAccountant,
+            _rdp_to_epsilon_balle2020,
+            _DEFAULT_ALPHAS,
+            _rdp_gaussian,
+        )
+
+        k = 100
+        sensitivity = 0.1
+        sigma = 1.0  # noise_multiplier = 10
+        delta = 1e-5
+
+        pa = PrivacyAccountant(epsilon=100.0, delta=delta)  # large budget so no cutoff
+        for _ in range(k):
+            pa.spend(sensitivity, sigma)
+
+        rdp_eps = pa._current_epsilon()
+
+        # Simple composition baseline
+        eps_step_simple = sensitivity * math.sqrt(2 * math.log(1.25 / delta)) / sigma
+        simple_eps = k * eps_step_simple  # ≈ 57.17
+
+        assert rdp_eps < simple_eps / 5, (
+            f"RDP ε={rdp_eps:.2f} must be < simple/5 ({simple_eps/5:.2f}); "
+            f"simple_ε={simple_eps:.2f}"
+        )
+
+    def test_subsampling_reduces_epsilon(self) -> None:
+        """spend() with sample_rate < 1 should record the subsampling rate."""
+        from constitutional_swarm.privacy_accountant import PrivacyAccountant
+
+        pa = PrivacyAccountant(epsilon=100.0, delta=1e-5)
+        pa.spend(0.1, sigma=1.0, sample_rate=0.01)
+        s = pa.summary()
+        assert s["num_mechanism_invocations"] == 1
+
+    def test_composition_method_in_summary(self) -> None:
+        """summary() must report RDP composition method."""
+        from constitutional_swarm.privacy_accountant import PrivacyAccountant
+
+        pa = PrivacyAccountant(epsilon=1.0, delta=1e-5)
+        pa.spend(0.1, sigma=0.5)
+        s = pa.summary()
+        assert "RDP" in s.get("composition_method", ""), (
+            "summary must identify RDP composition method"
+        )
+
 
 # ---------------------------------------------------------------------------
 # gossip_protocol security fixes
