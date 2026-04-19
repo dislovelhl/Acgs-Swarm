@@ -766,3 +766,112 @@ class TestMacAcgsLoopRuleContent:
         result = loop.run_cycle([])
         assert len(result.constitution_updates) == 1
         assert "CAME rule" in result.constitution_updates[0].rule_content
+
+
+# =================== Guard Regression Tests ================================
+# Tests for post-verdict guards, PENDING enforcement, min-severity,
+# defense cap, and DrandClient input validation — all flagged by
+# Phase 4 reviewers as needing explicit coverage.
+
+
+class TestDebateResolverPostVerdictGuards:
+    """Post-verdict mutation must be blocked after Merkle seal."""
+
+    def test_challenge_after_resolve_raises(self) -> None:
+        resolver = DebateResolver(min_challenges=1)
+        resolver.propose("p1", "m1", "safety", "Content")
+        resolver.challenge("p1", "v1", "objection", severity=0.5)
+        resolver.resolve("p1")
+        with pytest.raises(RuntimeError, match="already resolved"):
+            resolver.challenge("p1", "v2", "late", severity=0.5)
+
+    def test_defend_after_resolve_raises(self) -> None:
+        resolver = DebateResolver(min_challenges=1)
+        resolver.propose("p1", "m1", "safety", "Content")
+        resolver.challenge("p1", "v1", "objection", severity=0.5)
+        resolver.resolve("p1")
+        with pytest.raises(RuntimeError, match="already resolved"):
+            resolver.defend("p1", "m1", "late defense")
+
+    def test_double_resolve_raises(self) -> None:
+        resolver = DebateResolver(min_challenges=1)
+        resolver.propose("p1", "m1", "safety", "Content")
+        resolver.challenge("p1", "v1", "objection", severity=0.5)
+        resolver.resolve("p1")
+        with pytest.raises(RuntimeError, match="already resolved"):
+            resolver.resolve("p1")
+
+
+class TestDebateResolverMinSeverity:
+    """Severity below _MIN_SEVERITY must be rejected."""
+
+    def test_severity_below_min_raises(self) -> None:
+        resolver = DebateResolver()
+        resolver.propose("p1", "m1", "safety", "C")
+        with pytest.raises(ValueError, match="severity must be >= 0.05"):
+            resolver.challenge("p1", "v1", "trivial", severity=0.01)
+
+
+class TestDebateResolverDefenseCap:
+    """Per-defender defense count must be capped at _MAX_DEFENSES_PER_DEFENDER."""
+
+    def test_exceed_defense_cap_raises(self) -> None:
+        resolver = DebateResolver()
+        resolver.propose("p1", "m1", "safety", "C")
+        for i in range(3):
+            resolver.defend("p1", "m1", f"defense-{i}")
+        with pytest.raises(PermissionError, match="defense limit"):
+            resolver.defend("p1", "m1", "one too many")
+
+    def test_different_defenders_not_capped(self) -> None:
+        resolver = DebateResolver()
+        resolver.propose("p1", "m1", "safety", "C")
+        for i in range(5):
+            resolver.defend("p1", f"defender-{i}", f"defense-{i}")
+        # No error — each defender is within their individual limit
+
+
+class TestFederatedBridgePendingEnforcement:
+    """PENDING credentials must be rejected by gate()."""
+
+    def test_gate_rejects_pending_credential(self) -> None:
+        bridge = _make_bridge()
+        cred = _make_credential(agent_id="pending-agent")
+        cred = AgentCredential(
+            agent_id=cred.agent_id,
+            org_id=cred.org_id,
+            pubkey_fingerprint=cred.pubkey_fingerprint,
+            constitutional_hash=cred.constitutional_hash,
+            issued_at=cred.issued_at,
+            expires_at=cred.expires_at,
+            domains=cred.domains,
+            status=CredentialStatus.PENDING,
+        )
+        bridge.register_credential(cred)
+        decision = bridge.gate(cred.agent_id)
+        assert not decision.allowed
+        assert "PENDING" in decision.reason
+
+
+class TestDrandClientInputValidation:
+    """DrandClient must validate chain_hash and enforce HTTPS."""
+
+    def test_invalid_chain_hash_raises(self) -> None:
+        from constitutional_swarm.swarm_ode import DrandClient
+
+        with pytest.raises(ValueError, match="chain_hash"):
+            DrandClient(chain_hash="not-a-valid-hex!", base_url="https://api.drand.sh")
+
+    def test_http_base_url_raises(self) -> None:
+        from constitutional_swarm.swarm_ode import DrandClient
+
+        valid_hash = "a" * 64
+        with pytest.raises(ValueError, match="HTTPS"):
+            DrandClient(chain_hash=valid_hash, base_url="http://insecure.example.com")
+
+    def test_valid_config_accepted(self) -> None:
+        from constitutional_swarm.swarm_ode import DrandClient
+
+        valid_hash = "a" * 64
+        client = DrandClient(chain_hash=valid_hash, base_url="https://api.drand.sh")
+        assert client is not None
