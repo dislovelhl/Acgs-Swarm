@@ -8,7 +8,25 @@
 
 ## What this package is
 
-`constitutional-swarm` is a governed multi-agent runtime built on [`acgs-lite`](https://pypi.org/project/acgs-lite/). It embeds governance per agent, supports orchestrator-free execution, adds peer validation and durable settlement, and ships advanced trust and governance research modules. Core constitutional checks stay local (443 ns/check); remote/public-key peer validation is available via the optional transport runtime.
+`constitutional-swarm` is a governed multi-agent runtime built on [`acgs-lite`](https://pypi.org/project/acgs-lite/). It embeds governance per agent, supports orchestrator-free execution, adds peer validation and durable settlement, and ships advanced trust and governance research modules. Core constitutional checks stay local (sub-10 µs per check; see [performance notes](#performance-notes)); remote/public-key peer validation is available via the optional transport runtime.
+
+## Installation
+
+```bash
+# Stable core — no torch required
+pip install constitutional-swarm
+
+# With WebSocket gossip transport
+pip install "constitutional-swarm[transport]"
+
+# With MCFS research stack (latent DNA steering, swarm ODE dynamics)
+pip install "constitutional-swarm[research]"
+
+# With Bittensor subnet integration
+pip install "constitutional-swarm[bittensor]"
+```
+
+Requires Python 3.11+.
 
 ## Positioning
 
@@ -34,24 +52,6 @@ constitutional-swarm extends ACGS from governing single actions to governing age
 | **Constitutional evolution** | `EvolutionLog`, precedent formation, constitution sync |
 | **Research modules** | `latent_dna`, `swarm_ode`, `merkle_crdt`, MCFS evaluation scaffolds |
 
-## Installation
-
-```bash
-# Stable core — no torch required
-pip install constitutional-swarm
-
-# With WebSocket gossip transport
-pip install "constitutional-swarm[transport]"
-
-# With MCFS research stack (latent DNA steering, swarm ODE dynamics)
-pip install "constitutional-swarm[research]"
-
-# With Bittensor subnet integration
-pip install "constitutional-swarm[bittensor]"
-```
-
-Requires Python 3.11+.
-
 ## Quick starts by maturity tier
 
 ### A. Core runtime
@@ -71,7 +71,7 @@ dna = AgentDNA.from_rules([
 ])
 
 result = dna.validate("summarize patient notes")
-print(result.valid, result.latency_ns)  # True, ~443
+print(result.valid, result.latency_ns)  # True, sub-10 µs typical
 
 # Use as a decorator
 @dna.govern
@@ -92,7 +92,8 @@ Compile a goal into a `TaskDAG`. Agents self-select ready tasks by capability �
 
 ```python
 from constitutional_swarm import (
-    DAGCompiler, GoalSpec, SwarmExecutor, CapabilityRegistry, ArtifactStore, Artifact,
+    DAGCompiler, GoalSpec, SwarmExecutor, CapabilityRegistry, Capability,
+    ArtifactStore, Artifact,
 )
 import uuid
 
@@ -114,7 +115,14 @@ store = ArtifactStore()
 executor = SwarmExecutor(registry, store)
 executor.load_dag(dag)
 
+# Register agent capabilities — without this, available_tasks() returns nothing.
 agent_id = "worker-1"
+registry.register(agent_id, [
+    Capability(name="fetch",   domain="data"),
+    Capability(name="analyse", domain="analytics"),
+    Capability(name="write",   domain="writing"),
+])
+
 for task in executor.available_tasks(agent_id):
     receipt = executor.claim(task.node_id, agent_id)
     artifact = Artifact(
@@ -190,20 +198,24 @@ mesh.submit_vote(
 Built-in runtime path (requires `[transport]` extra):
 
 ```python
+import asyncio
 from constitutional_swarm import ConstitutionalMesh, LocalRemotePeer, RemoteVoteServer
 
-mesh = ConstitutionalMesh(constitution)
-mesh.register_local_signer("producer", domain="writing")
-remote_peer = LocalRemotePeer(agent_id="agent-d", constitution=constitution)
-mesh.register_remote_agent("agent-d", domain="writing", vote_public_key=remote_peer.public_key_hex)
+async def main():
+    mesh = ConstitutionalMesh(constitution)
+    mesh.register_local_signer("producer", domain="writing")
+    remote_peer = LocalRemotePeer(agent_id="agent-d", constitution=constitution)
+    mesh.register_remote_agent("agent-d", domain="writing", vote_public_key=remote_peer.public_key_hex)
 
-async with RemoteVoteServer(remote_peer.handle_vote_request, host="127.0.0.1", port=0) as server:
-    result = await mesh.full_validation_remote(
-        "producer",
-        "safe distributed review content",
-        "art-remote",
-        peer_routes={"agent-d": ("127.0.0.1", server.actual_port)},
-    )
+    async with RemoteVoteServer(remote_peer.handle_vote_request, host="127.0.0.1", port=0) as server:
+        result = await mesh.full_validation_remote(
+            "producer",
+            "safe distributed review content",
+            "art-remote",
+            peer_routes={"agent-d": ("127.0.0.1", server.actual_port)},
+        )
+
+asyncio.run(main())
 ```
 
 Security notes:
@@ -211,6 +223,8 @@ Security notes:
 - remote peers reject requests when `sha256(content) != content_hash`
 - plain `ws://` transport is allowed only on localhost; non-local use requires TLS via `ssl_context`
 - production remote peers should set `trusted_request_signers={mesh.get_request_signing_public_key()}`
+- **persist the mesh request-signing key across restarts.** It is generated per-process by default; without persistence, peers that pinned `trusted_request_signers` will reject requests after a restart and trust silently breaks
+- **never set `allow_untrusted_request_signers=True` in production.** It exists for tests only and disables the signer-pinning check — leaving it on in prod erases the main transport trust boundary
 
 Registration modes:
 - `register_local_signer(...)` — the mesh may sign for this peer in-process
@@ -320,7 +334,7 @@ manifold.update_trust(from_agent=0, to_agent=1, delta=0.8)
 projection = manifold.project()
 ```
 
-**Failure mode we observed.** Repeated real swarm composition revealed that Birkhoff/Sinkhorn projection drives the swarm toward uniformity — specialization collapses under iterated application. The `tests/` suite retains an xfailed regression that encodes this empirically. We kept the baseline as a research control.
+**Failure mode we observed.** Repeated real swarm composition revealed that Birkhoff/Sinkhorn projection drives the swarm toward uniformity — specialization collapses under iterated application. The regression is encoded empirically as an `xfail` test in [`tests/test_manifold_degeneration.py`](tests/test_manifold_degeneration.py); we kept the baseline as a research control.
 
 **Current production direction: `SpectralSphereManifold`.** Bounded spectral norm, negative trust allowed, residual identity injection. Preserves boundedness without forcing uniformity. This is theory informing product, not theory being discarded.
 
@@ -328,8 +342,8 @@ See the `spectral_sphere` reference (Anonymous, 2026) and the `manifold` referen
 
 ## Key Features
 
-- **Agent DNA** — `AgentDNA` embeds a constitutional co-processor in every agent; 443 ns/validation via the ACGS Rust engine
-- **Stigmergic DAGs** — `DAGCompiler` + `SwarmExecutor` for orchestrator-free task execution; agents claim `ready_nodes()` by capability
+- **Agent DNA** — `AgentDNA` embeds a constitutional co-processor in every agent; validation is routed through the ACGS Rust engine (sub-10 µs typical; see [performance notes](#performance-notes))
+- **Stigmergic DAGs** — `DAGCompiler` + `SwarmExecutor` for orchestrator-free task execution; agents claim ready tasks via `executor.available_tasks(agent_id)` filtered by registered capability
 - **Constitutional Mesh** — `ConstitutionalMesh` provides Byzantine-tolerant peer validation with cryptographic `MeshProof` chains; MACI prevents self-validation
 - **Spectral-sphere manifold** — `SpectralSphereManifold` is the production-direction trust model; `GovernanceManifold` and `sinkhorn_knopp()` remain as the Birkhoff baseline
 - **Evolution Log** — `EvolutionLog` enforces strict monotonicity + acceleration as structural database invariants
@@ -381,9 +395,9 @@ See the `spectral_sphere` reference (Anonymous, 2026) and the `manifold` referen
 | `TaskContract` | Records the agreement between a task and a claiming agent |
 | `ContractStatus` | Enum: `PENDING`, `ACTIVE`, `COMPLETED`, `FAILED` |
 | `WorkReceipt` | Receipt issued when an agent completes a task node |
-| `ExecutionStatus` | Enum: `BLOCKED`, `READY`, `ACTIVE`, `COMPLETED`, `FAILED` |
+| `ExecutionStatus` | Enum: `BLOCKED`, `READY`, `CLAIMED`, `RUNNING`, `COMPLETED`, `FAILED`, `REJECTED`, `EXPIRED` |
 | `SwarmBenchmark` | Measures DNA validation throughput at scale |
-| `BenchmarkResult` | Benchmark output: `agents`, `validations_per_second`, `p99_ns` |
+| `BenchmarkResult` | Benchmark output: `total_time_ms`, `avg_validation_ns`, `coordination_overhead`, `throughput_tasks_per_sec`, `agent_utilization`, `num_agents`, `num_domains`, `num_tasks`, `dag_depth` |
 
 ## Advanced: Bittensor subnet integration
 
@@ -418,6 +432,10 @@ python scripts/testnet_deploy.py validator \
 ```
 
 Testnet TAO faucet: https://test.taostats.io/faucet
+
+## Performance notes
+
+The `AgentDNA.validate()` hot path routes through the ACGS Rust engine. The repository's regression test asserts an average below 10 µs per validation (`tests/test_constitutional_swarm.py::...avg_ns < 10_000`). Reference benchmarks on a modern x86 laptop have observed ~443 ns/call, but that figure depends on hardware, rule count, pattern complexity, and the Rust engine build. Do not treat 443 ns as a product guarantee — treat the sub-10 µs bound as the contract and benchmark your own workload before quoting numbers externally.
 
 ## Runtime dependencies
 
