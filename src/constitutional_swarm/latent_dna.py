@@ -197,14 +197,16 @@ class _BODESSubspaceHook:
     tokens retain the safe (below-threshold) components untouched while
     the offending components are attenuated by ``gamma``.
 
-    LEACE-whitened subspaces are rejected at construction time; use
-    :func:`~constitutional_swarm.violation_subspace.fit_subspace` (the
-    plain orthogonal regime) for hook integration. Whitened steering
-    requires applying ``dewhitener`` inside the forward pass and is
-    left for a future sprint.
+    LEACE mode (``subspace.is_leace``) is supported: the forward pass
+    applies ``whitener`` before projecting onto ``basis`` and maps the
+    subspace-coordinate correction back through ``dewhitener`` before
+    subtracting from ``hidden``. This mirrors
+    :meth:`ViolationSubspace.steer` byte-for-byte (see
+    ``test_bodes_subspace_leace_hook.py``).
 
     Args:
-        subspace: A non-LEACE ``ViolationSubspace`` with orthonormal basis.
+        subspace: A ``ViolationSubspace`` with orthonormal basis.
+            LEACE-whitened or plain; both are supported.
         threshold: Per-component safety margin τ. A component is steered
             only when its coordinate (along the basis row) exceeds τ.
         gamma: Steering strength ∈ (0, 1]. ``gamma=1`` zeros offending
@@ -225,11 +227,6 @@ class _BODESSubspaceHook:
             raise TypeError(
                 f"subspace must be a ViolationSubspace, got {type(subspace).__name__}"
             )
-        if subspace.is_leace:
-            raise NotImplementedError(
-                "LEACE-whitened subspaces are not yet supported in the torch hook. "
-                "Pass a non-whitened ViolationSubspace (fit_subspace output)."
-            )
         if not 0.0 < gamma <= 1.0:
             raise ValueError(f"gamma must be in (0, 1], got {gamma}")
 
@@ -238,6 +235,15 @@ class _BODESSubspaceHook:
         # Preserve as float32 buffers; they are converted per-call to match hidden dtype.
         self.basis = torch.from_numpy(basis_np).to(dtype=torch.float32)   # (k, d)
         self.mean = torch.from_numpy(mean_np).to(dtype=torch.float32)     # (d,)
+        # LEACE whitening buffers (None unless subspace.is_leace).
+        self.whitener: torch.Tensor | None = None
+        self.dewhitener: torch.Tensor | None = None
+        if subspace.is_leace:
+            # Type-narrowing for mypy — ``__post_init__`` guarantees both exist.
+            assert subspace.whitener is not None and subspace.dewhitener is not None
+            self.whitener = torch.from_numpy(subspace.whitener).to(dtype=torch.float32)
+            self.dewhitener = torch.from_numpy(subspace.dewhitener).to(dtype=torch.float32)
+        self.is_leace: bool = subspace.is_leace
         self.rank = int(basis_np.shape[0])
         self.dim = int(basis_np.shape[1])
         self.threshold = threshold
@@ -271,9 +277,16 @@ class _BODESSubspaceHook:
         B = self.basis.to(hidden.device, hidden.dtype)   # (k, d)
         mu = self.mean.to(hidden.device, hidden.dtype)   # (d,)
 
-        # centered: [B, S, d]; coords: [B, S, k]
-        centered = hidden - mu
-        coords = centered @ B.T
+        centered = hidden - mu                            # [B, S, d]
+        if self.is_leace:
+            assert self.whitener is not None and self.dewhitener is not None
+            W = self.whitener.to(hidden.device, hidden.dtype)     # (d, d)
+            Winv = self.dewhitener.to(hidden.device, hidden.dtype)  # (d, d)
+            # Whiten before projecting: centered_w = centered @ W.T
+            centered_w = centered @ W.T                   # [B, S, d]
+            coords = centered_w @ B.T                     # [B, S, k]
+        else:
+            coords = centered @ B.T                       # [B, S, k]
 
         # Any-component exceed → token is "intervened"
         per_comp_mask = coords > self.threshold             # [B, S, k], bool
@@ -285,8 +298,13 @@ class _BODESSubspaceHook:
             try:
                 zero = torch.zeros_like(coords)
                 masked_coords = torch.where(per_comp_mask, coords, zero)   # [B, S, k]
-                # steering_delta[b, s] = gamma * sum_k masked_coords[b, s, k] * B[k]
-                steering_delta = self.gamma * (masked_coords @ B)          # [B, S, d]
+                if self.is_leace:
+                    # bad = (masked_coords @ B) @ Winv.T  — match numpy steer()
+                    bad = (masked_coords @ B) @ Winv.T                     # [B, S, d]
+                else:
+                    # steering_delta[b, s] = gamma * sum_k masked_coords[b, s, k] * B[k]
+                    bad = masked_coords @ B                                # [B, S, d]
+                steering_delta = self.gamma * bad
                 hidden = hidden - steering_delta
             except (RuntimeError, torch.cuda.OutOfMemoryError):
                 # Fail-open on OOM / numerical failure — string validator backstops.

@@ -76,14 +76,17 @@ class TestSubspaceHookConstruction:
         with pytest.raises(TypeError):
             _BODESSubspaceHook("not a subspace")  # type: ignore[arg-type]
 
-    def test_rejects_leace_subspace(self) -> None:
+    def test_accepts_leace_subspace(self) -> None:
+        """Phase 10: LEACE subspaces are now supported (was NotImplementedError)."""
         d = 4
         basis = np.eye(1, d)
         mean = np.zeros(d)
         W = np.eye(d)
         sub = ViolationSubspace(basis=basis, mean=mean, whitener=W, dewhitener=W)
-        with pytest.raises(NotImplementedError):
-            _BODESSubspaceHook(sub)
+        hook = _BODESSubspaceHook(sub)
+        assert hook.is_leace
+        assert hook.whitener is not None
+        assert hook.dewhitener is not None
 
     def test_rejects_invalid_gamma(self) -> None:
         sub = _rank1_subspace(8)
