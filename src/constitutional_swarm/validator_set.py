@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import heapq
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
 __all__ = [

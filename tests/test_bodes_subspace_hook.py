@@ -14,15 +14,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402
-from torch import Tensor  # noqa: E402
-
 from constitutional_swarm.latent_dna import (  # noqa: E402
     LatentDNAWrapper,
     _BODESHook,
     _BODESSubspaceHook,
 )
 from constitutional_swarm.violation_subspace import ViolationSubspace  # noqa: E402
-
+from torch import Tensor  # noqa: E402
 
 # ── Minimal stubs (mirror tests/test_latent_dna.py) ────────────────────────
 

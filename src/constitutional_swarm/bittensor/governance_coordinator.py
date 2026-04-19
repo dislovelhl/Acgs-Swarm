@@ -57,15 +57,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from constitutional_swarm.bittensor.authenticity_detector import AuthenticityDetector
-from constitutional_swarm.bittensor.emission_calculator import (
-    EmissionCalculator,
-    EmissionCycle,
-    EmissionWeights,
-    MinerEmissionInput,
-)
-from constitutional_swarm.manifold import GovernanceManifold
-
 from acgs_lite import (
     AuditPolicy,
     CaseConfig,
@@ -81,6 +72,14 @@ from acgs_lite import (
     ValidatorPool,
     ValidatorSelector,
 )
+from constitutional_swarm.bittensor.authenticity_detector import AuthenticityDetector
+from constitutional_swarm.bittensor.emission_calculator import (
+    EmissionCalculator,
+    EmissionCycle,
+    EmissionWeights,
+    MinerEmissionInput,
+)
+from constitutional_swarm.manifold import GovernanceManifold
 
 # ── Configuration ────────────────────────────────────────────────────────────
 

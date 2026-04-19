@@ -9,9 +9,7 @@ comparing its forward-pass output against the pure-numpy reference
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
-
 from constitutional_swarm.latent_dna import _BODESSubspaceHook
 from constitutional_swarm.violation_subspace import ViolationSubspace
 

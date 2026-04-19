@@ -17,11 +17,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
 from constitutional_swarm.quorum_certificate import (
-    ConflictEvidence,
     InsufficientQuorumError,
     InvalidCertificateError,
     QuorumCertificate,
@@ -38,7 +34,8 @@ from constitutional_swarm.validator_set import (
     ValidatorIdentity,
     ValidatorSet,
 )
-
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 # ---------------------------------------------------------------------------
 # Helpers

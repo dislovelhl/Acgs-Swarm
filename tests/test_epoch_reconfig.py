@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from constitutional_swarm.epoch_reconfig import (
     AmendmentProposal,
     ConstitutionVersion,

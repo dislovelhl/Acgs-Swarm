@@ -18,12 +18,25 @@ from constitutional_swarm.bench import BenchmarkResult, SwarmBenchmark
 from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.compiler import DAGCompiler, GoalSpec
 from constitutional_swarm.contract import ContractStatus, TaskContract
+from constitutional_swarm.debate_resolver import (
+    DebateRecord,
+    DebateResolver,
+    FinalVerdict,
+    VerdictOutcome,
+)
 from constitutional_swarm.dna import AgentDNA, DNADisabledError, constitutional_dna
-from constitutional_swarm.federated_bridge import (
-    AgentCredential,
-    CredentialStatus,
-    FederatedConstitutionBridge,
-    FederationDecision,
+from constitutional_swarm.epoch_reconfig import (
+    AmendmentProposal,
+    ConstitutionVersion,
+    DriftBudget,
+    DriftBudgetExceeded,
+    EpochMismatchError,
+    InvalidTransitionError,
+    JointQuorumNotMetError,
+    TransitionCertificate,
+    compute_version_digest,
+    evaluate_drift,
+    verify_transition,
 )
 from constitutional_swarm.evolution_log import (
     DashboardRow,
@@ -39,11 +52,19 @@ from constitutional_swarm.evolution_log import (
     RegressionRecord,
 )
 from constitutional_swarm.execution import ExecutionStatus, WorkReceipt
+from constitutional_swarm.federated_bridge import (
+    AgentCredential,
+    CredentialStatus,
+    FederatedConstitutionBridge,
+    FederationDecision,
+)
+from constitutional_swarm.mac_acgs_loop import MacAcgsConfig, MacAcgsCycleResult, MacAcgsLoop
 from constitutional_swarm.manifold import (
     GovernanceManifold,
     ManifoldProjectionResult,
     sinkhorn_knopp,
 )
+from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT
 from constitutional_swarm.mesh import (
     AssignmentSettledError,
     ConstitutionalMesh,
@@ -56,41 +77,7 @@ from constitutional_swarm.mesh import (
     SettlementPersistenceError,
     ValidationVote,
 )
-from constitutional_swarm.remote_vote_transport import (
-    LocalRemotePeer,
-    RemoteVoteClient,
-    RemoteVoteResponse,
-    RemoteVoteServer,
-)
-from constitutional_swarm.settlement_store import (
-    DuplicateSettlementError,
-    JSONLSettlementStore,
-    SettlementRecord,
-    SettlementStore,
-    SQLiteSettlementStore,
-)
-from constitutional_swarm.debate_resolver import (
-    DebateRecord,
-    DebateResolver,
-    FinalVerdict,
-    VerdictOutcome,
-)
-from constitutional_swarm.mac_acgs_loop import MacAcgsConfig, MacAcgsCycleResult, MacAcgsLoop
-from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT
 from constitutional_swarm.privacy_accountant import PrivacyAccountant, PrivacyBudgetExhausted
-from constitutional_swarm.epoch_reconfig import (
-    AmendmentProposal,
-    ConstitutionVersion,
-    DriftBudget,
-    DriftBudgetExceeded,
-    EpochMismatchError,
-    InvalidTransitionError,
-    JointQuorumNotMetError,
-    TransitionCertificate,
-    compute_version_digest,
-    evaluate_drift,
-    verify_transition,
-)
 from constitutional_swarm.private_vote import (
     BallotChoice,
     CommitRecord,
@@ -117,6 +104,25 @@ from constitutional_swarm.quorum_certificate import (
     detect_conflict,
     verify_certificate,
 )
+from constitutional_swarm.remote_vote_transport import (
+    LocalRemotePeer,
+    RemoteVoteClient,
+    RemoteVoteResponse,
+    RemoteVoteServer,
+)
+from constitutional_swarm.settlement_store import (
+    DuplicateSettlementError,
+    JSONLSettlementStore,
+    SettlementRecord,
+    SettlementStore,
+    SQLiteSettlementStore,
+)
+from constitutional_swarm.spectral_sphere import (
+    SpectralProjectionResult,
+    SpectralSphereManifold,
+    spectral_sphere_project,
+)
+from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
 from constitutional_swarm.validator_set import (
     CommitteeSelection,
     CommitteeSelector,
@@ -125,12 +131,6 @@ from constitutional_swarm.validator_set import (
     ValidatorIdentity,
     ValidatorSet,
 )
-from constitutional_swarm.spectral_sphere import (
-    SpectralProjectionResult,
-    SpectralSphereManifold,
-    spectral_sphere_project,
-)
-from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
 from constitutional_swarm.violation_subspace import (
     DimensionMismatchError,
     InsufficientSamplesError,

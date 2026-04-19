@@ -8,8 +8,6 @@ activation path.
 
 from __future__ import annotations
 
-import pytest
-
 from constitutional_swarm.bittensor.constitution_sync import (
     ConstitutionDistributor,
     ConstitutionReceiver,
@@ -21,7 +19,6 @@ from constitutional_swarm.epoch_reconfig import (
     DriftBudget,
     TransitionCertificate,
 )
-
 
 YAML_BOOT = "name: boot\nrules: []\n"
 YAML_E0 = "name: ctx-v0\nrules: []\n"

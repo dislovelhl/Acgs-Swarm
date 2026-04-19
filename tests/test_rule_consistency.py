@@ -239,7 +239,6 @@ class TestDPNoiseHelpers:
 
     def test_add_dp_noise_changes_matrix(self) -> None:
         import torch
-
         from constitutional_swarm.swarm_ode import add_dp_noise
 
         H = torch.eye(4)
@@ -327,11 +326,9 @@ class TestPrivacyAccountant:
         We verify RDP ε < simple_ε / 5 as a conservative bound.
         """
         import math
+
         from constitutional_swarm.privacy_accountant import (
             PrivacyAccountant,
-            _rdp_to_epsilon_balle2020,
-            _DEFAULT_ALPHAS,
-            _rdp_gaussian,
         )
 
         k = 100
@@ -385,9 +382,8 @@ class TestGossipSecurityFixes:
 
     def test_oversized_metadata_raises_value_error(self) -> None:
         """_wire_to_node must reject metadata exceeding MAX_METADATA_BYTES."""
-        from constitutional_swarm.gossip_protocol import MAX_METADATA_BYTES, _wire_to_node
 
-        import json
+        from constitutional_swarm.gossip_protocol import MAX_METADATA_BYTES, _wire_to_node
 
         oversized = {"data": "x" * (MAX_METADATA_BYTES + 1024)}
         data = {

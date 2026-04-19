@@ -14,11 +14,16 @@ from __future__ import annotations
 import time
 
 import pytest
-
-from constitutional_swarm.federated_bridge import (
-    AgentCredential,
-    CredentialStatus,
-    FederatedConstitutionBridge,
+from constitutional_swarm.bittensor.came_coordinator import (
+    CAMECoordinator,
+    CAMECoordinatorConfig,
+)
+from constitutional_swarm.bittensor.emission_calculator import (
+    MinerEmissionInput,
+    MinerTier,
+)
+from constitutional_swarm.bittensor.governance_coordinator import (
+    GovernanceCoordinator,
 )
 from constitutional_swarm.debate_resolver import (
     Challenge,
@@ -26,19 +31,12 @@ from constitutional_swarm.debate_resolver import (
     Proposal,
     VerdictOutcome,
 )
+from constitutional_swarm.federated_bridge import (
+    AgentCredential,
+    CredentialStatus,
+    FederatedConstitutionBridge,
+)
 from constitutional_swarm.swarm_ode import DiscreteGaussianSampler
-from constitutional_swarm.bittensor.governance_coordinator import (
-    CoordinatorConfig,
-    GovernanceCoordinator,
-)
-from constitutional_swarm.bittensor.emission_calculator import (
-    MinerEmissionInput,
-    MinerTier,
-)
-from constitutional_swarm.bittensor.came_coordinator import (
-    CAMECoordinator,
-    CAMECoordinatorConfig,
-)
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -581,15 +579,16 @@ class TestCAMECoordinator:
 # Full integration of CAME → DebateResolver → ConstitutionUpdate pipeline.
 
 
+from unittest.mock import MagicMock
+
+from constitutional_swarm.bittensor.came_coordinator import (
+    CAMECycleResult,
+)
 from constitutional_swarm.mac_acgs_loop import (
     MacAcgsConfig,
     MacAcgsLoop,
     PipelineEventType,
 )
-from constitutional_swarm.bittensor.came_coordinator import (
-    CAMECycleResult,
-)
-from unittest.mock import MagicMock
 
 
 def _make_came_mock(rules: list[str] | None = None) -> MagicMock:
@@ -886,12 +885,9 @@ class TestConstitutionalHashConsolidation:
     """Assert all modules reference the canonical hash from constants.py."""
 
     def test_all_modules_share_hash(self) -> None:
-        from constitutional_swarm.constants import CONSTITUTIONAL_HASH
-        from constitutional_swarm import debate_resolver
-        from constitutional_swarm import mac_acgs_loop
-        from constitutional_swarm import federated_bridge
-        from constitutional_swarm import swarm_ode
+        from constitutional_swarm import debate_resolver, federated_bridge, mac_acgs_loop, swarm_ode
         from constitutional_swarm.bittensor import came_coordinator
+        from constitutional_swarm.constants import CONSTITUTIONAL_HASH
 
         for mod in (debate_resolver, mac_acgs_loop, federated_bridge, swarm_ode, came_coordinator):
             assert mod._CONSTITUTIONAL_HASH == CONSTITUTIONAL_HASH, (
@@ -984,8 +980,7 @@ class TestChallengerRoundRobin:
     """External challengers should rotate across proposals."""
 
     def test_challengers_rotate_by_index(self) -> None:
-        from unittest.mock import MagicMock
-        from constitutional_swarm.mac_acgs_loop import MacAcgsLoop, MacAcgsConfig
+        from constitutional_swarm.mac_acgs_loop import MacAcgsConfig, MacAcgsLoop
 
         config = MacAcgsConfig(
             auto_challenge=True,
@@ -1008,7 +1003,7 @@ class TestGossipBatchLimits:
     """Gossip batch decoding must reject oversized payloads."""
 
     def test_oversized_bytes_rejected(self) -> None:
-        from constitutional_swarm.gossip_protocol import decode_batch, MAX_BATCH_BYTES
+        from constitutional_swarm.gossip_protocol import MAX_BATCH_BYTES, decode_batch
 
         huge = "x" * (MAX_BATCH_BYTES + 1)
         with pytest.raises(ValueError, match="too large"):
@@ -1016,7 +1011,8 @@ class TestGossipBatchLimits:
 
     def test_too_many_nodes_rejected(self) -> None:
         import json
-        from constitutional_swarm.gossip_protocol import decode_batch, MAX_BATCH_NODES
+
+        from constitutional_swarm.gossip_protocol import MAX_BATCH_NODES, decode_batch
 
         nodes = [{"cid": f"c{i}", "agent_id": "a", "payload": "p",
                   "parent_cids": [], "bodes_passed": False, "constitutional_hash": ""}
@@ -1026,6 +1022,7 @@ class TestGossipBatchLimits:
 
     def test_valid_batch_accepted(self) -> None:
         import json
+
         from constitutional_swarm.gossip_protocol import decode_batch
 
         nodes = [{"cid": "c1", "agent_id": "a", "payload": "p",
@@ -1124,8 +1121,8 @@ class TestCAMECoordinatorLogging:
 
     def test_bad_approach_logs_warning(self) -> None:
         """Grid.challenge() failure should log warning, not silently pass."""
-        import logging
         from unittest.mock import MagicMock
+
         from constitutional_swarm.bittensor.came_coordinator import CAMECoordinator
 
         class _ExplodingGrid:
@@ -1151,6 +1148,7 @@ class TestCAMECoordinatorLogging:
     def test_ceiling_detected_failure_logs_error(self) -> None:
         """Grid.ceiling_detected() failure should log error and default to False."""
         from unittest.mock import MagicMock
+
         from constitutional_swarm.bittensor.came_coordinator import CAMECoordinator
 
         class _CeilingBroken:
@@ -1182,7 +1180,7 @@ class TestBreakthroughModuleExports:
         assert callable(spectral_sphere_project)
 
     def test_merkle_crdt_exported(self) -> None:
-        from constitutional_swarm import MerkleCRDT, DAGNode
+        from constitutional_swarm import DAGNode, MerkleCRDT
         assert MerkleCRDT is not None
         assert DAGNode is not None
 

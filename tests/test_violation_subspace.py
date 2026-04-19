@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from constitutional_swarm.violation_subspace import (
     DimensionMismatchError,
     InsufficientSamplesError,
@@ -14,7 +13,6 @@ from constitutional_swarm.violation_subspace import (
     fit_leace,
     fit_subspace,
 )
-
 
 # ---------------------------------------------------------------------------
 # Synthetic data generators
