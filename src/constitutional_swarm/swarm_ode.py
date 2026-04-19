@@ -37,7 +37,8 @@ except ImportError as exc:
         "swarm_ode requires torch. Install with: pip install torch>=2.0"
     ) from exc
 
-_CONSTITUTIONAL_HASH = "608508a9bd224290"
+from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
+
 _DRAND_CHAIN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -68,8 +69,8 @@ class TrustDecayField(nn.Module):
 
     def __init__(self, n: int, *, decay: float = 0.1, seed: int = 0) -> None:
         super().__init__()
-        torch.manual_seed(seed)
-        self.W = nn.Parameter(torch.randn(n, n) * 0.1)
+        gen = torch.Generator().manual_seed(seed)
+        self.W = nn.Parameter(torch.randn(n, n, generator=gen) * 0.1)
         self.decay = decay
 
     def forward(self, H: Tensor, t: float) -> Tensor:
@@ -371,6 +372,7 @@ class DiscreteGaussianSampler:
             raise ValueError(f"sigma must be positive, got {sigma}")
         self._sigma = sigma
         self._seed = seed
+        self._noise_call_counter = 0
         self._tail = tail_bound if tail_bound is not None else max(6, math.ceil(6 * sigma))
         self._rng = torch.Generator()
         if seed is not None:
@@ -440,10 +442,17 @@ class DiscreteGaussianSampler:
             Float tensor of shape ``shape`` containing integer noise values.
         """
         scaled_sigma = self._sigma * sensitivity
+        # Derive a unique seed per call to avoid identical noise vectors.
+        self._noise_call_counter += 1
+        derived_seed = (
+            (self._seed * 2654435761 + self._noise_call_counter) & 0xFFFFFFFF
+            if self._seed is not None
+            else None
+        )
         sampler = self if sensitivity == 1.0 else DiscreteGaussianSampler(
             sigma=scaled_sigma,
             tail_bound=self._tail,
-            seed=self._seed,
+            seed=derived_seed,
         )
         return sampler.sample_tensor(shape)
 

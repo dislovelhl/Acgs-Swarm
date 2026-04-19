@@ -50,7 +50,7 @@ try:
 except ImportError:  # pragma: no cover
     EvolutionLog = None  # type: ignore[assignment,misc]
 
-_CONSTITUTIONAL_HASH = "608508a9bd224290"
+from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
 
 
 # ---------------------------------------------------------------------------

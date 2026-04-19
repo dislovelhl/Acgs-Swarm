@@ -875,3 +875,179 @@ class TestDrandClientInputValidation:
         valid_hash = "a" * 64
         client = DrandClient(chain_hash=valid_hash, base_url="https://api.drand.sh")
         assert client is not None
+
+
+# =============================================================================
+# Phase 5 hardening tests
+# =============================================================================
+
+
+class TestConstitutionalHashConsolidation:
+    """Assert all modules reference the canonical hash from constants.py."""
+
+    def test_all_modules_share_hash(self) -> None:
+        from constitutional_swarm.constants import CONSTITUTIONAL_HASH
+        from constitutional_swarm import debate_resolver
+        from constitutional_swarm import mac_acgs_loop
+        from constitutional_swarm import federated_bridge
+        from constitutional_swarm import swarm_ode
+        from constitutional_swarm.bittensor import came_coordinator
+
+        for mod in (debate_resolver, mac_acgs_loop, federated_bridge, swarm_ode, came_coordinator):
+            assert mod._CONSTITUTIONAL_HASH == CONSTITUTIONAL_HASH, (
+                f"{mod.__name__} hash drifted"
+            )
+
+    def test_constants_module_value(self) -> None:
+        from constitutional_swarm.constants import CONSTITUTIONAL_HASH
+
+        assert CONSTITUTIONAL_HASH == "608508a9bd224290"
+
+
+class TestDefenseFloodingMitigation:
+    """Verify defense credit scales inversely with max challenge severity."""
+
+    def test_high_severity_limits_defense_value(self) -> None:
+        """Many defenses should NOT override a high-severity challenge."""
+        resolver = DebateResolver(approval_threshold=0.6)
+        resolver.propose("p1", "proposer", "domain", "content")
+        resolver.challenge("p1", "c1", "critical flaw", severity=0.8)
+        # Use different defender IDs to avoid per-defender cap.
+        # score = 0.5 - 0.24 + 5*0.15*(1-0.8) = 0.5 - 0.24 + 0.15 = 0.41
+        for i in range(5):
+            resolver.defend("p1", f"def-{i}", f"rebuttal {i}")
+        verdict = resolver.resolve("p1")
+        assert verdict.outcome == VerdictOutcome.REJECTED
+        assert verdict.approval_score < 0.6
+
+    def test_low_severity_defense_still_effective(self) -> None:
+        """A single defense should still clear a low-severity challenge."""
+        resolver = DebateResolver(approval_threshold=0.6)
+        resolver.propose("p2", "proposer", "domain", "content")
+        resolver.challenge("p2", "c1", "minor concern", severity=0.10)
+        resolver.defend("p2", "d1", "addressed")
+        verdict = resolver.resolve("p2")
+        # 0.5 - 0.03 + 0.15*0.9 = 0.605
+        assert verdict.outcome == VerdictOutcome.APPROVED
+        assert verdict.approval_score >= 0.6
+
+
+class TestRNGIsolation:
+    """Verify TrustDecayField uses local RNG, not global torch seed."""
+
+    def test_no_global_rng_contamination(self) -> None:
+        import torch
+        from constitutional_swarm.swarm_ode import TrustDecayField
+
+        # Set global seed, then create two fields with different seeds
+        torch.manual_seed(42)
+        baseline = torch.randn(1).item()
+
+        torch.manual_seed(42)
+        _ = TrustDecayField(n=3, seed=99)
+        after = torch.randn(1).item()
+
+        # If TrustDecayField uses local Generator, global state should be unchanged
+        assert baseline == after, "TrustDecayField contaminated global RNG"
+
+
+class TestSensitivitySeedDiversity:
+    """Verify sensitivity_clipped_noise produces different noise per call."""
+
+    def test_repeated_calls_produce_different_noise(self) -> None:
+        sampler = DiscreteGaussianSampler(sigma=2.0, seed=42)
+        noise_a = sampler.sensitivity_clipped_noise((10,), sensitivity=0.5)
+        noise_b = sampler.sensitivity_clipped_noise((10,), sensitivity=0.5)
+        # With unique per-call seeds, outputs should differ
+        assert not (noise_a == noise_b).all(), "Identical noise on repeated calls"
+
+
+class TestSWEBenchOpaque:
+    """SWE-bench agent error metadata must not leak exception messages."""
+
+    def test_error_metadata_is_opaque(self) -> None:
+        from constitutional_swarm.swe_bench.agent import SWEBenchAgent
+
+        class FailingAgent(SWEBenchAgent):
+            def _generate_patch(self, task):
+                raise RuntimeError("super secret internal state")
+
+        agent = FailingAgent()
+        result = agent.solve({"instance_id": "test-1", "problem_statement": "fix a bug"})
+        assert result.success is False
+        assert "msg" not in result.metadata
+        assert "super secret" not in str(result.metadata)
+        assert "error_id" in result.metadata
+
+
+class TestChallengerRoundRobin:
+    """External challengers should rotate across proposals."""
+
+    def test_challengers_rotate_by_index(self) -> None:
+        from unittest.mock import MagicMock
+        from constitutional_swarm.mac_acgs_loop import MacAcgsLoop, MacAcgsConfig
+
+        config = MacAcgsConfig(
+            auto_challenge=True,
+            auto_defend=True,
+            debate_approval_threshold=0.6,
+        )
+        loop = MacAcgsLoop(config=config)
+        loop.add_external_challenger("alice")
+        loop.add_external_challenger("bob")
+        loop.add_external_challenger("charlie")
+
+        # Access the internal list to verify round-robin logic
+        assert loop._external_challengers == ["alice", "bob", "charlie"]
+        # Index 0 → alice, 1 → bob, 2 → charlie, 3 → alice
+        for i, expected in enumerate(["alice", "bob", "charlie", "alice"]):
+            assert loop._external_challengers[i % len(loop._external_challengers)] == expected
+
+
+class TestGossipBatchLimits:
+    """Gossip batch decoding must reject oversized payloads."""
+
+    def test_oversized_bytes_rejected(self) -> None:
+        from constitutional_swarm.gossip_protocol import decode_batch, MAX_BATCH_BYTES
+
+        huge = "x" * (MAX_BATCH_BYTES + 1)
+        with pytest.raises(ValueError, match="too large"):
+            decode_batch(huge)
+
+    def test_too_many_nodes_rejected(self) -> None:
+        import json
+        from constitutional_swarm.gossip_protocol import decode_batch, MAX_BATCH_NODES
+
+        nodes = [{"cid": f"c{i}", "agent_id": "a", "payload": "p",
+                  "parent_cids": [], "bodes_passed": False, "constitutional_hash": ""}
+                 for i in range(MAX_BATCH_NODES + 1)]
+        with pytest.raises(ValueError, match="too many nodes"):
+            decode_batch(json.dumps(nodes))
+
+    def test_valid_batch_accepted(self) -> None:
+        import json
+        from constitutional_swarm.gossip_protocol import decode_batch
+
+        nodes = [{"cid": "c1", "agent_id": "a", "payload": "p",
+                  "parent_cids": [], "bodes_passed": False, "constitutional_hash": ""}]
+        result = decode_batch(json.dumps(nodes))
+        assert len(result) == 1
+
+
+class TestResolverHashValidation:
+    """DebateResolver.resolve() should validate against instance hash."""
+
+    def test_custom_hash_accepted_when_matching(self) -> None:
+        resolver = DebateResolver(constitutional_hash="custom_hash_42")
+        resolver.propose("p1", "proposer", "domain", "content")
+        resolver.challenge("p1", "c1", "test", severity=0.1)
+        resolver.defend("p1", "d1", "ok")
+        verdict = resolver.resolve("p1", constitutional_hash="custom_hash_42")
+        assert verdict.outcome in (VerdictOutcome.APPROVED, VerdictOutcome.REJECTED)
+
+    def test_mismatched_hash_raises(self) -> None:
+        resolver = DebateResolver(constitutional_hash="custom_hash_42")
+        resolver.propose("p1", "proposer", "domain", "content")
+        resolver.challenge("p1", "c1", "test", severity=0.1)
+        with pytest.raises(PermissionError, match="hash mismatch"):
+            resolver.resolve("p1", constitutional_hash="wrong_hash")

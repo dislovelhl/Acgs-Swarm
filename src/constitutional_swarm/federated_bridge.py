@@ -29,9 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
-# Constitutional hash pinned in validation-critical paths.
-_CONSTITUTIONAL_HASH = "608508a9bd224290"
+from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
 
 
 class CredentialStatus(Enum):

@@ -111,12 +111,25 @@ def encode_batch(nodes: list[DAGNode]) -> str:
     return json.dumps([_node_to_wire(n) for n in nodes])
 
 
+# Maximum inbound batch limits to prevent resource exhaustion.
+MAX_BATCH_BYTES: int = 4 * 1024 * 1024  # 4 MB
+MAX_BATCH_NODES: int = 1000
+
+
 def decode_batch(message: str) -> list[DAGNode]:
     """Decode a JSON string to a list of DAGNodes."""
+    if len(message) > MAX_BATCH_BYTES:
+        raise ValueError(
+            f"Gossip batch too large: {len(message)} bytes (limit {MAX_BATCH_BYTES})"
+        )
     try:
         items = json.loads(message)
         if not isinstance(items, list):
             raise ValueError(f"Expected JSON array, got {type(items)}")
+        if len(items) > MAX_BATCH_NODES:
+            raise ValueError(
+                f"Gossip batch too many nodes: {len(items)} (limit {MAX_BATCH_NODES})"
+            )
         return [_wire_to_node(item) for item in items]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise ValueError(f"Malformed gossip batch: {exc}") from exc

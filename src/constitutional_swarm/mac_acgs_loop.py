@@ -45,14 +45,12 @@ from constitutional_swarm.bittensor.came_coordinator import (
     CAMECoordinatorConfig,
     CAMECycleResult,
 )
+from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
 from constitutional_swarm.debate_resolver import (
     DebateResolver,
     FinalVerdict,
     VerdictOutcome,
 )
-
-
-_CONSTITUTIONAL_HASH = "608508a9bd224290"
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +376,7 @@ class MacAcgsLoop:
                 # Auto-challenge
                 if self._config.auto_challenge:
                     challenger_id = (
-                        self._external_challengers[0]
+                        self._external_challengers[i % len(self._external_challengers)]
                         if self._external_challengers
                         else "auto-challenger"
                     )
@@ -391,7 +389,7 @@ class MacAcgsLoop:
                         proposal_id=pid,
                         challenger_id=challenger_id,
                         objection=objection,
-                        severity=0.15,  # low severity so auto-challenge + 1 defense clears threshold
+                        severity=0.10,  # low severity; auto-challenge + 1 defense clears threshold
                     )
 
                 # Auto-defend

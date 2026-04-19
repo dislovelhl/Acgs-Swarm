@@ -15,12 +15,16 @@ Integration points
 
 from __future__ import annotations
 
+import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -124,13 +128,15 @@ class SWEBenchAgent:
                 metadata={"error": "timeout"},
             )
         except Exception as exc:  # noqa: BLE001
+            err_id = uuid.uuid4().hex[:12]
+            _log.error("solve failed [%s]: %s", err_id, exc, exc_info=True)
             return SWEPatch(
                 task_id=task_id,
                 patch="",
                 success=False,
                 governed=self.wrapper is not None,
                 duration_s=time.monotonic() - t0,
-                metadata={"error": type(exc).__name__, "msg": str(exc)},
+                metadata={"error": type(exc).__name__, "error_id": err_id},
             )
 
         duration = time.monotonic() - t0

@@ -29,8 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
-_CONSTITUTIONAL_HASH = "608508a9bd224290"
+from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
 
 
 # ---------------------------------------------------------------------------
@@ -420,11 +419,11 @@ class DebateResolver:
         if record.verdict is not None:
             raise RuntimeError(f"Proposal {proposal_id!r} is already resolved; verdict is sealed")
 
-        # Constitutional hash gate
+        # Constitutional hash gate — validate against instance-level hash.
         effective_hash = constitutional_hash or self._constitutional_hash
-        if effective_hash != _CONSTITUTIONAL_HASH:
+        if effective_hash != self._constitutional_hash:
             raise PermissionError(
-                f"Constitutional hash mismatch: expected {_CONSTITUTIONAL_HASH!r}, "
+                f"Constitutional hash mismatch: expected {self._constitutional_hash!r}, "
                 f"got {effective_hash!r}"
             )
 
@@ -446,10 +445,13 @@ class DebateResolver:
 
         # Approval score computation
         score = 0.5  # neutral base
+        max_severity = max(c.severity for c in record.challenges) if record.challenges else 0.0
         for c in record.challenges:
             score -= c.severity * 0.3
         for _d in record.defenses:
-            score += 0.15
+            # Scale defense credit inversely with max severity to prevent
+            # puppet-identity flooding from overriding high-severity challenges.
+            score += 0.15 * (1.0 - max_severity)
         score = max(0.0, min(1.0, score))
 
         # Escalation check
