@@ -57,6 +57,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from constitutional_swarm.bittensor.authenticity_detector import AuthenticityDetector
+from constitutional_swarm.bittensor.emission_calculator import (
+    EmissionCalculator,
+    EmissionCycle,
+    EmissionWeights,
+    MinerEmissionInput,
+)
+from constitutional_swarm.manifold import GovernanceManifold
+
 from acgs_lite import (
     AuditPolicy,
     CaseConfig,
@@ -100,6 +109,8 @@ class CoordinatorConfig:
     )
     default_risk_tier: str = "medium"
     auto_audit: bool = False
+    emission_weights: EmissionWeights | None = None
+    authenticity_threshold: float = 0.55
 
 
 # ── Audit results ────────────────────────────────────────────────────────────
@@ -149,6 +160,15 @@ class GovernanceCoordinator:
 
         # Track finalized cases pending audit registration
         self._pending_audit: dict[str, dict[str, Any]] = {}
+
+        self._emission_calc = EmissionCalculator(
+            weights=cfg.emission_weights or EmissionWeights(),
+        )
+        self._manifold: GovernanceManifold | None = None
+        self._miner_authenticity: dict[str, list[float]] = {}  # rolling window
+        self._auth_detector = AuthenticityDetector(
+            authenticity_threshold=cfg.authenticity_threshold,
+        )
 
     # ── Subsystem access ─────────────────────────────────────────────────
 
@@ -380,6 +400,83 @@ class GovernanceCoordinator:
         )
 
     # ── Audit cycle ──────────────────────────────────────────────────────
+
+    def set_manifold(self, manifold: GovernanceManifold) -> None:
+        """Attach a GovernanceManifold for live manifold_trust computation.
+
+        The manifold column sums are used as the ``manifold_trust`` signal
+        in :meth:`compute_emissions`.  Call this after each ODE integration
+        step to keep the trust signal current.
+        """
+        self._manifold = manifold
+
+    def record_miner_authenticity(self, miner_uid: str, score: float) -> None:
+        """Record a single authenticity score observation for a miner.
+
+        Maintains a rolling window of the last 20 scores.  The rolling average
+        is consumed by :meth:`compute_emissions`.
+        """
+        window = self._miner_authenticity.setdefault(miner_uid, [])
+        window.append(score)
+        if len(window) > 20:
+            window.pop(0)
+
+    def compute_emissions(
+        self,
+        miner_inputs: list[MinerEmissionInput],
+    ) -> EmissionCycle:
+        """Compute TAO emission weights using live manifold trust.
+
+        If a GovernanceManifold is attached via :meth:`set_manifold`, the
+        column sums from the manifold replace any ``manifold_trust`` values
+        already set on the inputs.  Rolling-average authenticity scores
+        recorded via :meth:`record_miner_authenticity` are merged in.
+
+        Args:
+            miner_inputs: Per-miner signal snapshot.  UIDs must match the
+                manifold ordering when a manifold is attached.
+
+        Returns:
+            EmissionCycle with normalized emission weights.
+        """
+        if self._manifold is not None:
+            col_sums = self._manifold.column_sums()
+            uid_to_col = {inp.miner_uid: i for i, inp in enumerate(miner_inputs)}
+            updated: list[MinerEmissionInput] = []
+            for inp in miner_inputs:
+                idx = uid_to_col.get(inp.miner_uid)
+                trust = col_sums[idx] if idx is not None and idx < len(col_sums) else inp.manifold_trust
+                window = self._miner_authenticity.get(inp.miner_uid, [])
+                avg_auth = sum(window) / len(window) if window else inp.avg_authenticity
+                from dataclasses import replace as _dc_replace
+                updated.append(_dc_replace(inp, manifold_trust=trust, avg_authenticity=avg_auth))
+            miner_inputs = updated
+
+        return self._emission_calc.compute(miner_inputs)
+
+    def screen_miner_authenticity(
+        self,
+        miner_uid: str,
+        judgment: str,
+        reasoning: str = "",
+    ) -> bool:
+        """Score and record a miner's authenticity, returning True if it passes.
+
+        This is the hard gate: callers should exclude miners that return False
+        from validator quorum selection.  The score is also recorded into the
+        rolling window for use in :meth:`compute_emissions`.
+
+        Args:
+            miner_uid: Unique miner identifier.
+            judgment:  Miner's governance decision text.
+            reasoning: Miner's written rationale.
+
+        Returns:
+            True if the miner passes the authenticity threshold.
+        """
+        score_obj = self._auth_detector.score(judgment=judgment, reasoning=reasoning)
+        self.record_miner_authenticity(miner_uid, score_obj.overall)
+        return score_obj.is_authentic
 
     def run_audit_cycle(
         self,

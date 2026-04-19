@@ -228,6 +228,19 @@ class GovernanceManifold:
         """Total trust received by an agent. Guaranteed ≈ 1.0."""
         return sum(row[agent_idx] for row in self.trust_matrix)
 
+    def column_sums(self) -> list[float]:
+        """Column sums of the projected trust matrix.
+
+        For a doubly stochastic matrix each column sum is ≈ 1.0.  Use this
+        as the ``manifold_trust`` signal per miner/agent in the emission
+        formula — higher column sum means more trust received from peers.
+
+        Returns:
+            List of length ``num_agents`` with each agent's received trust.
+        """
+        matrix = self.trust_matrix
+        return [sum(row[j] for row in matrix) for j in range(self._n)]
+
     def summary(self) -> dict[str, Any]:
         """Manifold statistics."""
         proj = self.project()

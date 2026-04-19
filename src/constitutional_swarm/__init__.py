@@ -19,6 +19,12 @@ from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.compiler import DAGCompiler, GoalSpec
 from constitutional_swarm.contract import ContractStatus, TaskContract
 from constitutional_swarm.dna import AgentDNA, DNADisabledError, constitutional_dna
+from constitutional_swarm.federated_bridge import (
+    AgentCredential,
+    CredentialStatus,
+    FederatedConstitutionBridge,
+    FederationDecision,
+)
 from constitutional_swarm.evolution_log import (
     DashboardRow,
     DecelerationBlockedError,
@@ -63,9 +69,17 @@ from constitutional_swarm.settlement_store import (
     SettlementStore,
     SQLiteSettlementStore,
 )
+from constitutional_swarm.debate_resolver import (
+    DebateRecord,
+    DebateResolver,
+    FinalVerdict,
+    VerdictOutcome,
+)
+from constitutional_swarm.mac_acgs_loop import MacAcgsConfig, MacAcgsCycleResult, MacAcgsLoop
 from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
 
 __all__ = [
+    "AgentCredential",
     "AgentDNA",
     "Artifact",
     "ArtifactStore",
@@ -75,9 +89,12 @@ __all__ = [
     "CapabilityRegistry",
     "ConstitutionalMesh",
     "ContractStatus",
+    "CredentialStatus",
     "DAGCompiler",
     "DNADisabledError",
     "DashboardRow",
+    "DebateRecord",
+    "DebateResolver",
     "DecelerationBlockedError",
     "DecelerationRecord",
     "DuplicateRecordError",
@@ -85,12 +102,18 @@ __all__ = [
     "EvolutionLog",
     "EvolutionViolationError",
     "ExecutionStatus",
+    "FederatedConstitutionBridge",
+    "FederationDecision",
+    "FinalVerdict",
     "GapRecord",
     "GoalSpec",
     "GovernanceManifold",
     "InvalidVoteSignatureError",
     "JSONLSettlementStore",
     "LocalRemotePeer",
+    "MacAcgsConfig",
+    "MacAcgsCycleResult",
+    "MacAcgsLoop",
     "ManifoldProjectionResult",
     "MeshHaltedError",
     "MeshProof",
@@ -114,6 +137,7 @@ __all__ = [
     "TaskDAG",
     "TaskNode",
     "ValidationVote",
+    "VerdictOutcome",
     "WorkReceipt",
     "constitutional_dna",
     "sinkhorn_knopp",
