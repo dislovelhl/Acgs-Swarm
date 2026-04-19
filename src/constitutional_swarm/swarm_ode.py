@@ -21,6 +21,7 @@ Dependencies: torch (optional, same isolation as latent_dna.py).
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -35,6 +36,9 @@ except ImportError as exc:
     raise ImportError(
         "swarm_ode requires torch. Install with: pip install torch>=2.0"
     ) from exc
+
+_CONSTITUTIONAL_HASH = "608508a9bd224290"
+_DRAND_CHAIN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class SwarmVectorField(Protocol):
@@ -225,7 +229,7 @@ def integrate(
                     payload=json.dumps({"step": step, "t": t, "variance": var}),
                     payload_type="ode_snapshot",
                     bodes_passed=True,
-                    constitutional_hash="608508a9bd224290",
+                    constitutional_hash=_CONSTITUTIONAL_HASH,
                 )
 
         H = projected_rk4_step(
@@ -247,7 +251,7 @@ def integrate(
                 payload=json.dumps({"step": n_steps, "t": t, "variance": var}),
                 payload_type="ode_snapshot",
                 bodes_passed=True,
-                constitutional_hash="608508a9bd224290",
+                constitutional_hash=_CONSTITUTIONAL_HASH,
             )
 
     return {
@@ -366,6 +370,7 @@ class DiscreteGaussianSampler:
         if sigma <= 0:
             raise ValueError(f"sigma must be positive, got {sigma}")
         self._sigma = sigma
+        self._seed = seed
         self._tail = tail_bound if tail_bound is not None else max(6, math.ceil(6 * sigma))
         self._rng = torch.Generator()
         if seed is not None:
@@ -438,6 +443,7 @@ class DiscreteGaussianSampler:
         sampler = self if sensitivity == 1.0 else DiscreteGaussianSampler(
             sigma=scaled_sigma,
             tail_bound=self._tail,
+            seed=self._seed,
         )
         return sampler.sample_tensor(shape)
 
@@ -501,6 +507,12 @@ class DrandClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 10.0,
     ) -> None:
+        if not _DRAND_CHAIN_HASH_RE.match(chain_hash):
+            raise ValueError(
+                f"chain_hash must be a 64-char lowercase hex string, got {chain_hash!r}"
+            )
+        if not base_url.startswith("https://"):
+            raise ValueError(f"base_url must use HTTPS, got {base_url!r}")
         self._chain = chain_hash
         self._base = base_url.rstrip("/")
         self._timeout = timeout
@@ -559,7 +571,7 @@ class DrandClient:
         Returns:
             (sampler, beacon_entry) — entry for audit/verification.
         """
-        entry = self.at_round(str(round_number)) if round_number is not None else self.latest()
+        entry = self.at_round(round_number) if round_number is not None else self.latest()
         seed = self.seed_from_entry(entry)
         sampler = DiscreteGaussianSampler(sigma=sigma, tail_bound=tail_bound, seed=seed)
         return sampler, entry

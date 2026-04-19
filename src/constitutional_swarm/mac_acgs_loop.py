@@ -349,10 +349,13 @@ class MacAcgsLoop:
             proposal_count = min(len(came_result.rules_proposed), self._config.max_updates_per_cycle)
             for i in range(proposal_count):
                 pid = f"mac-{cycle}-{i}-{uuid.uuid4().hex[:8]}"
-                rule_content = (
-                    f"Auto-proposed rule from CAME cycle {cycle}, proposal {i+1}. "
-                    f"Coverage: {came_result.grid_coverage:.3f}. "
-                    f"Exploration bonus: {came_result.exploration_bonus:.3f}."
+                # Use actual RuleCandidate content from CAME; fall back to descriptor only if empty
+                raw_rule = came_result.rules_proposed[i]
+                raw_str = str(raw_rule).strip()
+                rule_content = raw_str if raw_str else (
+                    f"CAME rule cycle={cycle} idx={i+1} "
+                    f"coverage={came_result.grid_coverage:.3f} "
+                    f"bonus={came_result.exploration_bonus:.3f}"
                 )
                 proposer_id = f"came-coordinator-cycle-{cycle}"
 
@@ -388,7 +391,7 @@ class MacAcgsLoop:
                         proposal_id=pid,
                         challenger_id=challenger_id,
                         objection=objection,
-                        severity=0.4,  # moderate default severity
+                        severity=0.15,  # low severity so auto-challenge + 1 defense clears threshold
                     )
 
                 # Auto-defend

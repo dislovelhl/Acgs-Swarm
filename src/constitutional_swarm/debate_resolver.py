@@ -261,6 +261,12 @@ class DebateResolver:
         constitutional_hash:  Hash validated at verdict time.
     """
 
+    # Minimum allowed challenge severity — prevents trivially-scored challenges.
+    _MIN_SEVERITY: float = 0.05
+
+    # Maximum defenses any single defender may submit per proposal.
+    _MAX_DEFENSES_PER_DEFENDER: int = 3
+
     def __init__(
         self,
         approval_threshold: float = 0.6,
@@ -325,8 +331,13 @@ class DebateResolver:
         """
         if proposal_id not in self._records:
             raise KeyError(f"Proposal {proposal_id!r} not found")
+        record = self._records[proposal_id]
+        if record.verdict is not None:
+            raise RuntimeError(f"Proposal {proposal_id!r} is already resolved; cannot add challenges")
         if not 0.0 <= severity <= 1.0:
             raise ValueError(f"severity must be in [0, 1], got {severity}")
+        if severity < self._MIN_SEVERITY:
+            raise ValueError(f"severity must be >= {self._MIN_SEVERITY}, got {severity}")
         c = Challenge(
             proposal_id=proposal_id,
             challenger_id=challenger_id,
@@ -354,6 +365,15 @@ class DebateResolver:
         """
         if proposal_id not in self._records:
             raise KeyError(f"Proposal {proposal_id!r} not found")
+        record = self._records[proposal_id]
+        if record.verdict is not None:
+            raise RuntimeError(f"Proposal {proposal_id!r} is already resolved; cannot add defenses")
+        existing = sum(1 for d in record.defenses if d.defender_id == defender_id)
+        if existing >= self._MAX_DEFENSES_PER_DEFENDER:
+            raise PermissionError(
+                f"Defender {defender_id!r} has reached the defense limit "
+                f"({self._MAX_DEFENSES_PER_DEFENDER}) for proposal {proposal_id!r}"
+            )
         d = Defense(
             proposal_id=proposal_id,
             defender_id=defender_id,
@@ -397,6 +417,8 @@ class DebateResolver:
         if proposal_id not in self._records:
             raise KeyError(f"Proposal {proposal_id!r} not found")
         record = self._records[proposal_id]
+        if record.verdict is not None:
+            raise RuntimeError(f"Proposal {proposal_id!r} is already resolved; verdict is sealed")
 
         # Constitutional hash gate
         effective_hash = constitutional_hash or self._constitutional_hash

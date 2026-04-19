@@ -75,6 +75,7 @@ class AgentCredential:
     issued_at: float
     expires_at: float = 0.0
     domains: tuple[str, ...] = ()
+    status: CredentialStatus = CredentialStatus.ACTIVE
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -87,7 +88,8 @@ class AgentCredential:
         """True if the credential has passed its expiry timestamp."""
         if self.expires_at == 0.0:
             return False
-        return (now or time.time()) > self.expires_at
+        _now = time.time() if now is None else now
+        return _now > self.expires_at
 
     def authorised_for(self, domain: str) -> bool:
         """True if this credential covers the requested domain."""
@@ -227,26 +229,30 @@ class FederatedConstitutionBridge:
         Returns:
             FederationDecision with allowed flag and reason.
         """
-        _now = now or time.time()
+        _now = time.time() if now is None else now
         cred = self._credentials.get(agent_id)
 
         # 1. Unknown credential
         if cred is None:
             return self._deny(agent_id, "", domain, "UNKNOWN_CREDENTIAL", _now)
 
-        # 2. Revoked
+        # 2. Pending (awaiting approval) — fail-closed
+        if cred.status == CredentialStatus.PENDING:
+            return self._deny(agent_id, cred.org_id, domain, "CREDENTIAL_PENDING", _now)
+
+        # 3. Revoked
         if agent_id in self._revoked:
             return self._deny(agent_id, cred.org_id, domain, "REVOKED", _now)
 
-        # 3. Expired
+        # 4. Expired
         if cred.is_expired(now=_now):
             return self._deny(agent_id, cred.org_id, domain, "EXPIRED", _now)
 
-        # 4. Constitutional hash mismatch
+        # 5. Constitutional hash mismatch
         if self._require_hash and cred.constitutional_hash != self._local_hash:
             return self._deny(agent_id, cred.org_id, domain, "HASH_MISMATCH", _now)
 
-        # 5. Domain authorisation
+        # 6. Domain authorisation
         if domain and not cred.authorised_for(domain):
             return self._deny(agent_id, cred.org_id, domain, "DOMAIN_DENIED", _now)
 

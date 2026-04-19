@@ -50,6 +50,8 @@ try:
 except ImportError:  # pragma: no cover
     EvolutionLog = None  # type: ignore[assignment,misc]
 
+_CONSTITUTIONAL_HASH = "608508a9bd224290"
+
 
 # ---------------------------------------------------------------------------
 # Public result / config dataclasses
@@ -148,9 +150,7 @@ class CAMECoordinator:
         if codifier is not None:
             self._codifier = codifier
         elif RuleCodifier is not None:
-            # Use a placeholder hash; real deployments should inject a codifier
-            # with the live constitutional hash.
-            self._codifier: Any = RuleCodifier(constitutional_hash="came-placeholder-00000000")
+            self._codifier: Any = RuleCodifier(constitutional_hash=_CONSTITUTIONAL_HASH)
         else:
             self._codifier = None
 
@@ -246,17 +246,25 @@ class CAMECoordinator:
 
         if ceiling and cooldown_elapsed and self._codifier is not None:
             try:
+                # Extract approaches from the live grid so the codifier has real data.
+                # Fall back to an empty list if the grid has no extractable approaches.
+                live_approaches: list[Any] = []
+                if self._grid is not None:
+                    if hasattr(self._grid, "approaches"):
+                        live_approaches = list(self._grid.approaches())
+                    elif hasattr(self._grid, "niche_map"):
+                        live_approaches = list(self._grid.niche_map.values())
                 if hasattr(self._codifier, "find_clusters") and hasattr(self._codifier, "propose_rules"):
-                    clusters = self._codifier.find_clusters([])
+                    clusters = self._codifier.find_clusters(live_approaches)
                     rules_proposed = self._codifier.propose_rules(clusters)
                 elif hasattr(self._codifier, "propose_rules"):
-                    rules_proposed = self._codifier.propose_rules([])
+                    rules_proposed = self._codifier.propose_rules(live_approaches)
                 elif hasattr(self._codifier, "codify"):
-                    rules_proposed = self._codifier.codify([]) or []
+                    rules_proposed = self._codifier.codify(live_approaches) or []
             except Exception:  # noqa: BLE001
                 pass
-            if rules_proposed:
-                self._last_codification_cycle = self._cycle
+            # Reset cooldown unconditionally so it starts even on empty proposals.
+            self._last_codification_cycle = self._cycle
 
         # 5. Log evolution event -----------------------------------------------
         log_id = self._write_log(grid_coverage, improved_count, len(rules_proposed))
@@ -350,7 +358,7 @@ class CAMECoordinator:
                     self._log_state[metric] = (next_epoch, value)
                     entries_written += 1
             except Exception as exc:  # noqa: BLE001
-                last_error = str(exc)[:80]
+                last_error = f"{self._cycle}:{uuid.uuid4().hex[:8]}"  # opaque — no exception details
 
         if entries_written > 0:
             return f"log:{self._cycle}:{uuid.uuid4().hex[:8]}"

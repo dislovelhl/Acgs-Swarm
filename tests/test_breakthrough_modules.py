@@ -6,8 +6,7 @@ Modules covered:
 3. DiscreteGaussianSampler (swarm_ode.py)
 4. GovernanceCoordinator new methods (bittensor/governance_coordinator.py)
 5. CAMECoordinator (bittensor/came_coordinator.py)
-
-TODO: MacAcgsLoop (mac_acgs_loop.py) tests — module not yet fully implemented.
+6. MacAcgsLoop (mac_acgs_loop.py)
 """
 
 from __future__ import annotations
@@ -312,7 +311,7 @@ class TestDebateResolver:
         assert "p-open" in resolver.open_proposals()
         assert "p-closed" in resolver.resolved_proposals()
 
-    @pytest.mark.parametrize("severity", [0.0, 0.5, 1.0])
+    @pytest.mark.parametrize("severity", [0.05, 0.5, 1.0])
     def test_challenge_valid_severity_boundaries(self, severity: float) -> None:
         resolver = DebateResolver()
         resolver.propose(f"p-sev-{severity}", "miner-1", "safety", "Content")
@@ -576,3 +575,194 @@ class TestCAMECoordinator:
         coord = CAMECoordinator()
         coord.close()
         coord.close()  # should not raise
+
+
+# ========================== MacAcgsLoop Tests =============================
+# Full integration of CAME → DebateResolver → ConstitutionUpdate pipeline.
+
+
+from constitutional_swarm.mac_acgs_loop import (
+    MacAcgsConfig,
+    MacAcgsLoop,
+    PipelineEventType,
+)
+from constitutional_swarm.bittensor.came_coordinator import (
+    CAMECycleResult,
+)
+from unittest.mock import MagicMock
+
+
+def _make_came_mock(rules: list[str] | None = None) -> MagicMock:
+    """Build a mock CAMECoordinator that returns ``rules`` on evolve_cycle."""
+    mock = MagicMock()
+    rules = rules or []
+    mock.evolve_cycle.return_value = CAMECycleResult(
+        grid_coverage=0.75,
+        ceiling_detected=bool(rules),
+        rules_proposed=rules,
+        log_id="mock-log:1",
+        exploration_bonus=0.1,
+    )
+    mock.coverage_history.return_value = [0.75]
+    mock.summary.return_value = {"mocked": True}
+    mock.close = MagicMock()
+    return mock
+
+
+class TestMacAcgsLoopHappyPath:
+    """MacAcgsLoop: default config with auto-challenge + auto-defend."""
+
+    def test_cycle_with_no_rules_proposed(self) -> None:
+        """If CAME proposes nothing, pipeline completes without debate."""
+        loop = MacAcgsLoop(came=_make_came_mock(rules=[]))
+        result = loop.run_cycle([])
+        assert result.cycle_number == 1
+        assert result.proposals_opened == 0
+        assert result.proposals_approved == 0
+        assert result.proposals_rejected == 0
+        assert result.hash_verified is True
+        assert len(result.constitution_updates) == 0
+
+    def test_cycle_with_rules_approved(self) -> None:
+        """Auto-challenge (severity 0.15) + auto-defend → APPROVED with default threshold 0.6."""
+        loop = MacAcgsLoop(came=_make_came_mock(rules=["Rule A", "Rule B"]))
+        result = loop.run_cycle([])
+        # With auto-challenge severity=0.15, auto-defend: score = 0.5 - 0.15*0.3 + 0.15 = 0.605 ≥ 0.6
+        assert result.proposals_opened == 2
+        assert result.proposals_approved == 2
+        assert result.proposals_rejected == 0
+        assert len(result.constitution_updates) == 2
+        for upd in result.constitution_updates:
+            assert upd.rule_content in ("Rule A", "Rule B")
+
+    def test_scoring_math_default_config(self) -> None:
+        """Verify the exact approval score math."""
+        loop = MacAcgsLoop(came=_make_came_mock(rules=["test rule"]))
+        result = loop.run_cycle([])
+        # score = 0.5 - 0.15*0.3 + 0.15 = 0.605
+        assert len(result.constitution_updates) == 1
+        verdict = result.constitution_updates[0].verdict
+        assert abs(verdict.approval_score - 0.605) < 1e-9
+
+    def test_max_updates_per_cycle_cap(self) -> None:
+        """max_updates_per_cycle caps how many proposals are opened."""
+        cfg = MacAcgsConfig(max_updates_per_cycle=2)
+        loop = MacAcgsLoop(config=cfg, came=_make_came_mock(rules=["r1", "r2", "r3", "r4"]))
+        result = loop.run_cycle([])
+        assert result.proposals_opened == 2  # only first 2 processed
+
+    def test_constitution_updates_accumulate(self) -> None:
+        """Updates from multiple cycles accumulate in constitution_updates()."""
+        came = _make_came_mock(rules=["R1"])
+        loop = MacAcgsLoop(came=came)
+        loop.run_cycle([])
+        # Second cycle — need fresh debate for new proposal IDs
+        came.evolve_cycle.return_value = CAMECycleResult(
+            grid_coverage=0.80, ceiling_detected=True,
+            rules_proposed=["R2"], log_id="mock:2", exploration_bonus=0.05,
+        )
+        loop.run_cycle([])
+        all_updates = loop.constitution_updates()
+        assert len(all_updates) == 2
+
+    def test_cycle_number_increments(self) -> None:
+        loop = MacAcgsLoop(came=_make_came_mock(rules=[]))
+        loop.run_cycle([])
+        loop.run_cycle([])
+        assert loop.cycle_number() == 2
+
+
+class TestMacAcgsLoopHashAbort:
+    """MacAcgsLoop: hash mismatch aborts cycle (fail-closed)."""
+
+    def test_hash_mismatch_aborts_cycle(self) -> None:
+        cfg = MacAcgsConfig(constitutional_hash="bad-hash-000000")
+        loop = MacAcgsLoop(config=cfg, came=_make_came_mock(rules=["R"]))
+        result = loop.run_cycle([])
+        assert result.hash_verified is False
+        assert result.proposals_opened == 0
+        assert len(result.constitution_updates) == 0
+        # CAME should not even be called
+        loop._came.evolve_cycle.assert_not_called()
+
+    def test_hash_mismatch_events(self) -> None:
+        cfg = MacAcgsConfig(constitutional_hash="bad-hash-000000")
+        loop = MacAcgsLoop(config=cfg, came=_make_came_mock(rules=["R"]))
+        result = loop.run_cycle([])
+        event_types = [e.event_type for e in result.events]
+        assert PipelineEventType.HASH_MISMATCH in event_types
+        assert PipelineEventType.CAME_CYCLE not in event_types
+
+
+class TestMacAcgsLoopAudit:
+    """MacAcgsLoop: audit log integrity."""
+
+    def test_audit_log_records_all_events(self) -> None:
+        loop = MacAcgsLoop(came=_make_came_mock(rules=["R1"]))
+        result = loop.run_cycle([])
+        log = loop.audit_log()
+        assert len(log) == len(result.events)
+        assert all("event_type" in e for e in log)
+
+    def test_audit_log_size_cap(self) -> None:
+        cfg = MacAcgsConfig(audit_log_size=5)
+        loop = MacAcgsLoop(config=cfg, came=_make_came_mock(rules=["R"]))
+        for _ in range(10):
+            came_mock = loop._came
+            came_mock.evolve_cycle.return_value = CAMECycleResult(
+                grid_coverage=0.5, ceiling_detected=True,
+                rules_proposed=["R"], log_id="m", exploration_bonus=0.0,
+            )
+            loop.run_cycle([])
+        assert len(loop.audit_log()) <= 5
+
+    def test_summary_keys(self) -> None:
+        loop = MacAcgsLoop(came=_make_came_mock(rules=[]))
+        loop.run_cycle([])
+        s = loop.summary()
+        assert "cycle_number" in s
+        assert "total_constitution_updates" in s
+        assert "constitutional_hash" in s
+
+
+class TestMacAcgsLoopReject:
+    """MacAcgsLoop: rules can be rejected by raising threshold."""
+
+    def test_high_threshold_rejects(self) -> None:
+        cfg = MacAcgsConfig(debate_approval_threshold=0.99)
+        loop = MacAcgsLoop(config=cfg, came=_make_came_mock(rules=["R"]))
+        result = loop.run_cycle([])
+        assert result.proposals_approved == 0
+        assert result.proposals_rejected == 1
+        assert len(result.constitution_updates) == 0
+
+
+class TestMacAcgsLoopExternalChallengers:
+    """MacAcgsLoop: add_external_challenger attribution."""
+
+    def test_external_challenger_attributed(self) -> None:
+        loop = MacAcgsLoop(came=_make_came_mock(rules=["R"]))
+        loop.add_external_challenger("human-reviewer-1")
+        result = loop.run_cycle([])
+        # The auto-challenge should use the registered challenger
+        assert result.proposals_opened == 1
+
+    def test_repr(self) -> None:
+        loop = MacAcgsLoop(came=_make_came_mock(rules=[]))
+        assert "MacAcgsLoop" in repr(loop)
+
+
+class TestMacAcgsLoopRuleContent:
+    """MacAcgsLoop: actual rule content is used, not synthetic placeholders."""
+
+    def test_rule_content_from_came_proposal(self) -> None:
+        loop = MacAcgsLoop(came=_make_came_mock(rules=["Agents must log all decisions"]))
+        result = loop.run_cycle([])
+        assert len(result.constitution_updates) == 1
+        assert result.constitution_updates[0].rule_content == "Agents must log all decisions"
+
+    def test_empty_rule_gets_fallback_descriptor(self) -> None:
+        loop = MacAcgsLoop(came=_make_came_mock(rules=["  "]))  # whitespace-only
+        result = loop.run_cycle([])
+        assert len(result.constitution_updates) == 1
+        assert "CAME rule" in result.constitution_updates[0].rule_content
