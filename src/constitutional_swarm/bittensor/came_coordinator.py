@@ -26,10 +26,13 @@ the evolution loop.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Lazy imports — be robust to API variations and partial installations
@@ -212,7 +215,7 @@ class CAMECoordinator:
                     if uid is not None:
                         seen_uids.add(uid)
                 except Exception:  # noqa: BLE001
-                    pass  # Be robust to individual bad approaches
+                    logger.warning("Grid rejected approach miner_uid=%s", getattr(approach, "miner_uid", "?"), exc_info=True)
 
         # 2. Read grid stats ---------------------------------------------------
         grid_coverage = 0.0
@@ -227,6 +230,7 @@ class CAMECoordinator:
                 try:
                     ceiling = bool(self._grid.ceiling_detected())
                 except Exception:  # noqa: BLE001
+                    logger.error("ceiling_detected() query failed", exc_info=True)
                     ceiling = False
 
         self._coverage_history.append(grid_coverage)
@@ -238,7 +242,7 @@ class CAMECoordinator:
                 try:
                     bonus += self._grid.exploration_bonus(uid)
                 except Exception:  # noqa: BLE001
-                    pass
+                    logger.debug("exploration_bonus(%s) failed", uid, exc_info=True)
 
         # 4. Trigger rule codification when ceiling detected --------------------
         rules_proposed: list[Any] = []
@@ -262,7 +266,7 @@ class CAMECoordinator:
                 elif hasattr(self._codifier, "codify"):
                     rules_proposed = self._codifier.codify(live_approaches) or []
             except Exception:  # noqa: BLE001
-                pass
+                logger.error("Rule codification failed at cycle %d", self._cycle, exc_info=True)
             # Reset cooldown unconditionally so it starts even on empty proposals.
             self._last_codification_cycle = self._cycle
 
@@ -288,7 +292,7 @@ class CAMECoordinator:
             try:
                 grid_summary = self._grid.summary()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("Grid summary unavailable", exc_info=True)
 
         return {
             "cycle": self._cycle,
@@ -311,7 +315,7 @@ class CAMECoordinator:
             try:
                 self._log.close()
             except Exception:  # noqa: BLE001
-                pass
+                logger.warning("EvolutionLog.close() failed", exc_info=True)
 
     def __repr__(self) -> str:  # pragma: no cover
         cov = self._coverage_history[-1] if self._coverage_history else 0.0
@@ -358,7 +362,8 @@ class CAMECoordinator:
                     self._log_state[metric] = (next_epoch, value)
                     entries_written += 1
             except Exception as exc:  # noqa: BLE001
-                last_error = f"{self._cycle}:{uuid.uuid4().hex[:8]}"  # opaque — no exception details
+                logger.error("Log write failed (cycle=%d, metric=%s)", self._cycle, metric, exc_info=True)
+                last_error = f"{self._cycle}:{uuid.uuid4().hex[:8]}"
 
         if entries_written > 0:
             return f"log:{self._cycle}:{uuid.uuid4().hex[:8]}"

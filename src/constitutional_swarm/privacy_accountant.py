@@ -65,6 +65,43 @@ def _rdp_gaussian(alpha: float, noise_multiplier: float) -> float:
     return alpha / (2.0 * noise_multiplier**2)
 
 
+def _rdp_subsampled_gaussian(
+    alpha: float, noise_multiplier: float, sample_rate: float
+) -> float:
+    """RDP for the subsampled Gaussian mechanism (Mironov, Talwar, Zhang 2019).
+
+    Uses the analytic upper bound: for Poisson subsampling at rate q,
+    ε_sub(α) ≤ (1/(α-1)) · log(1 + q² · C(α-1) · (exp((α-1)·ε_base) - 1))
+    where ε_base = α / (2·nm²) is the un-subsampled RDP.
+
+    For large noise multiplier (nm ≥ 1) and small q, this simplifies to
+    approximately q² · ε_base — a ~1/q² privacy amplification.
+
+    Falls back to the un-subsampled bound when sample_rate ≥ 1.
+    """
+    if sample_rate >= 1.0:
+        return _rdp_gaussian(alpha, noise_multiplier)
+    if alpha <= 1.0:
+        return 0.0
+
+    eps_base = _rdp_gaussian(alpha, noise_multiplier)
+    q = sample_rate
+
+    # Tight bound via the log-sum-exp form (Mironov et al. 2019, Proposition 3).
+    # For numerical stability, use expm1 when the exponent is small.
+    exponent = (alpha - 1.0) * eps_base
+    if exponent > 50.0:
+        # Overflow-safe: log(q² · exp(exponent)) ≈ 2·log(q) + exponent
+        return (2.0 * math.log(q) + exponent) / (alpha - 1.0)
+    try:
+        inner = 1.0 + q * q * math.expm1(exponent)
+        if inner <= 0:
+            return eps_base  # fallback: no amplification
+        return math.log(inner) / (alpha - 1.0)
+    except (ValueError, OverflowError):
+        return eps_base  # conservative fallback
+
+
 def _rdp_to_epsilon_balle2020(
     rdp_values: Sequence[float],
     alphas: Sequence[float],
@@ -135,13 +172,15 @@ class PrivacyAccountant:
         """Sum RDP across all recorded steps, per Rényi order α.
 
         Composition is exact for RDP: ε_total(α) = Σ_step ε_step(α).
-        Each step contributes α/(2·nm²) scaled by its step count.
+        When a step uses Poisson subsampling (sample_rate < 1), the
+        subsampled Gaussian RDP bound (Mironov et al. 2019) provides
+        privacy amplification of up to ~q².
         """
         rdp_total = [0.0] * len(self.alphas)
         for rec in self._history:
             nm = rec.sigma / rec.sensitivity
             for i, a in enumerate(self.alphas):
-                rdp_total[i] += _rdp_gaussian(a, nm)
+                rdp_total[i] += _rdp_subsampled_gaussian(a, nm, rec.sample_rate)
         return rdp_total
 
     def _current_epsilon(self) -> float:

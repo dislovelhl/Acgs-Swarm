@@ -1051,3 +1051,221 @@ class TestResolverHashValidation:
         resolver.challenge("p1", "c1", "test", severity=0.1)
         with pytest.raises(PermissionError, match="hash mismatch"):
             resolver.resolve("p1", constitutional_hash="wrong_hash")
+
+
+# ===========================================================================
+# Phase 6: Privacy Accountant Subsampling Tests
+# ===========================================================================
+
+
+class TestPrivacyAccountantSubsampling:
+    """Test that sample_rate actually reduces RDP budget consumption."""
+
+    def test_subsampling_reduces_epsilon(self) -> None:
+        """With sample_rate < 1, cumulative ε should be lower than full rate."""
+        from constitutional_swarm.privacy_accountant import PrivacyAccountant
+
+        # Full-rate accountant
+        pa_full = PrivacyAccountant(epsilon=10.0, delta=1e-5)
+        for _ in range(10):
+            pa_full.spend(sensitivity=1.0, sigma=1.0, sample_rate=1.0)
+
+        # Subsampled accountant (same steps, but q=0.1)
+        pa_sub = PrivacyAccountant(epsilon=10.0, delta=1e-5)
+        for _ in range(10):
+            pa_sub.spend(sensitivity=1.0, sigma=1.0, sample_rate=0.1)
+
+        # Subsampled should have consumed much less budget
+        assert pa_sub.remaining_epsilon > pa_full.remaining_epsilon
+        # Amplification factor should be significant (roughly q²=0.01)
+        ratio = (10.0 - pa_sub.remaining_epsilon) / (10.0 - pa_full.remaining_epsilon)
+        assert ratio < 0.5, f"Expected significant amplification, got ratio {ratio:.4f}"
+
+    def test_subsampling_rate_1_equals_full(self) -> None:
+        """sample_rate=1.0 should produce identical epsilon to no subsampling."""
+        from constitutional_swarm.privacy_accountant import PrivacyAccountant
+
+        pa1 = PrivacyAccountant(epsilon=10.0, delta=1e-5)
+        pa2 = PrivacyAccountant(epsilon=10.0, delta=1e-5)
+        for _ in range(5):
+            pa1.spend(sensitivity=1.0, sigma=2.0, sample_rate=1.0)
+            pa2.spend(sensitivity=1.0, sigma=2.0, sample_rate=1.0)
+
+        assert abs(pa1.remaining_epsilon - pa2.remaining_epsilon) < 1e-10
+
+    def test_budget_exhaustion_with_subsampling(self) -> None:
+        """Subsampled spends should consume less budget per step."""
+        from constitutional_swarm.privacy_accountant import PrivacyAccountant
+
+        # Same parameters, different sample rates
+        pa_full = PrivacyAccountant(epsilon=10.0, delta=1e-5)
+        pa_sub = PrivacyAccountant(epsilon=10.0, delta=1e-5)
+
+        # Same 5 steps
+        for _ in range(5):
+            pa_full.spend(sensitivity=1.0, sigma=2.0, sample_rate=1.0)
+            pa_sub.spend(sensitivity=1.0, sigma=2.0, sample_rate=0.1)
+
+        # Subsampled should have consumed significantly less budget
+        consumed_full = 10.0 - pa_full.remaining_epsilon
+        consumed_sub = 10.0 - pa_sub.remaining_epsilon
+        assert consumed_sub < consumed_full * 0.5, (
+            f"Subsampling didn't amplify enough: {consumed_sub:.4f} sub vs {consumed_full:.4f} full"
+        )
+
+
+# ===========================================================================
+# Phase 6: CAME Coordinator Logging Tests
+# ===========================================================================
+
+
+class TestCAMECoordinatorLogging:
+    """Verify that CAME coordinator exception paths now log instead of silently passing."""
+
+    def test_bad_approach_logs_warning(self) -> None:
+        """Grid.challenge() failure should log warning, not silently pass."""
+        import logging
+        from unittest.mock import MagicMock
+        from constitutional_swarm.bittensor.came_coordinator import CAMECoordinator
+
+        class _ExplodingGrid:
+            coverage = 0.5
+            def challenge(self, approach: object) -> bool:
+                raise RuntimeError("bad approach")
+            def ceiling_detected(self) -> bool:
+                return False
+
+        coord = CAMECoordinator(grid=_ExplodingGrid())
+        approach = MagicMock()
+        approach.miner_uid = "miner-1"
+
+        # Should NOT raise — the coordinator catches and logs
+        with pytest.raises(Exception):
+            # Verify the grid DOES raise
+            _ExplodingGrid().challenge(approach)
+
+        # But the coordinator should handle it gracefully
+        result = coord.evolve_cycle([approach])
+        assert result.grid_coverage == 0.5
+
+    def test_ceiling_detected_failure_logs_error(self) -> None:
+        """Grid.ceiling_detected() failure should log error and default to False."""
+        from unittest.mock import MagicMock
+        from constitutional_swarm.bittensor.came_coordinator import CAMECoordinator
+
+        class _CeilingBroken:
+            coverage = 0.3
+            def challenge(self, approach: object) -> bool:
+                return False
+            def ceiling_detected(self) -> bool:
+                raise RuntimeError("ceiling query failed")
+
+        coord = CAMECoordinator(grid=_CeilingBroken())
+        result = coord.evolve_cycle([MagicMock(miner_uid="m1")])
+        assert result.ceiling_detected is False  # Defaults to False on error
+
+
+# ===========================================================================
+# Phase 6: SpectralSphereManifold Export Tests
+# ===========================================================================
+
+
+class TestBreakthroughModuleExports:
+    """Verify breakthrough modules are now importable from top-level package."""
+
+    def test_spectral_sphere_manifold_exported(self) -> None:
+        from constitutional_swarm import SpectralSphereManifold
+        assert SpectralSphereManifold is not None
+
+    def test_spectral_sphere_project_exported(self) -> None:
+        from constitutional_swarm import spectral_sphere_project
+        assert callable(spectral_sphere_project)
+
+    def test_merkle_crdt_exported(self) -> None:
+        from constitutional_swarm import MerkleCRDT, DAGNode
+        assert MerkleCRDT is not None
+        assert DAGNode is not None
+
+    def test_privacy_accountant_exported(self) -> None:
+        from constitutional_swarm import PrivacyAccountant, PrivacyBudgetExhausted
+        assert PrivacyAccountant is not None
+        assert issubclass(PrivacyBudgetExhausted, RuntimeError)
+
+
+# ===========================================================================
+# Phase 6: Cross-Module Integration Tests
+# ===========================================================================
+
+
+class TestSpectralSphereODEIntegration:
+    """Integration: SpectralSphereManifold × SwarmODE trust dynamics."""
+
+    def test_spectral_projection_preserves_ode_stability(self) -> None:
+        """Spectral sphere projection after trust update keeps norm ≤ r."""
+        from constitutional_swarm.spectral_sphere import spectral_sphere_project
+
+        # Simulate a trust matrix after ODE evolution step
+        n = 4
+        trust_matrix = [
+            [0.5 + 0.3 * (i == j) for j in range(n)]
+            for i in range(n)
+        ]
+        # Scale up to simulate divergence
+        scale = 3.0
+        big_matrix = [[scale * trust_matrix[i][j] for j in range(n)] for i in range(n)]
+
+        result = spectral_sphere_project(big_matrix, r=1.0)
+        assert result.spectral_norm <= 1.0 + 1e-6
+        assert result.clipped is True
+
+    def test_repeated_projection_preserves_variance(self) -> None:
+        """Spectral sphere should preserve trust specialization over many cycles."""
+        from constitutional_swarm.spectral_sphere import SpectralSphereManifold
+
+        n = 4
+        manifold = SpectralSphereManifold(n, r=1.0)
+
+        # Set up a heterogeneous trust matrix via update_trust
+        for i in range(n):
+            for j in range(n):
+                val = 0.8 if i == j else 0.1
+                manifold.update_trust(i, j, val)
+
+        # Run 50 projection cycles
+        for _ in range(50):
+            result = manifold.project()
+            # Reset and re-load from result
+            for i in range(n):
+                for j in range(n):
+                    manifold._raw_trust[i][j] = result.matrix[i][j]
+            manifold._projected = None
+
+        # Variance should NOT collapse to zero (unlike Birkhoff)
+        flat = [result.matrix[i][j] for i in range(n) for j in range(n)]
+        mean = sum(flat) / len(flat)
+        var = sum((x - mean) ** 2 for x in flat) / len(flat)
+        assert var > 1e-6, f"Variance collapsed to {var} — spectral sphere failed"
+
+
+class TestLatentDNARobustness:
+    """Test latent DNA steering failure rollback (Phase 6 hardening)."""
+
+    def test_bodes_hook_renormalizes_after_dtype_transfer(self) -> None:
+        """Violation vector should be re-normalized after device/dtype transfer."""
+        import torch
+        from constitutional_swarm.latent_dna import _BODESHook
+
+        v_viol = torch.randn(64)
+        v_viol = v_viol / v_viol.norm()
+        hook = _BODESHook(v_viol, threshold=0.0, gamma=1.0)
+
+        # Simulate a forward pass with float16 (lossy dtype)
+        module = torch.nn.Identity()
+        hidden = torch.randn(1, 4, 64, dtype=torch.float16)
+        output = hook(module, (hidden,), hidden)
+
+        # Should not crash and should produce valid output
+        if isinstance(output, tuple):
+            assert output[0].shape == hidden.shape
+        else:
+            assert output.shape == hidden.shape

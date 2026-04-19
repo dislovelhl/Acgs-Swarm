@@ -145,6 +145,10 @@ class _BODESHook:
         self.total_tokens += batch * seq_len
 
         v = self.v_viol.to(hidden.device, hidden.dtype)  # [hidden_dim]
+        # Re-normalize after dtype/device transfer to prevent precision drift
+        v_norm = v.norm()
+        if (v_norm - 1.0).abs() > 1e-5:
+            v = v / v_norm
 
         # Projection: [batch, seq_len]
         # proj[b, s] = hidden[b, s] · v_viol
@@ -158,17 +162,25 @@ class _BODESHook:
 
         if n_interventions > 0:
             # Orthogonal steering: h_safe = h - gamma * (h·v) * v
-            # proj_expanded: [batch, seq_len, 1]
-            proj_clamped = torch.where(mask, proj, torch.zeros_like(proj))
-            proj_expanded = proj_clamped.unsqueeze(-1)  # [batch, seq_len, 1]
-            v_expanded = v.unsqueeze(0).unsqueeze(0)    # [1, 1, hidden_dim]
+            # Wrapped in try/except for OOM/numerical safety — return
+            # original hidden state if steering fails.
+            try:
+                # proj_expanded: [batch, seq_len, 1]
+                proj_clamped = torch.where(mask, proj, torch.zeros_like(proj))
+                proj_expanded = proj_clamped.unsqueeze(-1)  # [batch, seq_len, 1]
+                v_expanded = v.unsqueeze(0).unsqueeze(0)    # [1, 1, hidden_dim]
 
-            # steering_delta: [batch, seq_len, hidden_dim]
-            steering_delta = self.gamma * proj_expanded * v_expanded
+                # steering_delta: [batch, seq_len, hidden_dim]
+                steering_delta = self.gamma * proj_expanded * v_expanded
 
-            # Only subtract where mask is True — preserves safe tokens exactly
-            mask_expanded = mask.unsqueeze(-1).expand_as(hidden)  # [batch, seq_len, hidden_dim]
-            hidden = torch.where(mask_expanded, hidden - steering_delta, hidden)
+                # Only subtract where mask is True — preserves safe tokens exactly
+                mask_expanded = mask.unsqueeze(-1).expand_as(hidden)  # [batch, seq_len, hidden_dim]
+                hidden = torch.where(mask_expanded, hidden - steering_delta, hidden)
+            except (RuntimeError, torch.cuda.OutOfMemoryError):
+                # Steering failed (OOM or numerical) — fail open to preserve
+                # model functionality. The downstream AgentDNA.validate layer
+                # will catch any violations that survive.
+                pass
 
         if rest is None:
             return hidden

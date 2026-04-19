@@ -76,6 +76,13 @@ from constitutional_swarm.debate_resolver import (
     VerdictOutcome,
 )
 from constitutional_swarm.mac_acgs_loop import MacAcgsConfig, MacAcgsCycleResult, MacAcgsLoop
+from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT
+from constitutional_swarm.privacy_accountant import PrivacyAccountant, PrivacyBudgetExhausted
+from constitutional_swarm.spectral_sphere import (
+    SpectralProjectionResult,
+    SpectralSphereManifold,
+    spectral_sphere_project,
+)
 from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
 
 __all__ = [
@@ -91,6 +98,7 @@ __all__ = [
     "ContractStatus",
     "CredentialStatus",
     "DAGCompiler",
+    "DAGNode",
     "DNADisabledError",
     "DashboardRow",
     "DebateRecord",
@@ -115,6 +123,7 @@ __all__ = [
     "MacAcgsCycleResult",
     "MacAcgsLoop",
     "ManifoldProjectionResult",
+    "MerkleCRDT",
     "MeshHaltedError",
     "MeshProof",
     "MeshResult",
@@ -122,6 +131,8 @@ __all__ = [
     "MutationBlockedError",
     "NonIncreasingValueError",
     "PeerAssignment",
+    "PrivacyAccountant",
+    "PrivacyBudgetExhausted",
     "RegressionRecord",
     "RemoteVoteClient",
     "RemoteVoteRequest",
@@ -131,6 +142,8 @@ __all__ = [
     "SettlementPersistenceError",
     "SettlementRecord",
     "SettlementStore",
+    "SpectralProjectionResult",
+    "SpectralSphereManifold",
     "SwarmBenchmark",
     "SwarmExecutor",
     "TaskContract",
@@ -141,4 +154,5 @@ __all__ = [
     "WorkReceipt",
     "constitutional_dna",
     "sinkhorn_knopp",
+    "spectral_sphere_project",
 ]
