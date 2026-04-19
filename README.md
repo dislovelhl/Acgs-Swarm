@@ -1,5 +1,7 @@
 # constitutional-swarm
 
+<img width="1280" height="640" alt="acgswarm" src="https://github.com/user-attachments/assets/dbc67c5d-2d46-4125-81ea-cfd5457b1c5a" />
+
 [![PyPI](https://img.shields.io/pypi/v/constitutional-swarm)](https://pypi.org/project/constitutional-swarm/)
 [![Python](https://img.shields.io/pypi/pyversions/constitutional-swarm)](https://pypi.org/project/constitutional-swarm/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
