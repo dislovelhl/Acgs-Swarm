@@ -111,6 +111,10 @@ class RemoteVoteClient:
         timeout: float = 5.0,
         ssl_context: ssl.SSLContext | None = None,
     ) -> RemoteVoteResponse:
+        is_local = host in {"127.0.0.1", "localhost", "::1"}
+        if ssl_context is None and not is_local:
+            raise ValueError("Non-local remote vote transport requires TLS ssl_context")
+
         try:
             import websockets  # type: ignore[import]
         except ImportError as exc:
@@ -119,9 +123,6 @@ class RemoteVoteClient:
                 "Install with: pip install 'constitutional-swarm[transport]'"
             ) from exc
 
-        is_local = host in {"127.0.0.1", "localhost", "::1"}
-        if ssl_context is None and not is_local:
-            raise ValueError("Non-local remote vote transport requires TLS ssl_context")
         uri = f"{'wss' if ssl_context is not None else 'ws'}://{host}:{port}"
         async with asyncio.timeout(timeout):
             async with websockets.connect(uri, ssl=ssl_context) as ws:
