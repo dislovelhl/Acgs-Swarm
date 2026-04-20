@@ -173,7 +173,6 @@ def test_harness_apply_failure_falls_back_to_3way(tmp_path) -> None:
 
 
 def test_harness_apply_falls_back_to_recount(tmp_path) -> None:
-    """Codex-generated patches often have wrong hunk line counts; --recount fixes that."""
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
@@ -192,6 +191,32 @@ def test_harness_apply_falls_back_to_recount(tmp_path) -> None:
     assert result.resolved is True
 
 
+def test_harness_apply_falls_back_to_patch1(tmp_path) -> None:
+    """When all `git apply` variants fail (context drift), patch(1) with fuzz saves us."""
+    harness = LocalSWEBenchHarness(work_dir=tmp_path)
+    runner = _FakeRunner(
+        [
+            (["clone", "https://github.com"], 0, ""),
+            (["clone", "--no-hardlinks"], 0, ""),
+            (["checkout", "--detach"], 0, ""),
+            (["apply", "--index"], 1, "error: patch failed"),
+            (["apply", "--index", "--recount"], 1, "error: patch failed"),
+            (["apply", "--3way"], 1, "error: patch failed"),
+            (["patch", "-p1", "--forward", "--fuzz=3"], 0, "patching file foo.py\n"),
+            (["git", "add", "-A"], 0, ""),
+            (["pytest", "test_thing"], 0, "== 1 passed in 0.01s =="),
+            (["pytest", "test_other"], 0, "== 1 passed in 0.01s =="),
+        ]
+    )
+    with patch("subprocess.run", side_effect=runner), patch(
+        "constitutional_swarm.swe_bench.local_harness.shutil.which",
+        return_value="/usr/bin/patch",
+    ):
+        result = harness.evaluate(_INSTANCE, patch=_PATCH)
+    assert result.applied is True
+    assert result.resolved is True
+
+
 def test_harness_apply_failure_reports_cleanly(tmp_path) -> None:
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
@@ -202,6 +227,7 @@ def test_harness_apply_failure_reports_cleanly(tmp_path) -> None:
             (["apply", "--index"], 1, "rej1"),
             (["apply", "--index", "--recount"], 1, "rej_recount"),
             (["apply", "--3way"], 1, "rej2"),
+            (["patch", "-p1"], 1, "patch1 rejected"),
         ]
     )
     with patch("subprocess.run", side_effect=runner):

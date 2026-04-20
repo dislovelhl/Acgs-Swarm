@@ -240,7 +240,9 @@ class LocalSWEBenchHarness:
 
     def _apply_patch(self, worktree: Path, patch: str, result: HarnessResult) -> None:
         result.stage = "apply"
-        # Strict first; then --recount (fix LLM hunk-count errors); then --3way.
+        # Strict → --recount (fix LLM hunk-count errors) → 3-way → patch(1) with
+        # fuzz (tolerant of LLM context drift, if `patch` is installed). After a
+        # successful `patch`, stage changes so downstream git tooling sees them.
         out = ""
         for flags in (["--index"], ["--index", "--recount"], ["--3way", "--recount"]):
             rc, out = _run(
@@ -251,6 +253,18 @@ class LocalSWEBenchHarness:
             if rc == 0:
                 result.applied = True
                 return
+        if shutil.which("patch"):
+            rc, out2 = _run(
+                ["patch", "-p1", "--forward", "--fuzz=3", "--no-backup-if-mismatch"],
+                cwd=worktree,
+                input_text=patch,
+                timeout=self.timeout_s,
+            )
+            if rc == 0:
+                _run(["git", "-C", str(worktree), "add", "-A"], timeout=self.timeout_s)
+                result.applied = True
+                return
+            out = out + "\n---patch(1)---\n" + out2
         result.applied = False
         result.error = "patch did not apply"
         result.log_tail = out[-2000:]
