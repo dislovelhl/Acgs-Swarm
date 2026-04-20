@@ -807,7 +807,7 @@ class TestDebateResolverMinSeverity:
     def test_severity_below_min_raises(self) -> None:
         resolver = DebateResolver()
         resolver.propose("p1", "m1", "safety", "C")
-        with pytest.raises(ValueError, match="severity must be >= 0.05"):
+        with pytest.raises(ValueError, match=r"severity must be >= 0\.05"):
             resolver.challenge("p1", "v1", "trivial", severity=0.01)
 
 

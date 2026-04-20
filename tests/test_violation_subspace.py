@@ -334,8 +334,10 @@ class TestAdversarialScore:
             [sub2.steer(u, gamma=1.0, tau=0.0) for u in unsafe]
         )
         # Measure residual projection along each individual mode axis
-        mode_a = np.zeros(d); mode_a[3] = 1.0
-        mode_b = np.zeros(d); mode_b[7] = 1.0
+        mode_a = np.zeros(d)
+        mode_a[3] = 1.0
+        mode_b = np.zeros(d)
+        mode_b[7] = 1.0
         # Rank-2 subspace should reduce projection along BOTH modes
         # Rank-1 can only reduce one. The sum of post-steer
         # positive projections along mode_a and mode_b should be

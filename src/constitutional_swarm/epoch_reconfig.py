@@ -37,8 +37,8 @@ without a bittensor runtime.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 __all__ = [
     "AmendmentProposal",

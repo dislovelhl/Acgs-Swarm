@@ -22,16 +22,16 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from constitutional_swarm.latent_dna import _BODESHook  # noqa: E402
+from constitutional_swarm.latent_dna import _BODESHook
 
 
-def _random_unit(dim: int, seed: int) -> "torch.Tensor":
+def _random_unit(dim: int, seed: int) -> torch.Tensor:
     gen = torch.Generator().manual_seed(seed)
     v = torch.randn(dim, generator=gen)
     return v / v.norm()
 
 
-def _run_hook(hidden: "torch.Tensor", v: "torch.Tensor", gamma: float, tau: float) -> "torch.Tensor":
+def _run_hook(hidden: torch.Tensor, v: torch.Tensor, gamma: float, tau: float) -> torch.Tensor:
     hook = _BODESHook(v_viol=v, threshold=tau, gamma=gamma)
     return hook(module=None, input=(), output=hidden)
 

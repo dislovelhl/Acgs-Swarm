@@ -76,13 +76,12 @@ def cmd_miner(args: argparse.Namespace) -> None:
     """Start a constitutional governance miner on testnet."""
     _check_bittensor()
     import asyncio
+    import os
 
     import bittensor as bt
     from constitutional_swarm.bittensor.axon_server import MinerAxonServer
     from constitutional_swarm.bittensor.miner import ConstitutionalMiner
     from constitutional_swarm.bittensor.protocol import MinerConfig
-
-    import os
 
     if not os.path.exists(args.constitution):
         print(f"ERROR: Constitution file not found: {args.constitution}")
@@ -171,6 +170,7 @@ def cmd_validator(args: argparse.Namespace) -> None:
     """Start a constitutional governance validator on testnet."""
     _check_bittensor()
     import asyncio
+    import os
     import time
 
     import bittensor as bt
@@ -182,8 +182,6 @@ def cmd_validator(args: argparse.Namespace) -> None:
         deliberation_to_bt,
     )
     from constitutional_swarm.bittensor.validator import ConstitutionalValidator
-
-    import os
 
     if not os.path.exists(args.constitution):
         print(f"ERROR: Constitution file not found: {args.constitution}")

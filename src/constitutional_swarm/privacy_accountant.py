@@ -35,8 +35,8 @@ from __future__ import annotations
 
 import math
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Sequence
 
 
 class PrivacyBudgetExhausted(RuntimeError):
@@ -118,7 +118,7 @@ def _rdp_to_epsilon_balle2020(
     """
     best_eps = math.inf
     best_alpha = alphas[0]
-    for a, r in zip(alphas, rdp_values):
+    for a, r in zip(alphas, rdp_values, strict=False):
         if a <= 1.01:
             continue
         try:

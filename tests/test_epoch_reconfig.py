@@ -159,7 +159,7 @@ class TestTransitionCertificate:
         v0 = _v(0, ("a",))
         # Add many rules in one step to blow the default budget (16).
         many = tuple(f"rule{i}" for i in range(20))
-        v1 = _v(1, tuple(sorted(("a",) + many)), parent=v0.digest)
+        v1 = _v(1, tuple(sorted(("a", *many))), parent=v0.digest)
         proposal = AmendmentProposal(
             prior=v0,
             proposed=v1,
@@ -182,7 +182,7 @@ class TestTransitionCertificate:
     def test_drift_budget_is_checked_before_quorum(self) -> None:
         v0 = _v(0, ("a",))
         many = tuple(f"rule{i}" for i in range(20))
-        v1 = _v(1, tuple(sorted(("a",) + many)), parent=v0.digest)
+        v1 = _v(1, tuple(sorted(("a", *many))), parent=v0.digest)
         proposal = AmendmentProposal(
             prior=v0,
             proposed=v1,

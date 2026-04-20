@@ -62,7 +62,7 @@ import json
 import secrets
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from cryptography.exceptions import InvalidSignature
@@ -99,7 +99,7 @@ _V2_VERSION = 2
 _SUPPORTED_VERSIONS: frozenset[int] = frozenset({_RECORD_VERSION, _V2_VERSION})
 
 
-class BallotChoice(str, Enum):
+class BallotChoice(StrEnum):
     """Canonical ballot choices. Extend cautiously — domain is part
     of the commit digest, so adding a choice changes every commit."""
 

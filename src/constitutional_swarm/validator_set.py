@@ -34,16 +34,16 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
 
 __all__ = [
-    "ValidatorIdentity",
-    "FaultDomainPolicy",
-    "ValidatorSet",
-    "CommitteeSelector",
-    "SybilBoundViolation",
     "CommitteeSelection",
+    "CommitteeSelector",
+    "FaultDomainPolicy",
+    "SybilBoundViolation",
+    "ValidatorIdentity",
+    "ValidatorSet",
 ]
 
 
@@ -280,7 +280,7 @@ class CommitteeSelector:
         if weight <= 0:
             return float("inf")
         digest = hashlib.sha256(
-            f"{seed}\x00{agent_id}".encode("utf-8")
+            f"{seed}\x00{agent_id}".encode()
         ).digest()
         # Uniform in (0, 1] — avoid 0 to keep log defined
         raw = int.from_bytes(digest[:8], "big") + 1

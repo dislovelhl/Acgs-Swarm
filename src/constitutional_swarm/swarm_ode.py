@@ -416,7 +416,7 @@ class DiscreteGaussianSampler:
         """Draw n independent samples."""
         return [self.sample() for _ in range(n)]
 
-    def sample_tensor(self, shape: tuple[int, ...]) -> "Tensor":
+    def sample_tensor(self, shape: tuple[int, ...]) -> Tensor:
         """Draw samples into a torch Tensor of the given shape (float32)."""
         total = 1
         for s in shape:
@@ -428,7 +428,7 @@ class DiscreteGaussianSampler:
         self,
         shape: tuple[int, ...],
         sensitivity: float = 1.0,
-    ) -> "Tensor":
+    ) -> Tensor:
         """Add sensitivity-scaled discrete Gaussian noise to a zero tensor.
 
         Equivalent to continuous Gaussian but with integer-valued output.

@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -38,11 +39,11 @@ from constitutional_swarm.validator_set import (
 )
 
 __all__ = [
-    "SignedVote",
-    "QuorumCertificate",
     "ConflictEvidence",
     "InsufficientQuorumError",
     "InvalidCertificateError",
+    "QuorumCertificate",
+    "SignedVote",
     "build_certificate",
     "detect_conflict",
     "verify_certificate",
@@ -176,7 +177,7 @@ class QuorumCertificate:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "QuorumCertificate":
+    def from_dict(cls, data: Mapping[str, Any]) -> QuorumCertificate:
         """Inverse of :meth:`to_dict`."""
         assignment_id = data["assignment_id"]
         artifact_hash = data["artifact_hash"]

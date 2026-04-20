@@ -127,7 +127,7 @@ class SWEBenchAgent:
                 duration_s=time.monotonic() - t0,
                 metadata={"error": "timeout"},
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             err_id = uuid.uuid4().hex[:12]
             _log.error("solve failed [%s]: %s", err_id, exc, exc_info=True)
             return SWEPatch(

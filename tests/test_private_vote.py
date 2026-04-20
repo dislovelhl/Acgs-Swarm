@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
 from constitutional_swarm.private_vote import (
     BallotChoice,
     CommitRecord,
@@ -19,6 +17,7 @@ from constitutional_swarm.private_vote import (
     compute_nullifier,
     tally,
 )
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 EPOCH = bytes.fromhex("00" * 16)
 SUBJECT = bytes.fromhex("11" * 16)
@@ -188,7 +187,7 @@ class TestBallotBox:
 
     def test_tampered_reveal_rejected(self):
         box = self._fresh()
-        c, r, sk = self._voter(box, BallotChoice.YEA, b"s1")
+        _, r, _ = self._voter(box, BallotChoice.YEA, b"s1")
         box.close_commit_phase()
         # Swap the choice in the reveal (signature will not match)
         forged = RevealRecord(
@@ -263,7 +262,7 @@ class TestTallyFunction:
 
     def test_reveal_opens_wrong_commit_rejected(self):
         sk = _kp()
-        c, r = build_commit(
+        c, _ = build_commit(
             voter_private_key=sk, voter_secret=b"s1",
             epoch=EPOCH, subject=SUBJECT, choice=BallotChoice.YEA,
         )

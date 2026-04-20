@@ -157,7 +157,7 @@ def _verify_one(c: Citation, timeout: float) -> Citation:
         # e.reason may include filesystem paths on some platforms — log only
         # the type to avoid leaking /etc/resolv.conf style details in CI logs.
         c.error = f"URLError: {type(e.reason).__name__}"
-    except Exception as e:  # noqa: BLE001 — intentional catch-all for transport faults
+    except Exception as e:
         # Log only the exception TYPE — str(e) may include sensitive paths.
         c.error = type(e).__name__
     return c

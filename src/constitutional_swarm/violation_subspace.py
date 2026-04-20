@@ -35,19 +35,19 @@ References
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 import numpy as np
 
 __all__ = [
-    "ViolationSubspace",
-    "fit_subspace",
-    "fit_leace",
-    "RiskAdaptiveSteering",
-    "adversarial_score",
-    "InsufficientSamplesError",
     "DimensionMismatchError",
+    "InsufficientSamplesError",
+    "RiskAdaptiveSteering",
+    "ViolationSubspace",
+    "adversarial_score",
+    "fit_leace",
+    "fit_subspace",
 ]
 
 

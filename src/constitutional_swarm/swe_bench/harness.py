@@ -81,7 +81,7 @@ def load_swe_bench_lite(
         return tasks
     except ImportError:
         pass
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("swebench load failed: %s", type(exc).__name__)
 
     # Strategy 3: empty fallback

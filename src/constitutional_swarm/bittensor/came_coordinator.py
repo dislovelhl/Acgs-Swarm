@@ -27,9 +27,8 @@ the evolution loop.
 from __future__ import annotations
 
 import logging
-import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -54,7 +53,6 @@ except ImportError:  # pragma: no cover
     EvolutionLog = None  # type: ignore[assignment,misc]
 
 from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
-
 
 # ---------------------------------------------------------------------------
 # Public result / config dataclasses
@@ -199,7 +197,6 @@ class CAMECoordinator:
             cycle.
         """
         self._cycle += 1
-        t_start = time.monotonic()
 
         # 1. Submit all approaches to the grid ---------------------------------
         improved_count = 0
@@ -214,7 +211,7 @@ class CAMECoordinator:
                     uid = getattr(approach, "miner_uid", None)
                     if uid is not None:
                         seen_uids.add(uid)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.warning("Grid rejected approach miner_uid=%s", getattr(approach, "miner_uid", "?"), exc_info=True)
 
         # 2. Read grid stats ---------------------------------------------------
@@ -229,7 +226,7 @@ class CAMECoordinator:
             if hasattr(self._grid, "ceiling_detected"):
                 try:
                     ceiling = bool(self._grid.ceiling_detected())
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.error("ceiling_detected() query failed", exc_info=True)
                     ceiling = False
 
@@ -241,7 +238,7 @@ class CAMECoordinator:
             for uid in seen_uids:
                 try:
                     bonus += self._grid.exploration_bonus(uid)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.debug("exploration_bonus(%s) failed", uid, exc_info=True)
 
         # 4. Trigger rule codification when ceiling detected --------------------
@@ -265,7 +262,7 @@ class CAMECoordinator:
                     rules_proposed = self._codifier.propose_rules(live_approaches)
                 elif hasattr(self._codifier, "codify"):
                     rules_proposed = self._codifier.codify(live_approaches) or []
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.error("Rule codification failed at cycle %d", self._cycle, exc_info=True)
             # Reset cooldown unconditionally so it starts even on empty proposals.
             self._last_codification_cycle = self._cycle
@@ -291,7 +288,7 @@ class CAMECoordinator:
         if self._grid is not None and hasattr(self._grid, "summary"):
             try:
                 grid_summary = self._grid.summary()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug("Grid summary unavailable", exc_info=True)
 
         return {
@@ -314,7 +311,7 @@ class CAMECoordinator:
         if self._owns_log and self._log is not None and hasattr(self._log, "close"):
             try:
                 self._log.close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("EvolutionLog.close() failed", exc_info=True)
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -361,7 +358,7 @@ class CAMECoordinator:
                     self._log.record(next_epoch, metric, value)
                     self._log_state[metric] = (next_epoch, value)
                     entries_written += 1
-            except Exception as exc:  # noqa: BLE001
+            except Exception:
                 logger.error("Log write failed (cycle=%d, metric=%s)", self._cycle, metric, exc_info=True)
                 last_error = f"{self._cycle}:{uuid.uuid4().hex[:8]}"
 

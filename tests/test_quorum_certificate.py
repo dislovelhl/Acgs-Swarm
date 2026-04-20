@@ -436,7 +436,7 @@ class TestBuildCertificate:
             build_certificate([], committee=committee, validator_set=vs)
 
     def test_non_committee_voter_rejected(self):
-        vs, committee, votes, sks, pks = _make_committee_and_votes()
+        vs, committee, votes, _, _ = _make_committee_and_votes()
         # Add a rogue validator not in committee
         rogue_ident, rogue_sk, rogue_pk = _make_validator("rogue")
         vs.add(rogue_ident)
