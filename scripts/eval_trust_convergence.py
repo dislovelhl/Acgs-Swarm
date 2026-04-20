@@ -127,7 +127,9 @@ def main() -> int:
     seeds = [args.seed] if args.seed is not None else [int(s) for s in args.seeds.split(",") if s.strip()]
     runs = [run(s, args.agents, args.steps, args.tol) for s in seeds]
     mean_score = sum(r["score"] for r in runs) / len(runs)
+    all_stable = all(r["is_stable"] for r in runs)
     print(json.dumps({
+        "pass": bool(all_stable),
         "score": mean_score,
         "per_seed": runs,
         "seeds": seeds,
