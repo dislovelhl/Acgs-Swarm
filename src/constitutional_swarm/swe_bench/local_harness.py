@@ -193,8 +193,10 @@ class LocalSWEBenchHarness:
         cache = self.repo_cache_dir / _safe_id(repo)
         url = f"https://github.com/{repo}.git"
         if not cache.exists():
+            # Full clone (not --filter=blob:none) so the --shared worktree below
+            # has all blobs available for `git apply --index` / --3way merges.
             rc, out = _run(
-                ["git", "clone", "--filter=blob:none", url, str(cache)],
+                ["git", "clone", url, str(cache)],
                 timeout=self.timeout_s,
             )
             if rc != 0:
@@ -238,8 +240,9 @@ class LocalSWEBenchHarness:
 
     def _apply_patch(self, worktree: Path, patch: str, result: HarnessResult) -> None:
         result.stage = "apply"
-        # Try strict apply first, then fall back to 3-way.
-        for flags in (["--index"], ["--3way"]):
+        # Strict first; then --recount (fix LLM hunk-count errors); then --3way.
+        out = ""
+        for flags in (["--index"], ["--index", "--recount"], ["--3way", "--recount"]):
             rc, out = _run(
                 ["git", "-C", str(worktree), "apply", *flags, "-"],
                 input_text=patch,

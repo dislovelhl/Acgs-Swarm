@@ -68,6 +68,8 @@ def _evaluate_one(
         "pass_to_pass_failed": harness_result.pass_to_pass_failed,
         "stage": harness_result.stage,
         "error": harness_result.error,
+        "log_tail": harness_result.log_tail,
+        "patch": patch_result.patch,
         "duration_s": patch_result.duration_s + harness_result.duration_s,
     }
 

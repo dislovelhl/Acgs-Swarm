@@ -116,7 +116,7 @@ def test_harness_resolves_when_all_tests_pass(tmp_path) -> None:
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
-            (["clone", "--filter=blob:none"], 0, ""),
+            (["clone", "https://github.com"], 0, ""),
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 0, ""),
             (["apply", "--index"], 0, ""),
@@ -138,7 +138,7 @@ def test_harness_not_resolved_when_fail_to_pass_still_failing(tmp_path) -> None:
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
-            (["clone", "--filter=blob:none"], 0, ""),
+            (["clone", "https://github.com"], 0, ""),
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 0, ""),
             (["apply", "--index"], 0, ""),
@@ -157,7 +157,7 @@ def test_harness_apply_failure_falls_back_to_3way(tmp_path) -> None:
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
-            (["clone", "--filter=blob:none"], 0, ""),
+            (["clone", "https://github.com"], 0, ""),
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 0, ""),
             (["apply", "--index"], 1, "strict apply rejected"),
@@ -172,14 +172,35 @@ def test_harness_apply_failure_falls_back_to_3way(tmp_path) -> None:
     assert result.resolved is True
 
 
+def test_harness_apply_falls_back_to_recount(tmp_path) -> None:
+    """Codex-generated patches often have wrong hunk line counts; --recount fixes that."""
+    harness = LocalSWEBenchHarness(work_dir=tmp_path)
+    runner = _FakeRunner(
+        [
+            (["clone", "https://github.com"], 0, ""),
+            (["clone", "--no-hardlinks"], 0, ""),
+            (["checkout", "--detach"], 0, ""),
+            (["apply", "--index"], 1, "error: corrupt patch at line 11"),
+            (["apply", "--index", "--recount"], 0, ""),
+            (["pytest", "test_thing"], 0, "== 1 passed in 0.01s =="),
+            (["pytest", "test_other"], 0, "== 1 passed in 0.01s =="),
+        ]
+    )
+    with patch("subprocess.run", side_effect=runner):
+        result = harness.evaluate(_INSTANCE, patch=_PATCH)
+    assert result.applied is True
+    assert result.resolved is True
+
+
 def test_harness_apply_failure_reports_cleanly(tmp_path) -> None:
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
-            (["clone", "--filter=blob:none"], 0, ""),
+            (["clone", "https://github.com"], 0, ""),
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 0, ""),
             (["apply", "--index"], 1, "rej1"),
+            (["apply", "--index", "--recount"], 1, "rej_recount"),
             (["apply", "--3way"], 1, "rej2"),
         ]
     )
@@ -195,7 +216,7 @@ def test_harness_env_error_counts_requested_tests_as_failed(tmp_path) -> None:
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
-            (["clone", "--filter=blob:none"], 0, ""),
+            (["clone", "https://github.com"], 0, ""),
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 0, ""),
             (["apply", "--index"], 0, ""),
@@ -215,7 +236,7 @@ def test_harness_checkout_retries_after_fetching_commit(tmp_path) -> None:
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
-            (["clone", "--filter=blob:none"], 0, ""),
+            (["clone", "https://github.com"], 0, ""),
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 1, "unknown revision"),
             (["fetch", "origin", "deadbeef"], 0, ""),
@@ -235,7 +256,7 @@ def test_harness_clone_failure_stops_pipeline(tmp_path) -> None:
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
-            (["clone", "--filter=blob:none"], 128, "fatal: repository not found"),
+            (["clone", "https://github.com"], 128, "fatal: repository not found"),
         ]
     )
     with patch("subprocess.run", side_effect=runner):
