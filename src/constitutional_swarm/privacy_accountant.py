@@ -65,9 +65,7 @@ def _rdp_gaussian(alpha: float, noise_multiplier: float) -> float:
     return alpha / (2.0 * noise_multiplier**2)
 
 
-def _rdp_subsampled_gaussian(
-    alpha: float, noise_multiplier: float, sample_rate: float
-) -> float:
+def _rdp_subsampled_gaussian(alpha: float, noise_multiplier: float, sample_rate: float) -> float:
     """RDP for the subsampled Gaussian mechanism (Mironov, Talwar, Zhang 2019).
 
     Uses the analytic upper bound: for Poisson subsampling at rate q,

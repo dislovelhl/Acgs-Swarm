@@ -41,8 +41,8 @@ class VerdictOutcome(Enum):
 
     APPROVED = "approved"
     REJECTED = "rejected"
-    ESCALATED = "escalated"   # requires human review
-    DEADLOCK = "deadlock"     # no quorum reached
+    ESCALATED = "escalated"  # requires human review
+    DEADLOCK = "deadlock"  # no quorum reached
 
 
 class DebateRole(Enum):
@@ -331,7 +331,9 @@ class DebateResolver:
             raise KeyError(f"Proposal {proposal_id!r} not found")
         record = self._records[proposal_id]
         if record.verdict is not None:
-            raise RuntimeError(f"Proposal {proposal_id!r} is already resolved; cannot add challenges")
+            raise RuntimeError(
+                f"Proposal {proposal_id!r} is already resolved; cannot add challenges"
+            )
         if not 0.0 <= severity <= 1.0:
             raise ValueError(f"severity must be in [0, 1], got {severity}")
         if severity < self._MIN_SEVERITY:
@@ -469,9 +471,7 @@ class DebateResolver:
             f"Approval score: {score:.3f} (threshold: {self._approval_threshold}).",
         ]
         if record.defenses and record.defenses[-1].concession:
-            reasoning_parts.append(
-                f"Proposer concession: {record.defenses[-1].concession}"
-            )
+            reasoning_parts.append(f"Proposer concession: {record.defenses[-1].concession}")
 
         verdict = FinalVerdict(
             proposal_id=proposal_id,
@@ -502,19 +502,11 @@ class DebateResolver:
         """Summary of all debates managed by this resolver."""
         total = len(self._records)
         resolved = len(self.resolved_proposals())
-        verdicts = [
-            rec.verdict
-            for rec in self._records.values()
-            if rec.verdict is not None
-        ]
+        verdicts = [rec.verdict for rec in self._records.values() if rec.verdict is not None]
         outcome_counts = {o.value: 0 for o in VerdictOutcome}
         for v in verdicts:
             outcome_counts[v.outcome.value] += 1
-        avg_score = (
-            sum(v.approval_score for v in verdicts) / len(verdicts)
-            if verdicts
-            else 0.0
-        )
+        avg_score = sum(v.approval_score for v in verdicts) / len(verdicts) if verdicts else 0.0
         return {
             "total_proposals": total,
             "open": total - resolved,
@@ -525,8 +517,4 @@ class DebateResolver:
         }
 
     def __repr__(self) -> str:
-        return (
-            f"DebateResolver("
-            f"proposals={len(self._records)}, "
-            f"open={len(self.open_proposals())})"
-        )
+        return f"DebateResolver(proposals={len(self._records)}, open={len(self.open_proposals())})"

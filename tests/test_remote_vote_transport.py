@@ -217,18 +217,21 @@ class TestDecodeRemoteVoteRequestErrors:
         with pytest.raises(ValueError, match="expected object, got"):
             decode_remote_vote_request('"just a string"')
 
-    @pytest.mark.parametrize("missing_field", [
-        "assignment_id",
-        "voter_id",
-        "producer_id",
-        "artifact_id",
-        "content",
-        "content_hash",
-        "constitutional_hash",
-        "voter_public_key",
-        "request_signer_public_key",
-        "request_signature",
-    ])
+    @pytest.mark.parametrize(
+        "missing_field",
+        [
+            "assignment_id",
+            "voter_id",
+            "producer_id",
+            "artifact_id",
+            "content",
+            "content_hash",
+            "constitutional_hash",
+            "voter_public_key",
+            "request_signer_public_key",
+            "request_signature",
+        ],
+    )
     def test_missing_required_field(self, missing_field: str) -> None:
         full_payload = {
             "assignment_id": "a",
@@ -244,6 +247,7 @@ class TestDecodeRemoteVoteRequestErrors:
         }
         del full_payload[missing_field]
         import json
+
         with pytest.raises(ValueError, match=f"missing {missing_field}"):
             decode_remote_vote_request(json.dumps(full_payload))
 
@@ -261,6 +265,7 @@ class TestDecodeRemoteVoteResponseErrors:
 
     def test_missing_required_field(self) -> None:
         import json
+
         payload = {
             "assignment_id": "a",
             "voter_id": "v",

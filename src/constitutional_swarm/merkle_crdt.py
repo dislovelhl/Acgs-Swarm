@@ -287,9 +287,7 @@ class MerkleCRDT:
             # Count how many of this node's parents exist in our DAG
             in_degree[node.cid] = sum(1 for p in node.parent_cids if p in nodes)
 
-        queue = sorted(
-            [cid for cid, deg in in_degree.items() if deg == 0]
-        )
+        queue = sorted([cid for cid, deg in in_degree.items() if deg == 0])
         result: list[DAGNode] = []
 
         while queue:

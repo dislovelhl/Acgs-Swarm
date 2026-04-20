@@ -77,9 +77,7 @@ class SignedVote:
 
     def message(self) -> bytes:
         """Canonical signable message for this vote."""
-        return build_vote_message(
-            self.assignment_id, self.artifact_hash, self.epoch
-        )
+        return build_vote_message(self.assignment_id, self.artifact_hash, self.epoch)
 
     def verify(self) -> bool:
         """Verify the Ed25519 signature. Returns False on any failure."""
@@ -91,9 +89,7 @@ class SignedVote:
             return False
 
 
-def build_vote_message(
-    assignment_id: str, artifact_hash: str, epoch: int
-) -> bytes:
+def build_vote_message(assignment_id: str, artifact_hash: str, epoch: int) -> bytes:
     """Canonical signable message.
 
     Domain-separated: the ``"cs-qc-v1"`` prefix prevents replay of
@@ -107,9 +103,7 @@ def build_vote_message(
         "artifact_hash": artifact_hash,
         "epoch": int(epoch),
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -268,23 +262,15 @@ def build_certificate(
     for v in vote_list:
         if v.voter_id in seen:
             continue
-        if (
-            v.assignment_id != assignment_id
-            or v.artifact_hash != artifact_hash
-            or v.epoch != epoch
-        ):
+        if v.assignment_id != assignment_id or v.artifact_hash != artifact_hash or v.epoch != epoch:
             raise InvalidCertificateError(
                 f"vote from {v.voter_id!r} does not match certificate subject "
                 f"(assignment/artifact/epoch mismatch)"
             )
         if v.voter_id not in committee_ids:
-            raise InvalidCertificateError(
-                f"voter {v.voter_id!r} is not a member of the committee"
-            )
+            raise InvalidCertificateError(f"voter {v.voter_id!r} is not a member of the committee")
         if not v.verify():
-            raise InvalidCertificateError(
-                f"signature from {v.voter_id!r} failed to verify"
-            )
+            raise InvalidCertificateError(f"signature from {v.voter_id!r} failed to verify")
         seen.add(v.voter_id)
         ordered_votes.append(v)
 
@@ -298,13 +284,9 @@ def build_certificate(
     for sv in ordered_votes:
         ident = validator_set.get(sv.voter_id)
         if ident is None:
-            raise InvalidCertificateError(
-                f"voter {sv.voter_id!r} is not in validator set"
-            )
+            raise InvalidCertificateError(f"voter {sv.voter_id!r} is not in validator set")
         domain = policy.resolve_domain(ident)
-        per_domain_raw[domain] = (
-            per_domain_raw.get(domain, 0.0) + ident.effective_weight
-        )
+        per_domain_raw[domain] = per_domain_raw.get(domain, 0.0) + ident.effective_weight
     achieved_weight = sum(min(w, ceiling) for w in per_domain_raw.values())
 
     threshold_weight = threshold_fraction * raw_committee_weight
@@ -357,9 +339,7 @@ def verify_certificate(
     per_domain: dict[str, float] = {}
     for sv in qc.votes:
         if sv.voter_id in seen_voters:
-            raise InvalidCertificateError(
-                f"duplicate voter {sv.voter_id!r} in QC"
-            )
+            raise InvalidCertificateError(f"duplicate voter {sv.voter_id!r} in QC")
         if (
             sv.assignment_id != qc.assignment_id
             or sv.artifact_hash != qc.artifact_hash
@@ -367,14 +347,10 @@ def verify_certificate(
         ):
             raise InvalidCertificateError("vote/QC subject mismatch")
         if not sv.verify():
-            raise InvalidCertificateError(
-                f"signature from {sv.voter_id!r} failed"
-            )
+            raise InvalidCertificateError(f"signature from {sv.voter_id!r} failed")
         ident = validator_set.get(sv.voter_id)
         if ident is None:
-            raise InvalidCertificateError(
-                f"voter {sv.voter_id!r} not in validator set"
-            )
+            raise InvalidCertificateError(f"voter {sv.voter_id!r} not in validator set")
         domain = policy.resolve_domain(ident)
         per_domain[domain] = per_domain.get(domain, 0.0) + ident.effective_weight
         seen_voters.add(sv.voter_id)
@@ -395,9 +371,7 @@ def verify_certificate(
         )
 
 
-def detect_conflict(
-    qc_a: QuorumCertificate, qc_b: QuorumCertificate
-) -> ConflictEvidence | None:
+def detect_conflict(qc_a: QuorumCertificate, qc_b: QuorumCertificate) -> ConflictEvidence | None:
     """Return slashable evidence iff two QCs conflict.
 
     A conflict exists when both QCs are for the same
@@ -414,6 +388,4 @@ def detect_conflict(
     if qc_a.artifact_hash == qc_b.artifact_hash:
         return None
     equivocators = qc_a.voter_ids & qc_b.voter_ids
-    return ConflictEvidence(
-        qc_a=qc_a, qc_b=qc_b, equivocators=equivocators
-    )
+    return ConflictEvidence(qc_a=qc_a, qc_b=qc_b, equivocators=equivocators)

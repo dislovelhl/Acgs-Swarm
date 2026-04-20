@@ -130,9 +130,7 @@ class TestFaultDomainPolicy:
 
 class TestValidatorSet:
     def test_basic_membership(self):
-        vs = ValidatorSet(
-            [ValidatorIdentity("a", stake=2.0), ValidatorIdentity("b", stake=1.0)]
-        )
+        vs = ValidatorSet([ValidatorIdentity("a", stake=2.0), ValidatorIdentity("b", stake=1.0)])
         assert len(vs) == 2
         assert "a" in vs
         assert vs.total_weight() == pytest.approx(3.0)
@@ -165,10 +163,7 @@ class TestValidatorSet:
         # 10 identities all in same domain: effective total should be
         # capped at max_fraction * raw_total rather than raw_total.
         vs = ValidatorSet(
-            [
-                ValidatorIdentity(f"a{i}", stake=1.0, fault_domain="sybil")
-                for i in range(10)
-            ],
+            [ValidatorIdentity(f"a{i}", stake=1.0, fault_domain="sybil") for i in range(10)],
             policy=FaultDomainPolicy(max_fraction=0.3),
         )
         raw = vs.total_weight()
@@ -177,9 +172,7 @@ class TestValidatorSet:
         assert effective == pytest.approx(3.0)  # 0.3 * 10
 
     def test_snapshot_is_sorted_deterministic(self):
-        vs = ValidatorSet(
-            [ValidatorIdentity(x, stake=1.0) for x in ("z", "a", "m")]
-        )
+        vs = ValidatorSet([ValidatorIdentity(x, stake=1.0) for x in ("z", "a", "m")])
         snap = vs.snapshot()
         assert [v.agent_id for v in snap] == ["a", "m", "z"]
 
@@ -191,18 +184,14 @@ class TestValidatorSet:
 
 class TestCommitteeSelector:
     def test_deterministic_from_seed(self):
-        vs = ValidatorSet(
-            [ValidatorIdentity(f"v{i}", stake=1.0) for i in range(20)]
-        )
+        vs = ValidatorSet([ValidatorIdentity(f"v{i}", stake=1.0) for i in range(20)])
         sel = CommitteeSelector(vs)
         a = sel.select("seed-xyz", committee_size=5)
         b = sel.select("seed-xyz", committee_size=5)
         assert a.members == b.members
 
     def test_different_seed_different_committee(self):
-        vs = ValidatorSet(
-            [ValidatorIdentity(f"v{i}", stake=1.0) for i in range(30)]
-        )
+        vs = ValidatorSet([ValidatorIdentity(f"v{i}", stake=1.0) for i in range(30)])
         sel = CommitteeSelector(vs)
         # Overwhelmingly likely to differ with 30 candidates choosing 5
         a = sel.select("seed-a", committee_size=5)
@@ -210,9 +199,7 @@ class TestCommitteeSelector:
         assert a.members != b.members
 
     def test_exclude_keeps_out_producer(self):
-        vs = ValidatorSet(
-            [ValidatorIdentity(f"v{i}", stake=1.0) for i in range(10)]
-        )
+        vs = ValidatorSet([ValidatorIdentity(f"v{i}", stake=1.0) for i in range(10)])
         sel = CommitteeSelector(vs)
         out = sel.select("s", committee_size=5, exclude=["v3", "v7"])
         assert "v3" not in out.members and "v7" not in out.members
@@ -226,9 +213,7 @@ class TestCommitteeSelector:
         assert out.capped_weight == 0.0
 
     def test_oversize_clips_to_set(self):
-        vs = ValidatorSet(
-            [ValidatorIdentity(f"v{i}", stake=1.0) for i in range(3)]
-        )
+        vs = ValidatorSet([ValidatorIdentity(f"v{i}", stake=1.0) for i in range(3)])
         sel = CommitteeSelector(vs)
         out = sel.select("s", committee_size=10)
         assert len(out.members) == 3
@@ -267,27 +252,19 @@ class TestSybilAdversarialSimulation:
 
     def test_sybil_bounded_at_one_third(self):
         honest = [
-            ValidatorIdentity(
-                f"honest-{i}", stake=1.0, fault_domain=f"honest-org-{i}"
-            )
+            ValidatorIdentity(f"honest-{i}", stake=1.0, fault_domain=f"honest-org-{i}")
             for i in range(10)
         ]
         # 10 sybil identities all masquerading under the same org
         sybil = [
-            ValidatorIdentity(
-                f"sybil-{i}", stake=1.0, fault_domain="attacker-org"
-            )
+            ValidatorIdentity(f"sybil-{i}", stake=1.0, fault_domain="attacker-org")
             for i in range(10)
         ]
-        vs = ValidatorSet(
-            honest + sybil, policy=FaultDomainPolicy(max_fraction=1 / 3)
-        )
+        vs = ValidatorSet(honest + sybil, policy=FaultDomainPolicy(max_fraction=1 / 3))
         sel = CommitteeSelector(vs)
         # Large committee to make sybil concentration visible
         out = sel.select("beacon-epoch-42", committee_size=20)
-        raw_sybil = sum(
-            1 for m in out.members if m.startswith("sybil-")
-        )
+        raw_sybil = sum(1 for m in out.members if m.startswith("sybil-"))
         sybil_domain_capped = out.domain_weights.get("attacker-org", 0.0)
         # Even if 10/20 raw members are sybils, their capped weight is bounded
         assert raw_sybil >= 1  # they're in the committee
@@ -296,30 +273,20 @@ class TestSybilAdversarialSimulation:
     def test_select_until_independent_raises_when_all_sybil(self):
         # All validators in one domain — can't construct independent committee
         vs = ValidatorSet(
-            [
-                ValidatorIdentity(f"v{i}", stake=1.0, fault_domain="one-org")
-                for i in range(10)
-            ],
+            [ValidatorIdentity(f"v{i}", stake=1.0, fault_domain="one-org") for i in range(10)],
             policy=FaultDomainPolicy(max_fraction=1 / 3),
         )
         sel = CommitteeSelector(vs)
         with pytest.raises(SybilBoundViolation):
-            sel.select_until_independent(
-                "seed", committee_size=5, threshold_fraction=2 / 3
-            )
+            sel.select_until_independent("seed", committee_size=5, threshold_fraction=2 / 3)
 
     def test_select_until_independent_succeeds_with_diverse_set(self):
         vs = ValidatorSet(
-            [
-                ValidatorIdentity(f"v{i}", stake=1.0, fault_domain=f"d{i}")
-                for i in range(10)
-            ],
+            [ValidatorIdentity(f"v{i}", stake=1.0, fault_domain=f"d{i}") for i in range(10)],
             policy=FaultDomainPolicy(max_fraction=1 / 3),
         )
         sel = CommitteeSelector(vs)
-        out = sel.select_until_independent(
-            "seed", committee_size=4, threshold_fraction=2 / 3
-        )
+        out = sel.select_until_independent("seed", committee_size=4, threshold_fraction=2 / 3)
         assert len(out.members) == 4
 
 
@@ -368,17 +335,13 @@ class TestSignedVote:
 # ---------------------------------------------------------------------------
 
 
-def _make_committee_and_votes(
-    *, artifact_hash="hash-accept", epoch=1, n_validators=5, policy=None
-):
+def _make_committee_and_votes(*, artifact_hash="hash-accept", epoch=1, n_validators=5, policy=None):
     """Build a validator set + committee + fully-signed QC-ready votes."""
     ids = []
     sks = {}
     pks = {}
     for i in range(n_validators):
-        ident, sk, pk = _make_validator(
-            f"v{i}", stake=1.0, fault_domain=f"domain-{i}"
-        )
+        ident, sk, pk = _make_validator(f"v{i}", stake=1.0, fault_domain=f"domain-{i}")
         ids.append(ident)
         sks[ident.agent_id] = sk
         pks[ident.agent_id] = pk
@@ -415,9 +378,7 @@ class TestBuildCertificate:
 
         random.shuffle(votes)
         qc = build_certificate(votes, committee=committee, validator_set=vs)
-        assert [v.voter_id for v in qc.votes] == sorted(
-            [v.voter_id for v in qc.votes]
-        )
+        assert [v.voter_id for v in qc.votes] == sorted([v.voter_id for v in qc.votes])
 
     def test_insufficient_votes_raises(self):
         vs, committee, votes, _, _ = _make_committee_and_votes()
@@ -468,9 +429,7 @@ class TestBuildCertificate:
             votes[1].public_key_bytes,
         )
         with pytest.raises(InvalidCertificateError, match="subject"):
-            build_certificate(
-                [votes[0], bad, *votes[2:]], committee=committee, validator_set=vs
-            )
+            build_certificate([votes[0], bad, *votes[2:]], committee=committee, validator_set=vs)
 
     def test_bad_signature_rejected(self):
         vs, committee, votes, _, _ = _make_committee_and_votes()
@@ -483,9 +442,7 @@ class TestBuildCertificate:
             votes[0].public_key_bytes,
         )
         with pytest.raises(InvalidCertificateError, match="signature"):
-            build_certificate(
-                [tampered, *votes[1:]], committee=committee, validator_set=vs
-            )
+            build_certificate([tampered, *votes[1:]], committee=committee, validator_set=vs)
 
     def test_duplicate_voter_deduped(self):
         vs, committee, votes, _, _ = _make_committee_and_votes()
@@ -580,12 +537,8 @@ class TestConflictDetection:
             )
             for aid in committee.members
         ]
-        qc_a = build_certificate(
-            votes_a, committee=committee, validator_set=vs
-        )
-        qc_b = build_certificate(
-            votes_b, committee=committee, validator_set=vs
-        )
+        qc_a = build_certificate(votes_a, committee=committee, validator_set=vs)
+        qc_b = build_certificate(votes_b, committee=committee, validator_set=vs)
         ev = detect_conflict(qc_a, qc_b)
         assert ev is not None
         assert ev.is_slashable()
@@ -598,12 +551,8 @@ class TestConflictDetection:
         assert detect_conflict(qc, qc) is None
 
     def test_different_epoch_is_not_conflict(self):
-        vs1, c1, v1, *_ = _make_committee_and_votes(
-            artifact_hash="hash-A", epoch=1
-        )
-        vs2, c2, v2, *_ = _make_committee_and_votes(
-            artifact_hash="hash-B", epoch=2
-        )
+        vs1, c1, v1, *_ = _make_committee_and_votes(artifact_hash="hash-A", epoch=1)
+        vs2, c2, v2, *_ = _make_committee_and_votes(artifact_hash="hash-B", epoch=2)
         qc1 = build_certificate(v1, committee=c1, validator_set=vs1)
         qc2 = build_certificate(v2, committee=c2, validator_set=vs2)
         assert detect_conflict(qc1, qc2) is None
@@ -628,9 +577,7 @@ class TestConflictDetection:
         # Re-select for the 2nd assignment's seed to keep test isolated
         sel = CommitteeSelector(vs)
         c2 = sel.select("seed", committee_size=5)
-        qc_a = build_certificate(
-            votes_a, committee=committee, validator_set=vs
-        )
+        qc_a = build_certificate(votes_a, committee=committee, validator_set=vs)
         qc_b = build_certificate(votes_b, committee=c2, validator_set=vs)
         assert detect_conflict(qc_a, qc_b) is None
 
@@ -640,9 +587,7 @@ class TestConflictDetection:
         idents = []
         sks, pks = {}, {}
         for i in range(6):
-            ident, sk, pk = _make_validator(
-                f"v{i}", stake=1.0, fault_domain=f"d{i}"
-            )
+            ident, sk, pk = _make_validator(f"v{i}", stake=1.0, fault_domain=f"d{i}")
             idents.append(ident)
             sks[ident.agent_id] = sk
             pks[ident.agent_id] = pk

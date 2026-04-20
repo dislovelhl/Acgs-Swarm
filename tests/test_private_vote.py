@@ -88,12 +88,20 @@ class TestBuildCommit:
         sk = _kp()
         nonce = b"\x42" * 32
         c_yea, _ = build_commit(
-            voter_private_key=sk, voter_secret=b"vs",
-            epoch=EPOCH, subject=SUBJECT, choice=BallotChoice.YEA, nonce=nonce,
+            voter_private_key=sk,
+            voter_secret=b"vs",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
+            nonce=nonce,
         )
         c_nay, _ = build_commit(
-            voter_private_key=sk, voter_secret=b"vs",
-            epoch=EPOCH, subject=SUBJECT, choice=BallotChoice.NAY, nonce=nonce,
+            voter_private_key=sk,
+            voter_secret=b"vs",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.NAY,
+            nonce=nonce,
         )
         assert c_yea.commit != c_nay.commit
         # Nullifier is deterministic from (secret, epoch, subject)
@@ -143,8 +151,11 @@ class TestBallotBox:
         box = self._fresh()
         sk = _kp()
         c, _ = build_commit(
-            voter_private_key=sk, voter_secret=b"sX",
-            epoch=EPOCH, subject=SUBJECT, choice=BallotChoice.YEA,
+            voter_private_key=sk,
+            voter_secret=b"sX",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
         )
         box.close_commit_phase()
         with pytest.raises(InvalidCommitError, match="closed"):
@@ -179,8 +190,11 @@ class TestBallotBox:
         box = self._fresh()
         sk = _kp()
         c, _ = build_commit(
-            voter_private_key=sk, voter_secret=b"s1",
-            epoch=bytes.fromhex("ff" * 16), subject=SUBJECT, choice=BallotChoice.YEA,
+            voter_private_key=sk,
+            voter_secret=b"s1",
+            epoch=bytes.fromhex("ff" * 16),
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
         )
         with pytest.raises(InvalidCommitError, match="mismatch"):
             box.submit_commit(c)
@@ -204,8 +218,11 @@ class TestBallotBox:
         box = self._fresh()
         sk = _kp()
         c, _ = build_commit(
-            voter_private_key=sk, voter_secret=b"s1",
-            epoch=EPOCH, subject=SUBJECT, choice=BallotChoice.YEA,
+            voter_private_key=sk,
+            voter_secret=b"s1",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
         )
         bad = CommitRecord(
             version=c.version,
@@ -230,8 +247,11 @@ class TestTallyFunction:
             (sk3, BallotChoice.YEA, b"c"),
         ]:
             c, r = build_commit(
-                voter_private_key=sk, voter_secret=secret,
-                epoch=EPOCH, subject=SUBJECT, choice=choice,
+                voter_private_key=sk,
+                voter_secret=secret,
+                epoch=EPOCH,
+                subject=SUBJECT,
+                choice=choice,
             )
             triples.append((c, r))
         commits1 = [c for c, _ in triples]
@@ -247,12 +267,18 @@ class TestTallyFunction:
         # Two commits with same nullifier → only one tallied
         sk1, sk2 = _kp(), _kp()
         c1, r1 = build_commit(
-            voter_private_key=sk1, voter_secret=b"shared",
-            epoch=EPOCH, subject=SUBJECT, choice=BallotChoice.YEA,
+            voter_private_key=sk1,
+            voter_secret=b"shared",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
         )
         c2, r2 = build_commit(
-            voter_private_key=sk2, voter_secret=b"shared",
-            epoch=EPOCH, subject=SUBJECT, choice=BallotChoice.NAY,
+            voter_private_key=sk2,
+            voter_secret=b"shared",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.NAY,
         )
         assert c1.nullifier == c2.nullifier
         result = tally([c1, c2], [r1, r2], epoch=EPOCH, subject=SUBJECT)
@@ -263,8 +289,11 @@ class TestTallyFunction:
     def test_reveal_opens_wrong_commit_rejected(self):
         sk = _kp()
         c, _ = build_commit(
-            voter_private_key=sk, voter_secret=b"s1",
-            epoch=EPOCH, subject=SUBJECT, choice=BallotChoice.YEA,
+            voter_private_key=sk,
+            voter_secret=b"s1",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
         )
         # Build an independent reveal with a mismatched nonce
         bad_reveal = build_reveal(

@@ -444,10 +444,13 @@ class GovernanceCoordinator:
             updated: list[MinerEmissionInput] = []
             for inp in miner_inputs:
                 idx = uid_to_col.get(inp.miner_uid)
-                trust = col_sums[idx] if idx is not None and idx < len(col_sums) else inp.manifold_trust
+                trust = (
+                    col_sums[idx] if idx is not None and idx < len(col_sums) else inp.manifold_trust
+                )
                 window = self._miner_authenticity.get(inp.miner_uid, [])
                 avg_auth = sum(window) / len(window) if window else inp.avg_authenticity
                 from dataclasses import replace as _dc_replace
+
                 updated.append(_dc_replace(inp, manifold_trust=trust, avg_authenticity=avg_auth))
             miner_inputs = updated
 

@@ -88,18 +88,14 @@ class ViolationSubspace:
 
     def __post_init__(self) -> None:
         if self.basis.ndim != 2:
-            raise DimensionMismatchError(
-                f"basis must be 2D (k, d), got shape {self.basis.shape}"
-            )
+            raise DimensionMismatchError(f"basis must be 2D (k, d), got shape {self.basis.shape}")
         if self.mean.ndim != 1 or self.mean.shape[0] != self.basis.shape[1]:
             raise DimensionMismatchError(
                 f"mean shape {self.mean.shape} incompatible with basis "
                 f"columns {self.basis.shape[1]}"
             )
         if (self.whitener is None) != (self.dewhitener is None):
-            raise ValueError(
-                "whitener and dewhitener must be supplied together"
-            )
+            raise ValueError("whitener and dewhitener must be supplied together")
         if self.whitener is not None:
             d = self.basis.shape[1]
             if self.whitener.shape != (d, d) or self.dewhitener.shape != (d, d):  # type: ignore[union-attr]
@@ -109,9 +105,7 @@ class ViolationSubspace:
         # Verify orthonormality within tolerance — catch caller bugs early
         g = self.basis @ self.basis.T
         if not np.allclose(g, np.eye(g.shape[0]), atol=1e-5):
-            raise ValueError(
-                "basis rows must be orthonormal (basis @ basis.T ≈ I)"
-            )
+            raise ValueError("basis rows must be orthonormal (basis @ basis.T ≈ I)")
 
     @property
     def rank(self) -> int:
@@ -174,9 +168,7 @@ class ViolationSubspace:
             centered = centered @ self.whitener.T  # type: ignore[union-attr]
         return centered @ self.basis.T
 
-    def steer(
-        self, h: np.ndarray, gamma: float = 1.0, tau: float = 0.0
-    ) -> np.ndarray:
+    def steer(self, h: np.ndarray, gamma: float = 1.0, tau: float = 0.0) -> np.ndarray:
         """Apply risk-adaptive steering to ``h``.
 
         Only the components whose signed coordinate exceeds the margin
@@ -218,9 +210,7 @@ class ViolationSubspace:
 
     def _check_dim(self, h: np.ndarray) -> None:
         if h.shape[-1] != self.dim:
-            raise DimensionMismatchError(
-                f"expected trailing dim {self.dim}, got {h.shape}"
-            )
+            raise DimensionMismatchError(f"expected trailing dim {self.dim}, got {h.shape}")
 
 
 # ---------------------------------------------------------------------------
@@ -228,12 +218,8 @@ class ViolationSubspace:
 # ---------------------------------------------------------------------------
 
 
-def _stack_and_validate(
-    samples: Sequence[np.ndarray], name: str
-) -> np.ndarray:
-    arr = np.asarray(
-        [np.asarray(x, dtype=np.float64).reshape(-1) for x in samples]
-    )
+def _stack_and_validate(samples: Sequence[np.ndarray], name: str) -> np.ndarray:
+    arr = np.asarray([np.asarray(x, dtype=np.float64).reshape(-1) for x in samples])
     if arr.ndim != 2 or arr.shape[0] == 0:
         raise InsufficientSamplesError(f"{name} must be a non-empty 2D array")
     return arr
@@ -269,15 +255,12 @@ def fit_subspace(
     S = _stack_and_validate(safe, "safe")
     U = _stack_and_validate(unsafe, "unsafe")
     if S.shape[1] != U.shape[1]:
-        raise DimensionMismatchError(
-            f"safe dim {S.shape[1]} != unsafe dim {U.shape[1]}"
-        )
+        raise DimensionMismatchError(f"safe dim {S.shape[1]} != unsafe dim {U.shape[1]}")
     if rank < 1:
         raise ValueError(f"rank must be >= 1, got {rank}")
     if S.shape[0] + U.shape[0] < rank + 1:
         raise InsufficientSamplesError(
-            f"need at least rank+1={rank + 1} samples total, "
-            f"got {S.shape[0] + U.shape[0]}"
+            f"need at least rank+1={rank + 1} samples total, got {S.shape[0] + U.shape[0]}"
         )
 
     safe_mean = S.mean(axis=0)
@@ -337,13 +320,9 @@ def fit_leace(
     S = _stack_and_validate(safe, "safe")
     U = _stack_and_validate(unsafe, "unsafe")
     if S.shape[0] < 2 or U.shape[0] < 2:
-        raise InsufficientSamplesError(
-            "LEACE needs at least 2 samples per class"
-        )
+        raise InsufficientSamplesError("LEACE needs at least 2 samples per class")
     if S.shape[1] != U.shape[1]:
-        raise DimensionMismatchError(
-            f"safe dim {S.shape[1]} != unsafe dim {U.shape[1]}"
-        )
+        raise DimensionMismatchError(f"safe dim {S.shape[1]} != unsafe dim {U.shape[1]}")
     X = np.vstack([S, U])
     d = X.shape[1]
     n = X.shape[0]
@@ -369,8 +348,7 @@ def fit_leace(
     norm = np.linalg.norm(cross)
     if norm < 1e-12:
         raise InsufficientSamplesError(
-            "cross-covariance is numerically zero — cannot fit LEACE "
-            "(classes may be identical)"
+            "cross-covariance is numerically zero — cannot fit LEACE (classes may be identical)"
         )
     primary = cross / norm
     # Optional higher-rank: deflate and repeat (for binary labels

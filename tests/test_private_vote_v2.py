@@ -147,7 +147,9 @@ class TestHashCommitmentProver:
         prover = HashCommitmentProver()
         stmt = ValidityStatement(EPOCH, SUBJECT, b"\x00" * 32, b"\x00" * 32, b"\x00" * 32)
         with pytest.raises(ValueError):
-            prover.prove(stmt, ValidityWitness(choice="not-a-choice", nonce=b"x" * 32, voter_secret=b"s"))  # type: ignore[arg-type]
+            prover.prove(
+                stmt, ValidityWitness(choice="not-a-choice", nonce=b"x" * 32, voter_secret=b"s")
+            )  # type: ignore[arg-type]
 
 
 class TestTallyV2:
@@ -195,12 +197,19 @@ class TestTallyV2:
         sk1, sk2 = _kp(), _kp()
         prover = HashCommitmentProver()
         c1, r1 = build_commit(
-            voter_private_key=sk1, voter_secret=b"a", epoch=EPOCH, subject=SUBJECT,
+            voter_private_key=sk1,
+            voter_secret=b"a",
+            epoch=EPOCH,
+            subject=SUBJECT,
             choice=BallotChoice.YEA,
         )  # v1
         c2, r2 = build_commit(
-            voter_private_key=sk2, voter_secret=b"b", epoch=EPOCH, subject=SUBJECT,
-            choice=BallotChoice.YEA, prover=prover,
+            voter_private_key=sk2,
+            voter_secret=b"b",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
+            prover=prover,
         )  # v2
         box = PrivateBallotBox(epoch=EPOCH, subject=SUBJECT)
         box.submit_commit(c1)
@@ -215,7 +224,10 @@ class TestTallyV2:
     def test_strict_v2_rejects_legacy_v1(self):
         sk1 = _kp()
         c1, r1 = build_commit(
-            voter_private_key=sk1, voter_secret=b"a", epoch=EPOCH, subject=SUBJECT,
+            voter_private_key=sk1,
+            voter_secret=b"a",
+            epoch=EPOCH,
+            subject=SUBJECT,
             choice=BallotChoice.YEA,
         )  # v1
         box = PrivateBallotBox(epoch=EPOCH, subject=SUBJECT)
@@ -230,8 +242,12 @@ class TestTallyV2:
         sk = _kp()
         prover = HashCommitmentProver()
         commit, reveal = build_commit(
-            voter_private_key=sk, voter_secret=b"a", epoch=EPOCH, subject=SUBJECT,
-            choice=BallotChoice.YEA, prover=prover,
+            voter_private_key=sk,
+            voter_secret=b"a",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
+            prover=prover,
         )
         # tamper the proof
         bad_proof = bytes([commit.validity_proof[0] ^ 0xFF]) + commit.validity_proof[1:]
@@ -247,7 +263,10 @@ class TestTallyV2:
             validity_proof=bad_proof,
         )
         result = tally(
-            [tampered], [reveal], epoch=EPOCH, subject=SUBJECT,
+            [tampered],
+            [reveal],
+            epoch=EPOCH,
+            subject=SUBJECT,
             provers={prover.scheme_id: prover},
         )
         assert result.totals[BallotChoice.YEA] == 0
@@ -257,7 +276,10 @@ class TestTallyV2:
         """A v2 record without a proof_scheme behaves like v1 for the proof check."""
         sk = _kp()
         commit, reveal = build_commit(
-            voter_private_key=sk, voter_secret=b"a", epoch=EPOCH, subject=SUBJECT,
+            voter_private_key=sk,
+            voter_secret=b"a",
+            epoch=EPOCH,
+            subject=SUBJECT,
             choice=BallotChoice.ABSTAIN,
         )
         # forge version=2 with no proof_scheme/proof (simulating legacy tool bump)

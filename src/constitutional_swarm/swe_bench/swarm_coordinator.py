@@ -87,8 +87,7 @@ class SwarmCoordinator:
         subset = tasks if max_tasks is None else tasks[:max_tasks]
         # Assign tasks round-robin to agents
         assignments: list[tuple[SWEBenchAgent, dict[str, Any]]] = [
-            (self.agents[i % len(self.agents)], task)
-            for i, task in enumerate(subset)
+            (self.agents[i % len(self.agents)], task) for i, task in enumerate(subset)
         ]
 
         # Shared CRDT — all agents write to it
@@ -138,14 +137,9 @@ class SwarmCoordinator:
 
         try:
             # Solve in parallel
-            assignments = [
-                (self.agents[i % n_nodes], task)
-                for i, task in enumerate(subset)
-            ]
+            assignments = [(self.agents[i % n_nodes], task) for i, task in enumerate(subset)]
             solve_tasks = [
-                asyncio.get_event_loop().run_in_executor(
-                    None, agent.solve, task
-                )
+                asyncio.get_event_loop().run_in_executor(None, agent.solve, task)
                 for agent, task in assignments
             ]
             results = await asyncio.gather(*solve_tasks)
@@ -153,15 +147,11 @@ class SwarmCoordinator:
             for i, result in enumerate(results):
                 patches.append(result)
                 payload = json.dumps(asdict(result))
-                nodes[i % n_nodes].crdt.append(
-                    payload=payload, bodes_passed=result.governed
-                )
+                nodes[i % n_nodes].crdt.append(payload=payload, bodes_passed=result.governed)
 
             # Gossip rounds to converge
             for _ in range(self.n_gossip_rounds):
-                await asyncio.gather(
-                    *[n.gossip_round(n_peers=self.gossip_peers) for n in nodes]
-                )
+                await asyncio.gather(*[n.gossip_round(n_peers=self.gossip_peers) for n in nodes])
                 await asyncio.sleep(0.05)
 
             # Harvest from first converged node
@@ -176,16 +166,12 @@ class SwarmCoordinator:
     # ──────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _aggregate(
-        patches: list[SWEPatch], crdt: MerkleCRDT
-    ) -> dict[str, Any]:
+    def _aggregate(patches: list[SWEPatch], crdt: MerkleCRDT) -> dict[str, Any]:
         total = len(patches)
         resolved = sum(1 for p in patches if p.success)
         governed = [p for p in patches if p.governed]
         mean_intervention = (
-            sum(p.intervention_rate for p in governed) / len(governed)
-            if governed
-            else 0.0
+            sum(p.intervention_rate for p in governed) / len(governed) if governed else 0.0
         )
         return {
             "patches": patches,

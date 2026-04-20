@@ -29,9 +29,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 AUTORESEARCH_YAML = (
-    pathlib.Path(__file__).parent.parent.parent.parent
-    / "autoresearch"
-    / "constitution.yaml"
+    pathlib.Path(__file__).parent.parent.parent.parent / "autoresearch" / "constitution.yaml"
 )
 
 
@@ -88,15 +86,11 @@ class TestAbsoluteRuleConsistency:
             for keyword in rule["keywords"][:5]:  # test first 5 keywords per rule
                 probe = f"Please {keyword} the production system immediately."
                 if not _is_blocked(engine, probe):
-                    failures.append(
-                        {"rule_id": rule["id"], "keyword": keyword, "probe": probe}
-                    )
+                    failures.append({"rule_id": rule["id"], "keyword": keyword, "probe": probe})
 
         assert not failures, (
             f"SNCA Absolute violation: {len(failures)} critical keywords did not block.\n"
-            + "\n".join(
-                f"  rule={f['rule_id']} keyword='{f['keyword']}'" for f in failures[:5]
-            )
+            + "\n".join(f"  rule={f['rule_id']} keyword='{f['keyword']}'" for f in failures[:5])
         )
 
     def test_critical_rules_block_embedded_keyword(self) -> None:
@@ -117,11 +111,7 @@ class TestAbsoluteRuleConsistency:
                         failures.append({"rule_id": rule["id"], "keyword": keyword})
 
         # Allow up to 20% miss rate on evasive phrasing (realistic threshold)
-        total = sum(
-            min(3, len(r["keywords"])) * 2
-            for r in critical_rules
-            if r["keywords"]
-        )
+        total = sum(min(3, len(r["keywords"])) * 2 for r in critical_rules if r["keywords"])
         if total > 0:
             miss_rate = len(failures) / total
             assert miss_rate <= 0.20, (
@@ -141,9 +131,7 @@ class TestConditionalRuleConsistency:
     def test_high_severity_rules_block_at_least_one_keyword(self) -> None:
         """Each high-severity rule must block at least one of its own keywords."""
         engine, rules = _load_engine_and_rules(AUTORESEARCH_YAML)
-        high_rules = [
-            r for r in rules if r["severity"] == "high" and r["keywords"]
-        ]
+        high_rules = [r for r in rules if r["severity"] == "high" and r["keywords"]]
 
         if not high_rules:
             pytest.skip("No high-severity rules with keywords in constitution")
@@ -201,11 +189,7 @@ class TestRuleConsistencyMetrics:
     def test_no_rule_has_empty_keywords_and_critical_severity(self) -> None:
         """Critical rules without keywords are unverifiable — flag them."""
         _, rules = _load_engine_and_rules(AUTORESEARCH_YAML)
-        unverifiable = [
-            r["id"]
-            for r in rules
-            if r["severity"] == "critical" and not r["keywords"]
-        ]
+        unverifiable = [r["id"] for r in rules if r["severity"] == "critical" and not r["keywords"]]
         # Allow up to 2 — some critical rules are pattern-only
         assert len(unverifiable) <= 2, (
             f"Too many critical rules with no keywords (unverifiable): {unverifiable}"
@@ -303,8 +287,15 @@ class TestPrivacyAccountant:
         pa = PrivacyAccountant(epsilon=2.0, delta=1e-6)
         pa.spend(0.2, sigma=0.5)
         s = pa.summary()
-        for key in ("epsilon_total", "epsilon_spent", "epsilon_remaining", "delta",
-                    "num_mechanism_invocations", "budget_fraction_used", "exhausted"):
+        for key in (
+            "epsilon_total",
+            "epsilon_spent",
+            "epsilon_remaining",
+            "delta",
+            "num_mechanism_invocations",
+            "budget_fraction_used",
+            "exhausted",
+        ):
             assert key in s, f"missing summary key: {key}"
 
     def test_remaining_epsilon_decreases_monotonically(self) -> None:
@@ -347,7 +338,7 @@ class TestPrivacyAccountant:
         simple_eps = k * eps_step_simple  # ≈ 57.17
 
         assert rdp_eps < simple_eps / 5, (
-            f"RDP ε={rdp_eps:.2f} must be < simple/5 ({simple_eps/5:.2f}); "
+            f"RDP ε={rdp_eps:.2f} must be < simple/5 ({simple_eps / 5:.2f}); "
             f"simple_ε={simple_eps:.2f}"
         )
 

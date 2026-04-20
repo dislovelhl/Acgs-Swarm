@@ -302,11 +302,13 @@ class MacAcgsLoop:
 
         # Step 1: Hash verification (fail-closed)
         hash_ok = self._verify_hash()
-        events.append(self._event(
-            PipelineEventType.HASH_VERIFIED if hash_ok else PipelineEventType.HASH_MISMATCH,
-            cycle,
-            {"constitutional_hash": self._config.constitutional_hash, "verified": hash_ok},
-        ))
+        events.append(
+            self._event(
+                PipelineEventType.HASH_VERIFIED if hash_ok else PipelineEventType.HASH_MISMATCH,
+                cycle,
+                {"constitutional_hash": self._config.constitutional_hash, "verified": hash_ok},
+            )
+        )
         if not hash_ok:
             # Fail-closed: abort cycle
             came_result = CAMECycleResult(
@@ -329,12 +331,18 @@ class MacAcgsLoop:
 
         # Step 2: CAME evolution
         came_result = self._came.evolve_cycle(approaches)
-        events.append(self._event(PipelineEventType.CAME_CYCLE, cycle, {
-            "grid_coverage": came_result.grid_coverage,
-            "ceiling_detected": came_result.ceiling_detected,
-            "rules_proposed": len(came_result.rules_proposed),
-            "exploration_bonus": came_result.exploration_bonus,
-        }))
+        events.append(
+            self._event(
+                PipelineEventType.CAME_CYCLE,
+                cycle,
+                {
+                    "grid_coverage": came_result.grid_coverage,
+                    "ceiling_detected": came_result.ceiling_detected,
+                    "rules_proposed": len(came_result.rules_proposed),
+                    "exploration_bonus": came_result.exploration_bonus,
+                },
+            )
+        )
 
         # Step 3–6: Debate + commit (only if CAME proposed rules)
         proposals_opened = 0
@@ -343,16 +351,22 @@ class MacAcgsLoop:
         updates: list[ConstitutionUpdate] = []
 
         if came_result.rules_proposed:
-            proposal_count = min(len(came_result.rules_proposed), self._config.max_updates_per_cycle)
+            proposal_count = min(
+                len(came_result.rules_proposed), self._config.max_updates_per_cycle
+            )
             for i in range(proposal_count):
                 pid = f"mac-{cycle}-{i}-{uuid.uuid4().hex[:8]}"
                 # Use actual RuleCandidate content from CAME; fall back to descriptor only if empty
                 raw_rule = came_result.rules_proposed[i]
                 raw_str = str(raw_rule).strip()
-                rule_content = raw_str if raw_str else (
-                    f"CAME rule cycle={cycle} idx={i+1} "
-                    f"coverage={came_result.grid_coverage:.3f} "
-                    f"bonus={came_result.exploration_bonus:.3f}"
+                rule_content = (
+                    raw_str
+                    if raw_str
+                    else (
+                        f"CAME rule cycle={cycle} idx={i + 1} "
+                        f"coverage={came_result.grid_coverage:.3f} "
+                        f"bonus={came_result.exploration_bonus:.3f}"
+                    )
                 )
                 proposer_id = f"came-coordinator-cycle-{cycle}"
 
@@ -365,10 +379,16 @@ class MacAcgsLoop:
                         content=rule_content,
                     )
                     proposals_opened += 1
-                    events.append(self._event(PipelineEventType.DEBATE_OPENED, cycle, {
-                        "proposal_id": pid,
-                        "proposer": proposer_id,
-                    }))
+                    events.append(
+                        self._event(
+                            PipelineEventType.DEBATE_OPENED,
+                            cycle,
+                            {
+                                "proposal_id": pid,
+                                "proposer": proposer_id,
+                            },
+                        )
+                    )
                 except ValueError:
                     continue  # duplicate pid (shouldn't happen with uuid)
 
@@ -406,12 +426,20 @@ class MacAcgsLoop:
                     )
 
                 # Resolve debate
-                verdict = self._debate.resolve(pid, constitutional_hash=self._config.constitutional_hash)
-                events.append(self._event(PipelineEventType.DEBATE_RESOLVED, cycle, {
-                    "proposal_id": pid,
-                    "outcome": verdict.outcome.value,
-                    "approval_score": verdict.approval_score,
-                }))
+                verdict = self._debate.resolve(
+                    pid, constitutional_hash=self._config.constitutional_hash
+                )
+                events.append(
+                    self._event(
+                        PipelineEventType.DEBATE_RESOLVED,
+                        cycle,
+                        {
+                            "proposal_id": pid,
+                            "outcome": verdict.outcome.value,
+                            "approval_score": verdict.approval_score,
+                        },
+                    )
+                )
 
                 if verdict.outcome == VerdictOutcome.APPROVED:
                     proposals_approved += 1
@@ -425,22 +453,30 @@ class MacAcgsLoop:
                     )
                     updates.append(update)
                     self._constitution_updates.append(update)
-                    events.append(self._event(PipelineEventType.CONSTITUTION_UPDATED, cycle, update.to_dict()))
+                    events.append(
+                        self._event(PipelineEventType.CONSTITUTION_UPDATED, cycle, update.to_dict())
+                    )
                 else:
                     proposals_rejected += 1
 
         # Step 7: cycle complete event
-        events.append(self._event(PipelineEventType.CYCLE_COMPLETE, cycle, {
-            "proposals_opened": proposals_opened,
-            "proposals_approved": proposals_approved,
-            "proposals_rejected": proposals_rejected,
-            "updates_committed": len(updates),
-        }))
+        events.append(
+            self._event(
+                PipelineEventType.CYCLE_COMPLETE,
+                cycle,
+                {
+                    "proposals_opened": proposals_opened,
+                    "proposals_approved": proposals_approved,
+                    "proposals_rejected": proposals_rejected,
+                    "updates_committed": len(updates),
+                },
+            )
+        )
 
         # Persist events
         self._audit_log.extend(events)
         if len(self._audit_log) > self._config.audit_log_size:
-            self._audit_log = self._audit_log[-self._config.audit_log_size:]
+            self._audit_log = self._audit_log[-self._config.audit_log_size :]
 
         return MacAcgsCycleResult(
             cycle_number=cycle,
@@ -484,11 +520,7 @@ class MacAcgsLoop:
         }
 
     def __repr__(self) -> str:
-        return (
-            f"MacAcgsLoop("
-            f"cycle={self._cycle_number}, "
-            f"updates={len(self._constitution_updates)})"
-        )
+        return f"MacAcgsLoop(cycle={self._cycle_number}, updates={len(self._constitution_updates)})"
 
     # ── Internal ─────────────────────────────────────────────────────────
 

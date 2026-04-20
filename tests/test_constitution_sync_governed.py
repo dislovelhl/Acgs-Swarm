@@ -113,8 +113,9 @@ class TestApplyGovernedHappyPath:
         # Now propose E1 -> E2.
         dist.update(YAML_E2)
         v2 = _version(2, ("privacy-01", "safety-01"), parent=v1.digest)
-        cert2 = _cert(v1, v2, old_signers=frozenset({"x", "y", "z"}),
-                      new_signers=frozenset({"p", "q", "r"}))
+        cert2 = _cert(
+            v1, v2, old_signers=frozenset({"x", "y", "z"}), new_signers=frozenset({"p", "q", "r"})
+        )
         result = receiver.apply_governed(
             dist.broadcast_message(),
             certificate=cert2,

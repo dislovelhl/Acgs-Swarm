@@ -284,9 +284,7 @@ class FederatedConstitutionBridge:
 
     # ── Internal ──────────────────────────────────────────────────────────
 
-    def _allow(
-        self, agent_id: str, org_id: str, domain: str, now: float
-    ) -> FederationDecision:
+    def _allow(self, agent_id: str, org_id: str, domain: str, now: float) -> FederationDecision:
         decision = FederationDecision(
             agent_id=agent_id,
             org_id=org_id,

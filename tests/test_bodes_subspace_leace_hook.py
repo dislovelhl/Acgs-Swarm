@@ -24,9 +24,7 @@ def _identity_leace(dim: int) -> ViolationSubspace:
     basis = np.eye(dim, dtype=np.float64)[:1]  # rank-1 axis-aligned
     mean = np.zeros(dim, dtype=np.float64)
     W = np.eye(dim, dtype=np.float64)
-    return ViolationSubspace(
-        basis=basis, mean=mean, whitener=W, dewhitener=W.copy()
-    )
+    return ViolationSubspace(basis=basis, mean=mean, whitener=W, dewhitener=W.copy())
 
 
 def _diag_leace(dim: int, scales: np.ndarray) -> ViolationSubspace:
@@ -41,9 +39,7 @@ def _diag_leace(dim: int, scales: np.ndarray) -> ViolationSubspace:
     mean = np.zeros(dim, dtype=np.float64)
     W = np.diag(scales).astype(np.float64)
     Winv = np.diag(1.0 / scales).astype(np.float64)
-    return ViolationSubspace(
-        basis=basis, mean=mean, whitener=W, dewhitener=Winv
-    )
+    return ViolationSubspace(basis=basis, mean=mean, whitener=W, dewhitener=Winv)
 
 
 class TestLeaceHookConstruction:

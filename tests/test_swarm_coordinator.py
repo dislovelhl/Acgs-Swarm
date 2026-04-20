@@ -56,8 +56,13 @@ def test_run_in_memory_returns_expected_keys() -> None:
     coord = SwarmCoordinator([SWEBenchAgent()])
     result = coord.run_in_memory(_make_tasks(3))
     assert set(result.keys()) >= {
-        "patches", "total", "resolved", "resolve_rate",
-        "crdt_size", "governed_count", "mean_intervention",
+        "patches",
+        "total",
+        "resolved",
+        "resolve_rate",
+        "crdt_size",
+        "governed_count",
+        "mean_intervention",
     }
 
 

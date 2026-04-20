@@ -167,9 +167,9 @@ class TestFederatedConstitutionBridge:
         bridge.register_credential(cred_ok)
         bridge.register_credential(cred_bad)
 
-        bridge.gate("agent-a", domain="")   # should ALLOW
-        bridge.gate("agent-b", domain="")   # should DENY (hash mismatch)
-        bridge.gate("nobody", domain="")    # should DENY (unknown)
+        bridge.gate("agent-a", domain="")  # should ALLOW
+        bridge.gate("agent-b", domain="")  # should DENY (hash mismatch)
+        bridge.gate("nobody", domain="")  # should DENY (unknown)
 
         s = bridge.summary()
         assert s["registered_credentials"] == 2
@@ -657,8 +657,11 @@ class TestMacAcgsLoopHappyPath:
         loop.run_cycle([])
         # Second cycle — need fresh debate for new proposal IDs
         came.evolve_cycle.return_value = CAMECycleResult(
-            grid_coverage=0.80, ceiling_detected=True,
-            rules_proposed=["R2"], log_id="mock:2", exploration_bonus=0.05,
+            grid_coverage=0.80,
+            ceiling_detected=True,
+            rules_proposed=["R2"],
+            log_id="mock:2",
+            exploration_bonus=0.05,
         )
         loop.run_cycle([])
         all_updates = loop.constitution_updates()
@@ -709,8 +712,11 @@ class TestMacAcgsLoopAudit:
         for _ in range(10):
             came_mock = loop._came
             came_mock.evolve_cycle.return_value = CAMECycleResult(
-                grid_coverage=0.5, ceiling_detected=True,
-                rules_proposed=["R"], log_id="m", exploration_bonus=0.0,
+                grid_coverage=0.5,
+                ceiling_detected=True,
+                rules_proposed=["R"],
+                log_id="m",
+                exploration_bonus=0.0,
             )
             loop.run_cycle([])
         assert len(loop.audit_log()) <= 5
@@ -890,9 +896,7 @@ class TestConstitutionalHashConsolidation:
         from constitutional_swarm.constants import CONSTITUTIONAL_HASH
 
         for mod in (debate_resolver, mac_acgs_loop, federated_bridge, swarm_ode, came_coordinator):
-            assert mod._CONSTITUTIONAL_HASH == CONSTITUTIONAL_HASH, (
-                f"{mod.__name__} hash drifted"
-            )
+            assert mod._CONSTITUTIONAL_HASH == CONSTITUTIONAL_HASH, f"{mod.__name__} hash drifted"
 
     def test_constants_module_value(self) -> None:
         from constitutional_swarm.constants import CONSTITUTIONAL_HASH
@@ -1014,9 +1018,17 @@ class TestGossipBatchLimits:
 
         from constitutional_swarm.gossip_protocol import MAX_BATCH_NODES, decode_batch
 
-        nodes = [{"cid": f"c{i}", "agent_id": "a", "payload": "p",
-                  "parent_cids": [], "bodes_passed": False, "constitutional_hash": ""}
-                 for i in range(MAX_BATCH_NODES + 1)]
+        nodes = [
+            {
+                "cid": f"c{i}",
+                "agent_id": "a",
+                "payload": "p",
+                "parent_cids": [],
+                "bodes_passed": False,
+                "constitutional_hash": "",
+            }
+            for i in range(MAX_BATCH_NODES + 1)
+        ]
         with pytest.raises(ValueError, match="too many nodes"):
             decode_batch(json.dumps(nodes))
 
@@ -1025,8 +1037,16 @@ class TestGossipBatchLimits:
 
         from constitutional_swarm.gossip_protocol import decode_batch
 
-        nodes = [{"cid": "c1", "agent_id": "a", "payload": "p",
-                  "parent_cids": [], "bodes_passed": False, "constitutional_hash": ""}]
+        nodes = [
+            {
+                "cid": "c1",
+                "agent_id": "a",
+                "payload": "p",
+                "parent_cids": [],
+                "bodes_passed": False,
+                "constitutional_hash": "",
+            }
+        ]
         result = decode_batch(json.dumps(nodes))
         assert len(result) == 1
 
@@ -1127,8 +1147,10 @@ class TestCAMECoordinatorLogging:
 
         class _ExplodingGrid:
             coverage = 0.5
+
             def challenge(self, approach: object) -> bool:
                 raise RuntimeError("bad approach")
+
             def ceiling_detected(self) -> bool:
                 return False
 
@@ -1153,8 +1175,10 @@ class TestCAMECoordinatorLogging:
 
         class _CeilingBroken:
             coverage = 0.3
+
             def challenge(self, approach: object) -> bool:
                 return False
+
             def ceiling_detected(self) -> bool:
                 raise RuntimeError("ceiling query failed")
 
@@ -1173,19 +1197,23 @@ class TestBreakthroughModuleExports:
 
     def test_spectral_sphere_manifold_exported(self) -> None:
         from constitutional_swarm import SpectralSphereManifold
+
         assert SpectralSphereManifold is not None
 
     def test_spectral_sphere_project_exported(self) -> None:
         from constitutional_swarm import spectral_sphere_project
+
         assert callable(spectral_sphere_project)
 
     def test_merkle_crdt_exported(self) -> None:
         from constitutional_swarm import DAGNode, MerkleCRDT
+
         assert MerkleCRDT is not None
         assert DAGNode is not None
 
     def test_privacy_accountant_exported(self) -> None:
         from constitutional_swarm import PrivacyAccountant, PrivacyBudgetExhausted
+
         assert PrivacyAccountant is not None
         assert issubclass(PrivacyBudgetExhausted, RuntimeError)
 
@@ -1204,10 +1232,7 @@ class TestSpectralSphereODEIntegration:
 
         # Simulate a trust matrix after ODE evolution step
         n = 4
-        trust_matrix = [
-            [0.5 + 0.3 * (i == j) for j in range(n)]
-            for i in range(n)
-        ]
+        trust_matrix = [[0.5 + 0.3 * (i == j) for j in range(n)] for i in range(n)]
         # Scale up to simulate divergence
         scale = 3.0
         big_matrix = [[scale * trust_matrix[i][j] for j in range(n)] for i in range(n)]

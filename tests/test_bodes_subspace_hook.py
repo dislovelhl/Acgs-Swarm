@@ -154,10 +154,14 @@ class TestSubspaceHookSteering:
         sub = _rankk_subspace(4, k=2)  # axes 0 and 1
         hook = _BODESSubspaceHook(sub, threshold=0.0, gamma=1.0)
         # Token 1: positive on axis 0 only. Token 2: positive on both 0 and 1.
-        hidden = torch.tensor([[
-            [3.0, -1.0, 2.0, 5.0],
-            [4.0,  2.0, 7.0, 1.0],
-        ]])
+        hidden = torch.tensor(
+            [
+                [
+                    [3.0, -1.0, 2.0, 5.0],
+                    [4.0, 2.0, 7.0, 1.0],
+                ]
+            ]
+        )
         out = hook(nn.Identity(), (), hidden)
         # Token 1: only axis 0 zeroed; axis 1 untouched (was negative).
         assert torch.allclose(out[0, 0], torch.tensor([0.0, -1.0, 2.0, 5.0]))
@@ -261,8 +265,12 @@ class TestWrapperSubspaceIntegration:
         stats = wrapper.intervention_stats()
         # Keys expected by existing callers must all be present.
         assert set(stats) >= {
-            "total_tokens", "steered_tokens", "intervention_rate",
-            "layer_idx", "threshold", "gamma",
+            "total_tokens",
+            "steered_tokens",
+            "intervention_rate",
+            "layer_idx",
+            "threshold",
+            "gamma",
         }
 
     def test_end_to_end_steering_through_wrapper(self) -> None:

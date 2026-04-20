@@ -212,7 +212,11 @@ class CAMECoordinator:
                     if uid is not None:
                         seen_uids.add(uid)
                 except Exception:
-                    logger.warning("Grid rejected approach miner_uid=%s", getattr(approach, "miner_uid", "?"), exc_info=True)
+                    logger.warning(
+                        "Grid rejected approach miner_uid=%s",
+                        getattr(approach, "miner_uid", "?"),
+                        exc_info=True,
+                    )
 
         # 2. Read grid stats ---------------------------------------------------
         grid_coverage = 0.0
@@ -243,7 +247,9 @@ class CAMECoordinator:
 
         # 4. Trigger rule codification when ceiling detected --------------------
         rules_proposed: list[Any] = []
-        cooldown_elapsed = (self._cycle - self._last_codification_cycle) > self._config.codification_cooldown
+        cooldown_elapsed = (
+            self._cycle - self._last_codification_cycle
+        ) > self._config.codification_cooldown
 
         if ceiling and cooldown_elapsed and self._codifier is not None:
             try:
@@ -255,7 +261,9 @@ class CAMECoordinator:
                         live_approaches = list(self._grid.approaches())
                     elif hasattr(self._grid, "niche_map"):
                         live_approaches = list(self._grid.niche_map.values())
-                if hasattr(self._codifier, "find_clusters") and hasattr(self._codifier, "propose_rules"):
+                if hasattr(self._codifier, "find_clusters") and hasattr(
+                    self._codifier, "propose_rules"
+                ):
                     clusters = self._codifier.find_clusters(live_approaches)
                     rules_proposed = self._codifier.propose_rules(clusters)
                 elif hasattr(self._codifier, "propose_rules"):
@@ -316,10 +324,7 @@ class CAMECoordinator:
 
     def __repr__(self) -> str:  # pragma: no cover
         cov = self._coverage_history[-1] if self._coverage_history else 0.0
-        return (
-            f"<CAMECoordinator cycle={self._cycle} coverage={cov:.2%} "
-            f"config={self._config!r}>"
-        )
+        return f"<CAMECoordinator cycle={self._cycle} coverage={cov:.2%} config={self._config!r}>"
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -359,7 +364,9 @@ class CAMECoordinator:
                     self._log_state[metric] = (next_epoch, value)
                     entries_written += 1
             except Exception:
-                logger.error("Log write failed (cycle=%d, metric=%s)", self._cycle, metric, exc_info=True)
+                logger.error(
+                    "Log write failed (cycle=%d, metric=%s)", self._cycle, metric, exc_info=True
+                )
                 last_error = f"{self._cycle}:{uuid.uuid4().hex[:8]}"
 
         if entries_written > 0:

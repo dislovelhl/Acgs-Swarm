@@ -206,9 +206,7 @@ class HashCommitmentProver:
 
     scheme_id: str = "hash-commitment-v1"
 
-    def prove(
-        self, statement: ValidityStatement, witness: ValidityWitness
-    ) -> bytes:
+    def prove(self, statement: ValidityStatement, witness: ValidityWitness) -> bytes:
         if witness.choice not in BallotChoice:
             raise ValueError("witness.choice must be a BallotChoice member")
         return _digest(
@@ -313,15 +311,11 @@ def _signing_payload_commit(
     commit: bytes,
     nullifier: bytes,
 ) -> bytes:
-    return _digest(
-        b"acgs-commit-sig-v1", epoch, subject, voter_pub, commit, nullifier
-    )
+    return _digest(b"acgs-commit-sig-v1", epoch, subject, voter_pub, commit, nullifier)
 
 
 def _signing_payload_reveal(commit: bytes, choice: BallotChoice, nonce: bytes) -> bytes:
-    return _digest(
-        b"acgs-reveal-sig-v1", commit, choice.value.encode("ascii"), nonce
-    )
+    return _digest(b"acgs-reveal-sig-v1", commit, choice.value.encode("ascii"), nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -381,9 +375,7 @@ class CommitRecord:
                 raw_scheme = data.get("proof_scheme")
                 proof_scheme = None if raw_scheme is None else str(raw_scheme)
                 raw_proof = data.get("validity_proof")
-                validity_proof = (
-                    None if raw_proof is None else bytes.fromhex(str(raw_proof))
-                )
+                validity_proof = None if raw_proof is None else bytes.fromhex(str(raw_proof))
             return cls(
                 version=version,
                 epoch=bytes.fromhex(str(data["epoch"])),
@@ -477,13 +469,9 @@ def build_commit(
     )
 
     commit_sig = voter_private_key.sign(
-        _signing_payload_commit(
-            epoch, subject, voter_pub_raw, commit_digest, nullifier
-        )
+        _signing_payload_commit(epoch, subject, voter_pub_raw, commit_digest, nullifier)
     )
-    reveal_sig = voter_private_key.sign(
-        _signing_payload_reveal(commit_digest, choice, nonce)
-    )
+    reveal_sig = voter_private_key.sign(_signing_payload_reveal(commit_digest, choice, nonce))
 
     proof_scheme: str | None = None
     validity_proof: bytes | None = None
@@ -496,9 +484,7 @@ def build_commit(
             commit=commit_digest,
             nullifier=nullifier,
         )
-        witness = ValidityWitness(
-            choice=choice, nonce=nonce, voter_secret=voter_secret
-        )
+        witness = ValidityWitness(choice=choice, nonce=nonce, voter_secret=voter_secret)
         validity_proof = prover.prove(statement, witness)
         proof_scheme = prover.scheme_id
         record_version = _V2_VERSION
@@ -532,9 +518,7 @@ def build_reveal(
     nonce: bytes,
 ) -> RevealRecord:
     """Create a reveal record for a previously built commit."""
-    reveal_sig = voter_private_key.sign(
-        _signing_payload_reveal(commit, choice, nonce)
-    )
+    reveal_sig = voter_private_key.sign(_signing_payload_reveal(commit, choice, nonce))
     return RevealRecord(
         version=_RECORD_VERSION,
         commit=commit,
@@ -567,9 +551,7 @@ def _verify_commit_signature(record: CommitRecord) -> None:
         raise InvalidCommitError("bad commit signature") from exc
 
 
-def _verify_reveal_against_commit(
-    reveal: RevealRecord, commit_record: CommitRecord
-) -> None:
+def _verify_reveal_against_commit(reveal: RevealRecord, commit_record: CommitRecord) -> None:
     expected = _commit_digest(
         reveal.choice, reveal.nonce, commit_record.epoch, commit_record.subject
     )
@@ -670,9 +652,7 @@ def tally(
         if c.version >= _V2_VERSION and c.proof_scheme is not None:
             prover = provers_map.get(c.proof_scheme)
             if prover is None:
-                rejected.append(
-                    (c.commit, f"no verifier for scheme {c.proof_scheme!r}")
-                )
+                rejected.append((c.commit, f"no verifier for scheme {c.proof_scheme!r}"))
                 continue
             if c.validity_proof is None:
                 rejected.append((c.commit, "proof_scheme set but validity_proof absent"))
@@ -697,9 +677,7 @@ def tally(
     if require_all_revealed:
         missing = [c.commit for c in accepted if c.commit not in reveals_by_commit]
         if missing:
-            raise MissingRevealError(
-                f"{len(missing)} accepted commits have no reveal"
-            )
+            raise MissingRevealError(f"{len(missing)} accepted commits have no reveal")
 
     totals: dict[BallotChoice, int] = {ch: 0 for ch in BallotChoice}
     tallied_commits: list[bytes] = []

@@ -33,9 +33,7 @@ try:
     import torch.nn as nn
     from torch import Tensor
 except ImportError as exc:
-    raise ImportError(
-        "swarm_ode requires torch. Install with: pip install torch>=2.0"
-    ) from exc
+    raise ImportError("swarm_ode requires torch. Install with: pip install torch>=2.0") from exc
 
 from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
 
@@ -107,7 +105,7 @@ def _spectral_norm_torch(M: Tensor, max_iter: int = 20) -> float:
         new_norm = MTMv.norm().item()
         if new_norm < 1e-14:
             return 0.0
-        new_sigma = new_norm ** 0.5
+        new_sigma = new_norm**0.5
         v = MTMv / new_norm
         if abs(new_sigma - sigma) / (sigma + 1e-12) < 1e-8:
             return new_sigma
@@ -234,7 +232,10 @@ def integrate(
                 )
 
         H = projected_rk4_step(
-            f, H, t, dt,
+            f,
+            H,
+            t,
+            dt,
             r=r,
             residual_alpha=residual_alpha,
             max_power_iter=max_power_iter,
@@ -449,10 +450,14 @@ class DiscreteGaussianSampler:
             if self._seed is not None
             else None
         )
-        sampler = self if sensitivity == 1.0 else DiscreteGaussianSampler(
-            sigma=scaled_sigma,
-            tail_bound=self._tail,
-            seed=derived_seed,
+        sampler = (
+            self
+            if sensitivity == 1.0
+            else DiscreteGaussianSampler(
+                sigma=scaled_sigma,
+                tail_bound=self._tail,
+                seed=derived_seed,
+            )
         )
         return sampler.sample_tensor(shape)
 
@@ -535,6 +540,7 @@ class DrandClient:
         try:
             with urllib.request.urlopen(url, timeout=self._timeout) as resp:  # noqa: S310
                 import json
+
                 data = json.loads(resp.read())
         except urllib.error.URLError as exc:
             raise RuntimeError(f"drand fetch failed for {url}: {exc}") from exc

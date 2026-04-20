@@ -119,17 +119,13 @@ MAX_BATCH_NODES: int = 1000
 def decode_batch(message: str) -> list[DAGNode]:
     """Decode a JSON string to a list of DAGNodes."""
     if len(message) > MAX_BATCH_BYTES:
-        raise ValueError(
-            f"Gossip batch too large: {len(message)} bytes (limit {MAX_BATCH_BYTES})"
-        )
+        raise ValueError(f"Gossip batch too large: {len(message)} bytes (limit {MAX_BATCH_BYTES})")
     try:
         items = json.loads(message)
         if not isinstance(items, list):
             raise ValueError(f"Expected JSON array, got {type(items)}")
         if len(items) > MAX_BATCH_NODES:
-            raise ValueError(
-                f"Gossip batch too many nodes: {len(items)} (limit {MAX_BATCH_NODES})"
-            )
+            raise ValueError(f"Gossip batch too many nodes: {len(items)} (limit {MAX_BATCH_NODES})")
         return [_wire_to_node(item) for item in items]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise ValueError(f"Malformed gossip batch: {exc}") from exc
@@ -408,7 +404,7 @@ class SwarmNode:
         if self._gossip_batch_size > 0:
             # Sort by CID for determinism, take last N
             nodes.sort(key=lambda n: n.cid)
-            nodes = nodes[-self._gossip_batch_size:]
+            nodes = nodes[-self._gossip_batch_size :]
         return nodes
 
     async def gossip_round(
@@ -539,9 +535,7 @@ async def simulate_ws_gossip_convergence(
                     )
 
             # Gossip round (all nodes push to n_peers)
-            await asyncio.gather(
-                *[node.gossip_round(n_peers=n_peers, rng=rng) for node in nodes]
-            )
+            await asyncio.gather(*[node.gossip_round(n_peers=n_peers, rng=rng) for node in nodes])
             # Small pause to let receivers process
             await asyncio.sleep(0.02)
 
@@ -566,6 +560,7 @@ async def simulate_ws_gossip_convergence(
         "sizes": sizes,
         "unique_cids": len(cid_sets[0]) if converged else -1,
     }
+
 
 # Backwards-compatible alias — CI smoke test imports this name
 GossipNode = SwarmNode

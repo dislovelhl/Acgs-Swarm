@@ -88,9 +88,7 @@ def compute_version_digest(
     if epoch < 0:
         raise ValueError(f"epoch must be non-negative, got {epoch}")
     if len(parent_digest) not in (0, 32):
-        raise ValueError(
-            f"parent_digest must be 0 or 32 bytes, got {len(parent_digest)}"
-        )
+        raise ValueError(f"parent_digest must be 0 or 32 bytes, got {len(parent_digest)}")
     h = hashlib.sha256()
     h.update(_DOMAIN)
     h.update(b"version")
@@ -176,9 +174,7 @@ class AmendmentProposal:
                 f"(prior={self.prior.epoch}, proposed={self.proposed.epoch})"
             )
         if self.proposed.parent_digest != self.prior.digest:
-            raise InvalidTransitionError(
-                "proposed.parent_digest must equal prior.digest"
-            )
+            raise InvalidTransitionError("proposed.parent_digest must equal prior.digest")
 
     @property
     def drift(self) -> int:
@@ -237,8 +233,7 @@ def verify_transition(
     drift = proposal.drift
     if drift > proposal.drift_budget.max_rule_delta:
         raise DriftBudgetExceeded(
-            f"rule drift {drift} exceeds budget "
-            f"{proposal.drift_budget.max_rule_delta}"
+            f"rule drift {drift} exceeds budget {proposal.drift_budget.max_rule_delta}"
         )
 
     # Signers must live in their respective validator sets.
@@ -258,11 +253,9 @@ def verify_transition(
 
     if old_support < certificate.old_side_threshold:
         raise JointQuorumNotMetError(
-            f"old-side stake {old_support} < threshold "
-            f"{certificate.old_side_threshold}"
+            f"old-side stake {old_support} < threshold {certificate.old_side_threshold}"
         )
     if new_support < certificate.new_side_threshold:
         raise JointQuorumNotMetError(
-            f"new-side stake {new_support} < threshold "
-            f"{certificate.new_side_threshold}"
+            f"new-side stake {new_support} < threshold {certificate.new_side_threshold}"
         )

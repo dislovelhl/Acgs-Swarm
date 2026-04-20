@@ -167,9 +167,7 @@ class TestFitSubspace:
 
     def test_dim_mismatch_raises(self):
         with pytest.raises(DimensionMismatchError):
-            fit_subspace(
-                [np.zeros(4)], [np.zeros(5)], rank=1
-            )
+            fit_subspace([np.zeros(4)], [np.zeros(5)], rank=1)
 
     def test_insufficient_samples_raises(self):
         with pytest.raises(InsufficientSamplesError):
@@ -184,14 +182,10 @@ class TestFitSubspace:
         """Key adversarial property: after fitting on train, steering
         new unsafe samples reduces their residual violation mass
         significantly."""
-        safe, unsafe = _make_clusters(
-            d=16, n=100, axis=5, separation=4.0, seed=7
-        )
+        safe, unsafe = _make_clusters(d=16, n=100, axis=5, separation=4.0, seed=7)
         # Split train/eval
         sub = fit_subspace(safe[:80], unsafe[:80], rank=1)
-        score_before = adversarial_score(
-            sub, unsafe[80:], gamma=1.0, tau=0.0
-        )
+        score_before = adversarial_score(sub, unsafe[80:], gamma=1.0, tau=0.0)
         # With full gamma=1, residual mass in subspace should collapse
         assert score_before < 0.1
 
@@ -203,9 +197,7 @@ class TestFitSubspace:
 
 class TestFitLeace:
     def test_fits_and_erases_label_signal(self):
-        safe, unsafe = _make_clusters(
-            d=12, n=60, axis=3, separation=3.0, seed=11
-        )
+        safe, unsafe = _make_clusters(d=12, n=60, axis=3, separation=3.0, seed=11)
         sub = fit_leace(safe, unsafe, ridge=1e-3)
         assert sub.is_leace
         # After erasure: mean unsafe minus mean safe in the erased
@@ -216,9 +208,7 @@ class TestFitLeace:
         assert abs(float(unsafe_coords.mean() - safe_coords.mean())) > 0.5
         # After one-sided steering (gamma=1, tau=0): positive violation
         # coordinates collapse to 0; negative coords pass through.
-        steered = np.asarray(
-            [sub.steer(u, gamma=1.0, tau=0.0) for u in unsafe]
-        )
+        steered = np.asarray([sub.steer(u, gamma=1.0, tau=0.0) for u in unsafe])
         steered_coords = sub.coordinates(steered)
         assert float(steered_coords.max()) <= 1e-6
 
@@ -289,9 +279,7 @@ class TestRiskAdaptiveSteering:
 
 class TestAdversarialScore:
     def test_score_reduces_with_larger_gamma(self):
-        safe, unsafe = _make_clusters(
-            d=16, n=80, axis=4, separation=4.0, seed=9
-        )
+        safe, unsafe = _make_clusters(d=16, n=80, axis=4, separation=4.0, seed=9)
         sub = fit_subspace(safe, unsafe, rank=1)
         low = adversarial_score(sub, unsafe, gamma=0.2, tau=0.0)
         high = adversarial_score(sub, unsafe, gamma=1.0, tau=0.0)
@@ -327,23 +315,21 @@ class TestAdversarialScore:
         sub1 = fit_subspace(safe, unsafe, rank=1)
         sub2 = fit_subspace(safe, unsafe, rank=2)
         # One-sided steering drives positive coords to 0
-        steered1 = np.asarray(
-            [sub1.steer(u, gamma=1.0, tau=0.0) for u in unsafe]
-        )
-        steered2 = np.asarray(
-            [sub2.steer(u, gamma=1.0, tau=0.0) for u in unsafe]
-        )
+        steered1 = np.asarray([sub1.steer(u, gamma=1.0, tau=0.0) for u in unsafe])
+        steered2 = np.asarray([sub2.steer(u, gamma=1.0, tau=0.0) for u in unsafe])
         # Measure residual projection along each individual mode axis
         mode_a = np.zeros(d)
         mode_a[3] = 1.0
         mode_b = np.zeros(d)
         mode_b[7] = 1.0
+
         # Rank-2 subspace should reduce projection along BOTH modes
         # Rank-1 can only reduce one. The sum of post-steer
         # positive projections along mode_a and mode_b should be
         # smaller for rank-2.
         def pos_mass(H, axis):
             return float(np.clip(H @ axis, 0, None).mean())
+
         mass1 = pos_mass(steered1, mode_a) + pos_mass(steered1, mode_b)
         mass2 = pos_mass(steered2, mode_a) + pos_mass(steered2, mode_b)
         assert mass2 <= mass1 + 1e-6

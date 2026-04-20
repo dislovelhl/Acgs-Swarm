@@ -232,7 +232,7 @@ def cmd_validator(args: argparse.Namespace) -> None:
                 except Exception as _exc:
                     if _attempt == 2:
                         print(f"  WARNING: metagraph.sync() failed after 3 attempts: {_exc}")
-                    time.sleep(2 ** _attempt)
+                    time.sleep(2**_attempt)
 
             # Register any new miners we discover
             for uid in range(metagraph.n):

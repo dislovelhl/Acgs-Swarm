@@ -134,9 +134,7 @@ def test_agent_governed_metadata_key_set() -> None:
 class _PatchingAgent(SWEBenchAgent):
     """Test double that always returns a fixed patch."""
 
-    def _generate_patch(
-        self, task: dict
-    ) -> tuple[str, dict]:
+    def _generate_patch(self, task: dict) -> tuple[str, dict]:
         diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-bad\n+good\n"
         return diff, {"intervention_rate": 0.1, "total_tokens": 100, "steered_tokens": 10}
 
@@ -213,9 +211,7 @@ def test_summary_empty() -> None:
 
 
 def test_summary_all_failed() -> None:
-    results = [
-        SWEPatch(task_id=f"t{i}", patch="", success=False) for i in range(5)
-    ]
+    results = [SWEPatch(task_id=f"t{i}", patch="", success=False) for i in range(5)]
     s = SWEBenchHarness.summary(results)
     assert s["total"] == 5
     assert s["resolved"] == 0
@@ -303,7 +299,9 @@ def test_load_from_local_jsonl_max_tasks(tmp_path: Path) -> None:
 def test_load_returns_empty_when_no_source(tmp_path: Path) -> None:
     """Missing JSONL + no swebench → empty list, no exception."""
     # Patch import to simulate swebench not installed
-    with patch.dict("sys.modules", {"swebench": None, "swebench.harness": None, "swebench.harness.utils": None}):
+    with patch.dict(
+        "sys.modules", {"swebench": None, "swebench.harness": None, "swebench.harness.utils": None}
+    ):
         loaded = load_swe_bench_lite(split="test", data_dir=tmp_path)
     assert loaded == []
 

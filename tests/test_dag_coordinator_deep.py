@@ -1425,9 +1425,10 @@ class TestSwarmExecutorAvailableTasksSnapshotIsolation:
         assert len(claimed) == len(set(claimed))
         assert len(claimed) == 25
         assert executor.dag is not None
-        assert sum(
-            1 for node in executor.dag.nodes.values() if node.status == ExecutionStatus.CLAIMED
-        ) == 25
+        assert (
+            sum(1 for node in executor.dag.nodes.values() if node.status == ExecutionStatus.CLAIMED)
+            == 25
+        )
 
 
 class TestSwarmBenchmarkEdgeCases:

@@ -82,9 +82,7 @@ class ValidatorIdentity:
         if self.stake < 0.0:
             raise ValueError(f"stake must be non-negative, got {self.stake}")
         if not 0.0 <= self.reputation <= 1.0:
-            raise ValueError(
-                f"reputation must be in [0, 1], got {self.reputation}"
-            )
+            raise ValueError(f"reputation must be in [0, 1], got {self.reputation}")
 
     @property
     def effective_weight(self) -> float:
@@ -119,13 +117,10 @@ class FaultDomainPolicy:
 
     def __post_init__(self) -> None:
         if not 0.0 < self.max_fraction <= 1.0:
-            raise ValueError(
-                f"max_fraction must be in (0, 1], got {self.max_fraction}"
-            )
+            raise ValueError(f"max_fraction must be in (0, 1], got {self.max_fraction}")
         if self.untagged_policy not in ("strict", "lenient"):
             raise ValueError(
-                f"untagged_policy must be 'strict' or 'lenient', "
-                f"got {self.untagged_policy!r}"
+                f"untagged_policy must be 'strict' or 'lenient', got {self.untagged_policy!r}"
             )
 
     def resolve_domain(self, validator: ValidatorIdentity) -> str:
@@ -245,9 +240,7 @@ class ValidatorSet:
 
     def snapshot(self) -> tuple[ValidatorIdentity, ...]:
         """Deterministic ordered tuple of all validators (by agent_id)."""
-        return tuple(
-            self._validators[k] for k in sorted(self._validators)
-        )
+        return tuple(self._validators[k] for k in sorted(self._validators))
 
 
 class CommitteeSelector:
@@ -279,9 +272,7 @@ class CommitteeSelector:
         """
         if weight <= 0:
             return float("inf")
-        digest = hashlib.sha256(
-            f"{seed}\x00{agent_id}".encode()
-        ).digest()
+        digest = hashlib.sha256(f"{seed}\x00{agent_id}".encode()).digest()
         # Uniform in (0, 1] — avoid 0 to keep log defined
         raw = int.from_bytes(digest[:8], "big") + 1
         u = raw / (1 << 64)
@@ -317,13 +308,9 @@ class CommitteeSelector:
             fault-domain policy), and per-domain weight breakdown.
         """
         if committee_size <= 0:
-            raise ValueError(
-                f"committee_size must be positive, got {committee_size}"
-            )
+            raise ValueError(f"committee_size must be positive, got {committee_size}")
         excluded = frozenset(exclude)
-        candidates = [
-            v for v in self._set if v.agent_id not in excluded
-        ]
+        candidates = [v for v in self._set if v.agent_id not in excluded]
         if not candidates:
             return CommitteeSelection(
                 members=(),
@@ -334,10 +321,7 @@ class CommitteeSelector:
             )
         # Priority-sample the k lowest-score validators
         k = min(committee_size, len(candidates))
-        scored = [
-            (self._score(seed, v.agent_id, v.effective_weight), v)
-            for v in candidates
-        ]
+        scored = [(self._score(seed, v.agent_id, v.effective_weight), v) for v in candidates]
         chosen = heapq.nsmallest(k, scored, key=lambda t: t[0])
         picked = [v for _, v in chosen]
         # Sort deterministically by agent_id so serialized committees
@@ -389,9 +373,7 @@ class CommitteeSelector:
         """
         for attempt in range(max_retries):
             probe_seed = seed if attempt == 0 else f"{seed}\x00{attempt}"
-            result = self.select(
-                probe_seed, committee_size, exclude=exclude
-            )
+            result = self.select(probe_seed, committee_size, exclude=exclude)
             if result.has_quorum(threshold_fraction):
                 return result
         raise SybilBoundViolation(

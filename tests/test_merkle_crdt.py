@@ -267,11 +267,12 @@ def test_topological_order_deterministic() -> None:
 async def test_gossip_convergence_small() -> None:
     """5 agents, 10 rounds → all replicas must converge to identical CID sets."""
     result = await simulate_gossip_convergence(
-        n_agents=5, n_rounds=10, artifacts_per_round=2, gossip_partners=2,
+        n_agents=5,
+        n_rounds=10,
+        artifacts_per_round=2,
+        gossip_partners=2,
     )
-    assert result["converged"], (
-        f"Gossip did not converge: sizes={result['sizes']}"
-    )
+    assert result["converged"], f"Gossip did not converge: sizes={result['sizes']}"
     assert result["unique_cids"] == result["total_artifacts"]
     print("\nGossip convergence (5 agents, 10 rounds)")
     print(f"  total artifacts: {result['total_artifacts']}")
@@ -283,11 +284,12 @@ async def test_gossip_convergence_small() -> None:
 async def test_gossip_convergence_large() -> None:
     """20 agents, 20 rounds → eventual convergence even with sparse gossip."""
     result = await simulate_gossip_convergence(
-        n_agents=20, n_rounds=20, artifacts_per_round=3, gossip_partners=3,
+        n_agents=20,
+        n_rounds=20,
+        artifacts_per_round=3,
+        gossip_partners=3,
     )
-    assert result["converged"], (
-        f"Gossip did not converge with 20 agents: sizes={result['sizes']}"
-    )
+    assert result["converged"], f"Gossip did not converge with 20 agents: sizes={result['sizes']}"
     expected_total = 20 * 20 * 3
     assert result["unique_cids"] == expected_total
     print("\nGossip convergence (20 agents, 20 rounds)")
