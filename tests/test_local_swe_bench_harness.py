@@ -340,5 +340,86 @@ def test_harness_env_isolation_install_failure_is_reported(tmp_path) -> None:
     assert result.metadata.get("env_stage") == "pip-install"
 
 
+def test_harness_env_isolation_uses_uv_for_python_version(tmp_path) -> None:
+    """With python_version set, harness uses `uv python install` + `uv venv --python`."""
+    harness = LocalSWEBenchHarness(
+        work_dir=tmp_path, env_isolation=True, python_version="3.10"
+    )
+    runner = _FakeRunner(
+        [
+            (["clone", "https://github.com"], 0, ""),
+            (["clone", "--no-hardlinks"], 0, ""),
+            (["checkout", "--detach"], 0, ""),
+            (["apply", "--index"], 0, ""),
+            (["uv", "python", "install", "3.10"], 0, ""),
+            (["uv", "venv", "--seed", "--python", "3.10"], 0, ""),
+            (["pip", "install", "--quiet", "--upgrade"], 0, ""),
+            (["pip", "install", "--quiet"], 0, ""),
+            (["/bin/python", "-m", "pytest", "test_thing"], 0, "== 1 passed in 0.01s =="),
+            (["/bin/python", "-m", "pytest", "test_other"], 0, "== 1 passed in 0.01s =="),
+        ]
+    )
+    with patch(
+        "constitutional_swarm.swe_bench.local_harness.shutil.which",
+        return_value="/usr/bin/uv",
+    ), patch("subprocess.run", side_effect=runner):
+        result = harness.evaluate(_INSTANCE, patch=_PATCH)
+    assert result.applied is True
+    assert result.resolved is True
+    assert result.metadata.get("env_python_version") == "3.10"
+    # Confirm the uv install + uv venv subcommands actually ran.
+    cmds = [" ".join(c) for c in runner.calls]
+    assert any("uv python install 3.10" in c for c in cmds)
+    assert any("uv venv --seed --python 3.10" in c for c in cmds)
+
+
+def test_harness_env_isolation_uv_missing_is_reported(tmp_path) -> None:
+    """If python_version is requested but uv is not on PATH, surface env-stage failure."""
+    harness = LocalSWEBenchHarness(
+        work_dir=tmp_path, env_isolation=True, python_version="3.10"
+    )
+    runner = _FakeRunner(
+        [
+            (["clone", "https://github.com"], 0, ""),
+            (["clone", "--no-hardlinks"], 0, ""),
+            (["checkout", "--detach"], 0, ""),
+            (["apply", "--index"], 0, ""),
+        ]
+    )
+    with patch(
+        "constitutional_swarm.swe_bench.local_harness.shutil.which",
+        return_value=None,
+    ), patch("subprocess.run", side_effect=runner):
+        result = harness.evaluate(_INSTANCE, patch=_PATCH)
+    assert result.applied is True
+    assert result.resolved is False
+    assert result.stage == "env"
+    assert result.metadata.get("env_stage") == "uv-missing"
+    assert "uv" in (result.error or "")
+
+
+def test_detect_python_version_reads_requires_python(tmp_path) -> None:
+    """_detect_python_version extracts lower bound from pyproject requires-python."""
+    from constitutional_swarm.swe_bench.local_harness import _detect_python_version
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\nrequires-python = ">=3.9,<3.11"\n'
+    )
+    assert _detect_python_version(wt) == "3.9"
+
+    # Caret form
+    (wt / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\nrequires-python = "^3.10"\n'
+    )
+    assert _detect_python_version(wt) == "3.10"
+
+    # Missing file / missing field
+    assert _detect_python_version(tmp_path / "does-not-exist") is None
+    (wt / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0"\n')
+    assert _detect_python_version(wt) is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

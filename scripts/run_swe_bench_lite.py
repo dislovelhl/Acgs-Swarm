@@ -100,6 +100,15 @@ def main(argv: list[str] | None = None) -> int:
         default=900.0,
         help="Timeout for venv creation + pip install (seconds).",
     )
+    parser.add_argument(
+        "--python-version",
+        default=None,
+        help=(
+            "Target Python X.Y for env isolation (uses `uv python install` "
+            "+ `uv venv --python`). Per-instance `python_version` keys "
+            "override this; auto-detected from pyproject.toml if unset."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -120,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout_s=args.harness_timeout,
         env_isolation=args.env_isolation,
         env_timeout_s=args.env_timeout,
+        python_version=args.python_version,
     )
 
     rows: list[dict[str, Any]] = []

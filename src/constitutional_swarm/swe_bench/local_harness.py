@@ -20,6 +20,17 @@ CI environment). When ``env_isolation=False`` (the default), the caller
 must ensure the target repo's deps are importable from the active
 interpreter. Full Docker-based isolation remains a separate iteration.
 
+Python version selection
+------------------------
+SWE-bench Lite base commits target 2022-2023 era Python (3.9-3.11); a
+modern host interpreter (e.g. 3.14) will fail to resolve era-pinned
+wheels. When ``python_version`` is set (or present on the instance dict,
+or auto-detected from the repo's ``pyproject.toml``'s ``requires-python``),
+and ``uv`` is available on PATH, the harness calls ``uv python install``
++ ``uv venv --python`` to materialise an interpreter of the requested
+version before pip-installing the worktree. This is still Docker-less
+but lifts the host-Python ceiling.
+
 Inputs
 ------
 An "instance" is a ``dict`` with the SWE-bench Lite schema fields used
@@ -123,6 +134,15 @@ class LocalSWEBenchHarness:
     env_timeout_s:
         Timeout for venv creation and ``pip install`` (installing packages
         like astropy / scipy can take several minutes on first run).
+    python_version:
+        Optional "X.Y" Python version string (e.g. ``"3.10"``). When set
+        together with ``env_isolation=True``, the harness materialises a
+        venv with that Python via ``uv python install`` + ``uv venv
+        --python``. A per-instance ``python_version`` key on the
+        instance dict overrides this default; if neither is provided
+        the harness attempts to auto-detect from the worktree's
+        ``pyproject.toml``'s ``requires-python``. Requires ``uv`` on
+        PATH when any version is in effect.
     """
 
     def __init__(
@@ -136,6 +156,7 @@ class LocalSWEBenchHarness:
         env_isolation: bool = False,
         env_cache_dir: Path | str | None = None,
         env_timeout_s: float = 900.0,
+        python_version: str | None = None,
     ) -> None:
         base = Path(work_dir) if work_dir else _DEFAULT_WORK_DIR
         self.work_dir = base / "worktrees"
@@ -149,6 +170,7 @@ class LocalSWEBenchHarness:
         self.keep_worktree = keep_worktree
         self.env_isolation = env_isolation
         self.env_timeout_s = env_timeout_s
+        self.python_version = python_version
 
     # ------------------------------------------------------------------
     # Public API
@@ -197,7 +219,13 @@ class LocalSWEBenchHarness:
                 return result
             test_python = self.python_bin
             if self.env_isolation:
-                venv_path, test_python = self._ensure_env(instance_id, worktree, result)
+                inst_version = str(instance.get("python_version") or "").strip() or None
+                effective_version = inst_version or self.python_version
+                if effective_version is None:
+                    effective_version = _detect_python_version(worktree)
+                venv_path, test_python = self._ensure_env(
+                    instance_id, worktree, result, python_version=effective_version
+                )
                 if test_python is None:
                     return result
             self._run_tests(worktree, fail_to_pass, pass_to_pass, result, test_python)
@@ -344,9 +372,18 @@ class LocalSWEBenchHarness:
         return passed, failed, out
 
     def _ensure_env(
-        self, instance_id: str, worktree: Path, result: HarnessResult
+        self,
+        instance_id: str,
+        worktree: Path,
+        result: HarnessResult,
+        *,
+        python_version: str | None = None,
     ) -> tuple[Path | None, str | None]:
         """Create a per-instance venv and ``pip install`` the patched worktree.
+
+        When ``python_version`` is set, the venv is materialised with that
+        Python via ``uv python install`` + ``uv venv --python`` (requires
+        ``uv`` on PATH). Otherwise falls back to ``<self.python_bin> -m venv``.
 
         Returns ``(venv_path, python_bin)``. On failure, records an env
         error on ``result`` and returns ``(venv_path_or_None, None)`` so
@@ -356,15 +393,42 @@ class LocalSWEBenchHarness:
         venv_path = self.env_cache_dir / _safe_id(instance_id)
         if venv_path.exists():
             shutil.rmtree(venv_path, ignore_errors=True)
-        rc, out = _run(
-            [self.python_bin, "-m", "venv", str(venv_path)],
-            timeout=self.env_timeout_s,
-        )
-        if rc != 0:
-            result.error = f"venv creation failed (rc={rc})"
-            result.log_tail = out[-2000:]
-            result.metadata["env_stage"] = "venv"
-            return venv_path, None
+        if python_version:
+            if not shutil.which("uv"):
+                result.error = (
+                    f"uv not on PATH but python_version={python_version} requested"
+                )
+                result.metadata["env_stage"] = "uv-missing"
+                return None, None
+            rc, out = _run(
+                ["uv", "python", "install", python_version],
+                timeout=self.env_timeout_s,
+            )
+            if rc != 0:
+                result.error = f"uv python install {python_version} failed (rc={rc})"
+                result.log_tail = out[-2000:]
+                result.metadata["env_stage"] = "uv-python-install"
+                return venv_path, None
+            rc, out = _run(
+                ["uv", "venv", "--seed", "--python", python_version, str(venv_path)],
+                timeout=self.env_timeout_s,
+            )
+            if rc != 0:
+                result.error = f"uv venv --python {python_version} failed (rc={rc})"
+                result.log_tail = out[-2000:]
+                result.metadata["env_stage"] = "uv-venv"
+                return venv_path, None
+            result.metadata["env_python_version"] = python_version
+        else:
+            rc, out = _run(
+                [self.python_bin, "-m", "venv", str(venv_path)],
+                timeout=self.env_timeout_s,
+            )
+            if rc != 0:
+                result.error = f"venv creation failed (rc={rc})"
+                result.log_tail = out[-2000:]
+                result.metadata["env_stage"] = "venv"
+                return venv_path, None
         venv_py = str(venv_path / "bin" / "python")
         rc, out = _run(
             [venv_py, "-m", "pip", "install", "--quiet", "--upgrade", "pip", "pytest"],
@@ -429,6 +493,38 @@ def _current_python() -> str:
     import sys
 
     return sys.executable
+
+
+_REQUIRES_PYTHON_RE = re.compile(r"(?:>=?|\^|~=?)\s*(\d+\.\d+)")
+
+
+def _detect_python_version(worktree: Path) -> str | None:
+    """Best-effort parse of ``project.requires-python`` from ``pyproject.toml``.
+
+    Returns the lower-bound "X.Y" if parseable, else None. We pick the
+    lower bound because SWE-bench Lite base commits are historical and
+    generally need the oldest compatible interpreter. ``setup.py`` is
+    not consulted — keep this cheap and explicit.
+    """
+    pyproject = worktree / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover — tomllib is stdlib on 3.11+
+        return None
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    req = data.get("project", {}).get("requires-python")
+    if not isinstance(req, str) or not req.strip():
+        return None
+    match = _REQUIRES_PYTHON_RE.search(req)
+    if match:
+        return match.group(1)
+    fallback = re.search(r"(\d+\.\d+)", req)
+    return fallback.group(1) if fallback else None
 
 
 def _safe_id(raw: str) -> str:
