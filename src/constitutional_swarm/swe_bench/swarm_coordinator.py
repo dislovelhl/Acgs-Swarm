@@ -66,6 +66,7 @@ class SwarmCoordinator:
         tasks: list[dict[str, Any]],
         *,
         max_tasks: int | None = None,
+        routing_weights: list[list[float]] | None = None,
     ) -> dict[str, Any]:
         """Run all agents in-process and merge results via a shared CRDT.
 
@@ -78,6 +79,12 @@ class SwarmCoordinator:
             SWE-bench task list.
         max_tasks:
             Cap on tasks to assign.
+        routing_weights:
+            Optional ``n_agents × n_tasks`` matrix of non-negative weights.
+            When provided, task ``j`` is assigned to the agent with the highest
+            ``routing_weights[i][j]`` (ties broken by lower index). This is how
+            a trust matrix / competency estimate from the swarm mesh is wired
+            into task distribution. ``None`` preserves the round-robin default.
 
         Returns
         -------
@@ -85,10 +92,30 @@ class SwarmCoordinator:
         ``crdt_size``, ``governed_count``, ``mean_intervention``.
         """
         subset = tasks if max_tasks is None else tasks[:max_tasks]
-        # Assign tasks round-robin to agents
-        assignments: list[tuple[SWEBenchAgent, dict[str, Any]]] = [
-            (self.agents[i % len(self.agents)], task) for i, task in enumerate(subset)
-        ]
+        n_agents = len(self.agents)
+
+        if routing_weights is not None:
+            if len(routing_weights) != n_agents or any(
+                len(row) != len(subset) for row in routing_weights
+            ):
+                raise ValueError(
+                    f"routing_weights must be {n_agents}×{len(subset)}, "
+                    f"got {len(routing_weights)}×"
+                    f"{len(routing_weights[0]) if routing_weights else 0}"
+                )
+            assignments: list[tuple[SWEBenchAgent, dict[str, Any]]] = []
+            for j, task in enumerate(subset):
+                # argmax over agents for task j (ties -> lower index)
+                best_i = 0
+                best_w = routing_weights[0][j]
+                for i in range(1, n_agents):
+                    if routing_weights[i][j] > best_w:
+                        best_w = routing_weights[i][j]
+                        best_i = i
+                assignments.append((self.agents[best_i], task))
+        else:
+            # Round-robin default
+            assignments = [(self.agents[i % n_agents], task) for i, task in enumerate(subset)]
 
         # Shared CRDT — all agents write to it
         shared_crdt = MerkleCRDT("coordinator")
