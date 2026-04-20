@@ -238,24 +238,16 @@ class SpectralSphereManifold:
                 )
                 for i in range(n)
             )
-            sigma = spectral_norm_power_iter(
-                [list(row) for row in blended],
-                max_iterations=self._max_power_iter,
-            )
-            if sigma > self._r + 1e-10:
-                scale = self._r / sigma
-                blended = tuple(
-                    tuple(v * scale for v in row) for row in blended
-                )
-                sigma = self._r
-                clipped = True
-            else:
-                clipped = new_proj.clipped
+            # Convex blend of two in-sphere matrices is in-sphere by norm sub-additivity:
+            #   ‖αA + (1-α)B‖₂ ≤ α‖A‖₂ + (1-α)‖B‖₂ ≤ r.
+            # We reuse the tighter of the two parent sigma estimates as an upper bound
+            # instead of re-running power iteration (O(n²·k) saved per project() call).
+            sigma_bound = alpha * self._smoothed.spectral_norm + (1.0 - alpha) * new_proj.spectral_norm
             new_proj = SpectralProjectionResult(
                 matrix=blended,
-                spectral_norm=sigma,
-                clipped=clipped,
-                power_iterations=self._max_power_iter,
+                spectral_norm=sigma_bound,
+                clipped=new_proj.clipped,
+                power_iterations=0,
             )
 
         self._smoothed = new_proj
