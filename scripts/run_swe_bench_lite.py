@@ -89,6 +89,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent-timeout", type=float, default=240.0)
     parser.add_argument("--harness-timeout", type=float, default=600.0)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--env-isolation",
+        action="store_true",
+        help="Create a per-instance venv and pip-install the patched worktree before tests.",
+    )
+    parser.add_argument(
+        "--env-timeout",
+        type=float,
+        default=900.0,
+        help="Timeout for venv creation + pip install (seconds).",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -105,7 +116,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     agent = CodexSWEBenchAgent(model=args.model, timeout_s=args.agent_timeout)
-    harness = LocalSWEBenchHarness(timeout_s=args.harness_timeout)
+    harness = LocalSWEBenchHarness(
+        timeout_s=args.harness_timeout,
+        env_isolation=args.env_isolation,
+        env_timeout_s=args.env_timeout,
+    )
 
     rows: list[dict[str, Any]] = []
     for i, inst in enumerate(instances):

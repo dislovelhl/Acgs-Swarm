@@ -292,5 +292,53 @@ def test_harness_clone_failure_stops_pipeline(tmp_path) -> None:
     assert result.error is not None and "clone failed" in result.error
 
 
+def test_harness_env_isolation_uses_venv_python(tmp_path) -> None:
+    """With env_isolation=True, pytest runs through the venv's python, not the host interpreter."""
+    harness = LocalSWEBenchHarness(work_dir=tmp_path, env_isolation=True)
+    runner = _FakeRunner(
+        [
+            (["clone", "https://github.com"], 0, ""),
+            (["clone", "--no-hardlinks"], 0, ""),
+            (["checkout", "--detach"], 0, ""),
+            (["apply", "--index"], 0, ""),
+            (["-m", "venv"], 0, ""),
+            (["pip", "install", "--quiet", "--upgrade"], 0, ""),
+            (["pip", "install", "--quiet"], 0, ""),
+            (["/bin/python", "-m", "pytest", "test_thing"], 0, "== 1 passed in 0.01s =="),
+            (["/bin/python", "-m", "pytest", "test_other"], 0, "== 1 passed in 0.01s =="),
+        ]
+    )
+    with patch("subprocess.run", side_effect=runner):
+        result = harness.evaluate(_INSTANCE, patch=_PATCH)
+    assert result.applied is True
+    assert result.resolved is True
+    # Venv python path should be recorded in metadata and contain "/venvs/"
+    assert "env_python" in result.metadata
+    assert "venvs" in result.metadata["env_python"]
+
+
+def test_harness_env_isolation_install_failure_is_reported(tmp_path) -> None:
+    """If pip install fails, the instance fails at the env stage (not tests)."""
+    harness = LocalSWEBenchHarness(work_dir=tmp_path, env_isolation=True)
+    runner = _FakeRunner(
+        [
+            (["clone", "https://github.com"], 0, ""),
+            (["clone", "--no-hardlinks"], 0, ""),
+            (["checkout", "--detach"], 0, ""),
+            (["apply", "--index"], 0, ""),
+            (["-m", "venv"], 0, ""),
+            (["pip", "install", "--quiet", "--upgrade"], 0, ""),
+            (["pip", "install", "--quiet"], 1, "ERROR: could not build wheel"),
+        ]
+    )
+    with patch("subprocess.run", side_effect=runner):
+        result = harness.evaluate(_INSTANCE, patch=_PATCH)
+    assert result.applied is True
+    assert result.resolved is False
+    assert result.stage == "env"
+    assert result.error is not None and "pip install target failed" in result.error
+    assert result.metadata.get("env_stage") == "pip-install"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

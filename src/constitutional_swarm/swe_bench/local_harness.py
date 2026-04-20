@@ -12,11 +12,13 @@ Pipeline per instance:
 
 Scope / honesty
 ---------------
-This is a mechanical scaffold. It does **not** provision per-instance
-Python environments — the caller must ensure the target repo's deps are
-importable from the active interpreter. Many SWE-bench Lite instances
-will fail the test phase on a generic environment; Docker-based isolation
-is a separate iteration.
+This is a mechanical scaffold. When ``env_isolation=True``, a per-instance
+venv is created and ``pip install <worktree>`` bootstraps the target repo's
+dependencies; this handles most pure-Python SWE-bench Lite instances but
+does NOT reproduce repo-specific build pinning (no Docker image, no exact
+CI environment). When ``env_isolation=False`` (the default), the caller
+must ensure the target repo's deps are importable from the active
+interpreter. Full Docker-based isolation remains a separate iteration.
 
 Inputs
 ------
@@ -100,13 +102,27 @@ class LocalSWEBenchHarness:
         Persistent cache for bare-ish clones. Reused across instances so
         we pay clone cost once per repo.
     python_bin:
-        Python interpreter used to invoke pytest. Defaults to the current
-        interpreter.
+        Python interpreter used to invoke pytest when env isolation is off.
+        Defaults to the current interpreter.
     timeout_s:
         Per-stage timeout (clone, checkout, apply, each pytest phase).
     keep_worktree:
         If True, leave the scratch worktree in place after evaluation —
         useful for debugging a single instance.
+    env_isolation:
+        If True, create a per-instance venv and ``pip install`` the patched
+        worktree into it before running tests. Pytest then runs with the
+        venv's interpreter so the target project's dependencies don't
+        collide with the host interpreter. If venv creation or install
+        fails, the instance is reported as an env error (resolved=False)
+        rather than silently falling back.
+    env_cache_dir:
+        Root for per-instance venvs. Each evaluation creates a fresh
+        ``<env_cache_dir>/<instance_id>`` venv and removes it afterwards
+        unless ``keep_worktree`` is also set.
+    env_timeout_s:
+        Timeout for venv creation and ``pip install`` (installing packages
+        like astropy / scipy can take several minutes on first run).
     """
 
     def __init__(
@@ -117,15 +133,22 @@ class LocalSWEBenchHarness:
         python_bin: str | None = None,
         timeout_s: float = 600.0,
         keep_worktree: bool = False,
+        env_isolation: bool = False,
+        env_cache_dir: Path | str | None = None,
+        env_timeout_s: float = 900.0,
     ) -> None:
         base = Path(work_dir) if work_dir else _DEFAULT_WORK_DIR
         self.work_dir = base / "worktrees"
         self.repo_cache_dir = Path(repo_cache_dir) if repo_cache_dir else base / "repos"
+        self.env_cache_dir = Path(env_cache_dir) if env_cache_dir else base / "venvs"
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.repo_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.env_cache_dir.mkdir(parents=True, exist_ok=True)
         self.python_bin = python_bin or _current_python()
         self.timeout_s = timeout_s
         self.keep_worktree = keep_worktree
+        self.env_isolation = env_isolation
+        self.env_timeout_s = env_timeout_s
 
     # ------------------------------------------------------------------
     # Public API
@@ -159,6 +182,7 @@ class LocalSWEBenchHarness:
             return result
 
         worktree = self.work_dir / _safe_id(instance_id)
+        venv_path: Path | None = None
         try:
             if worktree.exists():
                 shutil.rmtree(worktree)
@@ -171,7 +195,12 @@ class LocalSWEBenchHarness:
             self._apply_patch(worktree, patch, result)
             if not result.applied:
                 return result
-            self._run_tests(worktree, fail_to_pass, pass_to_pass, result)
+            test_python = self.python_bin
+            if self.env_isolation:
+                venv_path, test_python = self._ensure_env(instance_id, worktree, result)
+                if test_python is None:
+                    return result
+            self._run_tests(worktree, fail_to_pass, pass_to_pass, result, test_python)
             result.stage = "done"
             result.resolved = (
                 result.fail_to_pass_failed == 0
@@ -183,6 +212,8 @@ class LocalSWEBenchHarness:
             result.duration_s = time.monotonic() - t0
             if not self.keep_worktree and worktree.exists():
                 shutil.rmtree(worktree, ignore_errors=True)
+            if not self.keep_worktree and venv_path is not None and venv_path.exists():
+                shutil.rmtree(venv_path, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Stages
@@ -275,24 +306,27 @@ class LocalSWEBenchHarness:
         fail_to_pass: list[str],
         pass_to_pass: list[str],
         result: HarnessResult,
+        python_bin: str,
     ) -> None:
         result.stage = "tests"
         if fail_to_pass:
-            passed, failed, log = self._pytest(worktree, fail_to_pass)
+            passed, failed, log = self._pytest(worktree, fail_to_pass, python_bin)
             result.fail_to_pass_passed = passed
             result.fail_to_pass_failed = failed
             if failed > 0:
                 result.log_tail = log[-2000:]
         if pass_to_pass:
-            passed, failed, log = self._pytest(worktree, pass_to_pass)
+            passed, failed, log = self._pytest(worktree, pass_to_pass, python_bin)
             result.pass_to_pass_passed = passed
             result.pass_to_pass_failed = failed
             if failed > 0 and not result.log_tail:
                 result.log_tail = log[-2000:]
 
-    def _pytest(self, worktree: Path, test_ids: list[str]) -> tuple[int, int, str]:
+    def _pytest(
+        self, worktree: Path, test_ids: list[str], python_bin: str
+    ) -> tuple[int, int, str]:
         cmd = [
-            self.python_bin,
+            python_bin,
             "-m",
             "pytest",
             "--no-header",
@@ -308,6 +342,50 @@ class LocalSWEBenchHarness:
         if rc != 0 and passed == 0 and failed == 0:
             failed = len(test_ids)
         return passed, failed, out
+
+    def _ensure_env(
+        self, instance_id: str, worktree: Path, result: HarnessResult
+    ) -> tuple[Path | None, str | None]:
+        """Create a per-instance venv and ``pip install`` the patched worktree.
+
+        Returns ``(venv_path, python_bin)``. On failure, records an env
+        error on ``result`` and returns ``(venv_path_or_None, None)`` so
+        the caller can short-circuit without running tests.
+        """
+        result.stage = "env"
+        venv_path = self.env_cache_dir / _safe_id(instance_id)
+        if venv_path.exists():
+            shutil.rmtree(venv_path, ignore_errors=True)
+        rc, out = _run(
+            [self.python_bin, "-m", "venv", str(venv_path)],
+            timeout=self.env_timeout_s,
+        )
+        if rc != 0:
+            result.error = f"venv creation failed (rc={rc})"
+            result.log_tail = out[-2000:]
+            result.metadata["env_stage"] = "venv"
+            return venv_path, None
+        venv_py = str(venv_path / "bin" / "python")
+        rc, out = _run(
+            [venv_py, "-m", "pip", "install", "--quiet", "--upgrade", "pip", "pytest"],
+            timeout=self.env_timeout_s,
+        )
+        if rc != 0:
+            result.error = f"pip bootstrap failed (rc={rc})"
+            result.log_tail = out[-2000:]
+            result.metadata["env_stage"] = "pip-bootstrap"
+            return venv_path, None
+        rc, out = _run(
+            [venv_py, "-m", "pip", "install", "--quiet", str(worktree)],
+            timeout=self.env_timeout_s,
+        )
+        if rc != 0:
+            result.error = f"pip install target failed (rc={rc})"
+            result.log_tail = out[-2000:]
+            result.metadata["env_stage"] = "pip-install"
+            return venv_path, None
+        result.metadata["env_python"] = venv_py
+        return venv_path, venv_py
 
 
 # ----------------------------------------------------------------------
