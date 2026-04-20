@@ -421,5 +421,96 @@ def test_detect_python_version_reads_requires_python(tmp_path) -> None:
     assert _detect_python_version(wt) is None
 
 
+def test_detect_test_runner_django_vs_pytest(tmp_path) -> None:
+    from constitutional_swarm.swe_bench.local_harness import _detect_test_runner
+
+    # Bare worktree → pytest default
+    wt = tmp_path / "bare"
+    wt.mkdir()
+    assert _detect_test_runner(wt) == "pytest"
+
+    # django/django layout → django runner
+    wt2 = tmp_path / "dj"
+    (wt2 / "tests").mkdir(parents=True)
+    (wt2 / "tests" / "runtests.py").write_text("# django runtests\n")
+    assert _detect_test_runner(wt2) == "django"
+
+
+def test_parse_django_summary_ok_and_failed() -> None:
+    from constitutional_swarm.swe_bench.local_harness import _parse_django_summary
+
+    ok = "......\n----------------------------------------------------------------------\nRan 6 tests in 0.123s\n\nOK\n"
+    assert _parse_django_summary(ok) == (6, 0)
+
+    mixed = (
+        ".F.E..\n----------\nRan 6 tests in 0.42s\n\n"
+        "FAILED (failures=1, errors=1, skipped=2)\n"
+    )
+    # 6 total - (1 failure + 1 error) = 4 passed
+    assert _parse_django_summary(mixed) == (4, 2)
+
+    # No summary block (crash) → (0, 0), caller decides
+    assert _parse_django_summary("segfault!\n") == (0, 0)
+
+    # OK with skips — skipped are not failures
+    ok_skip = "Ran 5 tests in 0.10s\n\nOK (skipped=2)\n"
+    assert _parse_django_summary(ok_skip) == (5, 0)
+
+
+def test_harness_django_instance_uses_runtests_not_pytest(tmp_path) -> None:
+    """On a django-layout worktree, _run_tests routes through tests/runtests.py."""
+    harness = LocalSWEBenchHarness(work_dir=tmp_path)
+
+    # Make the worktree look like django/django BEFORE clone happens —
+    # the FakeRunner doesn't actually execute git, so we pre-create the
+    # worktree path the harness will then adopt.
+    worktree = harness.work_dir / "django__django-10914"
+    worktree.mkdir(parents=True)
+    (worktree / "tests").mkdir()
+    (worktree / "tests" / "runtests.py").write_text("# django\n")
+
+    instance = {
+        "instance_id": "django__django-10914",
+        "repo": "django/django",
+        "base_commit": "cafef00d",
+        "FAIL_TO_PASS": ["test_utils.tests.OverrideSettingsTests.test_foo"],
+        "PASS_TO_PASS": ["test_utils.tests.OverrideSettingsTests.test_bar"],
+    }
+
+    django_ok = "Ran 1 test in 0.10s\n\nOK\n"
+
+    runner = _FakeRunner(
+        [
+            # The harness rmtree's the existing worktree, then clones — so
+            # the runtests.py stub will be gone. Re-create it after clone
+            # via a matcher that runs as a side effect: easiest is to let
+            # the clone no-op (FakeRunner returns rc=0 with no fs change)
+            # and re-seed after. Instead, short-circuit: set keep_worktree
+            # and pre-seed, then make the clone & checkout pass by matching.
+            (["clone", "https://github.com"], 0, ""),
+            (["clone", "--no-hardlinks"], 0, ""),
+            (["checkout", "--detach"], 0, ""),
+            (["apply", "--index"], 0, ""),
+            (["tests/runtests.py", "test_foo"], 0, django_ok),
+            (["tests/runtests.py", "test_bar"], 0, django_ok),
+        ]
+    )
+    # Pre-seed will be wiped by evaluate's rmtree; we work around by
+    # patching shutil.rmtree to preserve the worktree and by keeping the
+    # FakeRunner tolerant so unmatched calls are no-ops.
+    import constitutional_swarm.swe_bench.local_harness as lh
+
+    with patch.object(lh.shutil, "rmtree"), patch("subprocess.run", side_effect=runner):
+        result = harness.evaluate(instance, patch=_PATCH)
+
+    assert result.applied is True
+    assert result.resolved is True
+    assert result.metadata.get("test_runner") == "django"
+    # Confirm runtests.py was actually invoked, and pytest was not.
+    joined = [" ".join(c) for c in runner.calls]
+    assert any("tests/runtests.py" in c for c in joined)
+    assert not any("-m pytest" in c for c in joined)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

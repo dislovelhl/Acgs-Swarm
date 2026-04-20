@@ -5,8 +5,9 @@ Pipeline per instance:
 1. Clone ``repo`` into a shared cache (once per repo).
 2. Hard-reset a scratch worktree to ``base_commit``.
 3. ``git apply`` the candidate patch.
-4. Run the instance's ``FAIL_TO_PASS`` and ``PASS_TO_PASS`` tests with
-   pytest in the *current* Python interpreter.
+4. Run the instance's ``FAIL_TO_PASS`` and ``PASS_TO_PASS`` tests via
+   a per-repo test runner — django's ``tests/runtests.py`` when that
+   file is present, else pytest in the *current* Python interpreter.
 5. Report a structured :class:`HarnessResult`; ``resolved=True`` iff every
    required test passed.
 
@@ -337,18 +338,55 @@ class LocalSWEBenchHarness:
         python_bin: str,
     ) -> None:
         result.stage = "tests"
+        runner = _detect_test_runner(worktree)
+        result.metadata["test_runner"] = runner
         if fail_to_pass:
-            passed, failed, log = self._pytest(worktree, fail_to_pass, python_bin)
+            passed, failed, log = self._run_suite(
+                worktree, fail_to_pass, python_bin, runner
+            )
             result.fail_to_pass_passed = passed
             result.fail_to_pass_failed = failed
             if failed > 0:
                 result.log_tail = log[-2000:]
         if pass_to_pass:
-            passed, failed, log = self._pytest(worktree, pass_to_pass, python_bin)
+            passed, failed, log = self._run_suite(
+                worktree, pass_to_pass, python_bin, runner
+            )
             result.pass_to_pass_passed = passed
             result.pass_to_pass_failed = failed
             if failed > 0 and not result.log_tail:
                 result.log_tail = log[-2000:]
+
+    def _run_suite(
+        self, worktree: Path, test_ids: list[str], python_bin: str, runner: str
+    ) -> tuple[int, int, str]:
+        if runner == "django":
+            return self._django_runtests(worktree, test_ids, python_bin)
+        return self._pytest(worktree, test_ids, python_bin)
+
+    def _django_runtests(
+        self, worktree: Path, test_ids: list[str], python_bin: str
+    ) -> tuple[int, int, str]:
+        """Run django's tests/runtests.py with dotted SWE-bench test IDs.
+
+        SWE-bench stores django test IDs in django's native dotted form
+        (``test_utils.tests.OverrideSettingsTests.test_foo``); those are
+        what ``runtests.py`` expects, so we pass them through as-is.
+        """
+        cmd = [
+            python_bin,
+            "tests/runtests.py",
+            "--verbosity=2",
+            "--parallel=1",
+            *test_ids,
+        ]
+        rc, out = _run(cmd, cwd=worktree, timeout=self.timeout_s)
+        passed, failed = _parse_django_summary(out)
+        # Collection / env error (zero counts but non-zero rc): count
+        # every requested test as failed so we can never report resolved.
+        if rc != 0 and passed == 0 and failed == 0:
+            failed = len(test_ids)
+        return passed, failed, out
 
     def _pytest(
         self, worktree: Path, test_ids: list[str], python_bin: str
@@ -529,6 +567,54 @@ def _detect_python_version(worktree: Path) -> str | None:
 
 def _safe_id(raw: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
+
+
+def _detect_test_runner(worktree: Path) -> str:
+    """Pick a test runner based on files present in the worktree.
+
+    - ``django``: ``tests/runtests.py`` exists (the django/django repo).
+    - ``pytest``: default fallback.
+
+    Keep the set tight — every new runner adds a parser to maintain.
+    Extend deliberately (sympy ``bin/test``, scikit-learn ``nosetests``,
+    etc.) only when there's evidence of instances needing it.
+    """
+    if (worktree / "tests" / "runtests.py").is_file():
+        return "django"
+    return "pytest"
+
+
+_DJANGO_RAN_RE = re.compile(r"Ran\s+(\d+)\s+tests?\s+in", re.IGNORECASE)
+_DJANGO_FAILED_RE = re.compile(r"FAILED\s*\(([^)]*)\)", re.IGNORECASE)
+
+
+def _parse_django_summary(output: str) -> tuple[int, int]:
+    """Parse django runtests.py output → ``(passed, failed)``.
+
+    Django prints ``Ran N tests in X.XXXs`` followed by either ``OK``
+    (all passed) or ``FAILED (failures=F, errors=E, ...)``. ``skipped``
+    and ``expected failures`` are not counted as failures. When the
+    summary is missing (early crash), returns ``(0, 0)`` and the caller
+    decides how to treat collection failures.
+    """
+    m_ran = _DJANGO_RAN_RE.search(output)
+    if not m_ran:
+        return 0, 0
+    total = int(m_ran.group(1))
+    m_fail = _DJANGO_FAILED_RE.search(output)
+    if not m_fail:
+        return total, 0
+    failed = 0
+    for part in m_fail.group(1).split(","):
+        part = part.strip()
+        for key in ("failures", "errors"):
+            prefix = f"{key}="
+            if part.startswith(prefix):
+                try:
+                    failed += int(part[len(prefix) :])
+                except ValueError:
+                    pass
+    return max(0, total - failed), failed
 
 
 def _as_list(value: Any) -> list[str]:
