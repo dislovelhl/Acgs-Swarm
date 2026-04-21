@@ -59,7 +59,7 @@ class TestJSONLSettlementStoreLocking:
         # After load, the file must be truncated (partial line removed)
         assert p.read_text(encoding="utf-8").endswith("\n")
 
-    def test_file_lock_fallback_to_msvcrt_when_fcntl_none(self, tmp_path, monkeypatch):
+    def test_msvcrt_file_lock_used_when_fcntl_disabled(self, tmp_path, monkeypatch):
         """Module import must remain usable on Windows-style runtimes."""
         import constitutional_swarm.settlement_store as settlement_store
 

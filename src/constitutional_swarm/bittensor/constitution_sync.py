@@ -309,7 +309,7 @@ class ConstitutionReceiver:
         parent_digest: bytes,
     ) -> ConstitutionVersion:
         """Build a canonical ConstitutionVersion from YAML content."""
-        parsed = yaml.safe_load(yaml_content) or {}
+        parsed = yaml.safe_load(yaml_content)
         if not isinstance(parsed, dict):
             raise InvalidTransitionError("constitution payload must decode to a mapping")
         raw_rules = parsed.get("rules", [])

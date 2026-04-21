@@ -9,7 +9,10 @@ Usage:
 Output (last line of stdout):
     {"primary": 91.60, "status": "ok", "sub_scores": {"covered_lines": 7673, "total_lines": 8377, "missing_lines": 704, "tests_exit_code": 0}}
 
-Exit code: 0 on success, 1 on failure.
+Exit codes:
+    0  pytest passed
+    1  pytest ran but one or more tests failed
+    2  pytest errored before completing successfully
 """
 
 from __future__ import annotations
@@ -94,7 +97,11 @@ def main() -> None:
         ),
         flush=True,
     )
-    sys.exit(0 if result.returncode == 0 else 1)
+    if result.returncode == 0:
+        sys.exit(0)
+    if result.returncode == 1:
+        sys.exit(1)
+    sys.exit(2)
 
 
 if __name__ == "__main__":

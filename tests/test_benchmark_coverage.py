@@ -47,7 +47,9 @@ def test_successful_pytest_run_exits_zero(
     assert payload["sub_scores"]["tests_exit_code"] == 0
 
 
-def test_main_exits_one_when_pytest_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
+def test_pytest_error_exits_two(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
     coverage_path = tmp_path / "coverage.json"
     coverage_path.write_text(
         json.dumps(
@@ -72,7 +74,40 @@ def test_main_exits_one_when_pytest_fails(monkeypatch: pytest.MonkeyPatch, tmp_p
     with pytest.raises(SystemExit) as exc:
         _MODULE.main()
 
-    assert exc.value.code == 1
+    assert exc.value.code == 2
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["status"] == "error"
     assert payload["sub_scores"]["tests_exit_code"] == 2
+
+
+def test_pytest_failures_exit_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    coverage_path = tmp_path / "coverage.json"
+    coverage_path.write_text(
+        json.dumps(
+            {
+                "totals": {
+                    "percent_covered": 85.0,
+                    "covered_lines": 85,
+                    "num_statements": 100,
+                    "missing_lines": 15,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_MODULE, "COVERAGE_OUT", coverage_path)
+    monkeypatch.setattr(
+        _MODULE.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        _MODULE.main()
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["status"] == "test-failure"
+    assert payload["sub_scores"]["tests_exit_code"] == 1
