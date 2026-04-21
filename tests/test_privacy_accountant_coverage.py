@@ -217,3 +217,72 @@ class TestPrivacyAccountantIntrospection:
             summary["epsilon_total"],
             rel_tol=1e-9,
         )
+
+
+# ── Security regression tests ─────────────────────────────────────────────────
+
+
+class TestRdpOverflowBranchNonNegative:
+    """P1: overflow branch must return ≥ 0 even with tiny sample_rate."""
+
+    def test_tiny_sample_rate_returns_non_negative(self):
+        """Regression: large exponent + tiny q must not produce negative RDP."""
+        from constitutional_swarm.privacy_accountant import _rdp_subsampled_gaussian
+
+        # q = 1e-20 → log(q) ≈ -46, exponent > 50 → overflow branch
+        result = _rdp_subsampled_gaussian(alpha=20.0, noise_multiplier=0.01, sample_rate=1e-20)
+        assert result >= 0.0, f"RDP must be non-negative; got {result}"
+
+    def test_returns_at_most_eps_base(self):
+        """Privacy amplification can only reduce RDP, never increase it."""
+        from constitutional_swarm.privacy_accountant import _rdp_subsampled_gaussian, _rdp_gaussian
+
+        nm, alpha = 0.01, 20.0
+        eps_base = _rdp_gaussian(alpha, nm)
+        result = _rdp_subsampled_gaussian(alpha=alpha, noise_multiplier=nm, sample_rate=1e-20)
+        assert result <= eps_base + 1e-10
+
+
+class TestComputeRdpTotalThreadSafety:
+    """P2: _compute_rdp_total must read history under lock."""
+
+    def test_rdp_total_consistent_under_concurrent_spend(self):
+        """Concurrent spend + total computation should not raise."""
+        import threading
+        from constitutional_swarm.privacy_accountant import PrivacyAccountant
+
+        pa = PrivacyAccountant(epsilon=1000.0, delta=1e-5)
+        errors = []
+
+        def spender():
+            for _ in range(50):
+                try:
+                    pa.spend(sensitivity=1.0, sigma=10.0)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=spender) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # Must not raise; total RDP should be non-negative
+        assert all(v >= 0 for v in pa._compute_rdp_total())
+        assert not errors
+
+
+class TestSpendTelemetryUsesSubsampledRdp:
+    """P3: spend() per-step ε telemetry should use subsampled RDP."""
+
+    def test_per_step_eps_reflects_sample_rate(self):
+        """Lower sample_rate should yield lower per-step ε (privacy amplification)."""
+        from constitutional_swarm.privacy_accountant import PrivacyAccountant
+
+        pa_full = PrivacyAccountant(epsilon=100.0, delta=1e-5)
+        pa_sub = PrivacyAccountant(epsilon=100.0, delta=1e-5)
+
+        eps_full = pa_full.spend(sensitivity=1.0, sigma=2.0, sample_rate=1.0)
+        eps_sub = pa_sub.spend(sensitivity=1.0, sigma=2.0, sample_rate=0.01)
+        assert eps_sub < eps_full, (
+            f"subsampled ε ({eps_sub}) should be less than full-batch ε ({eps_full})"
+        )

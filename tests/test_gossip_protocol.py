@@ -414,3 +414,32 @@ async def test_byzantine_node_does_not_corrupt_swarm() -> None:
     finally:
         await asyncio.gather(*[n.stop() for n in honest_nodes])
         await byzantine_server.stop()
+
+
+# ── Security regression tests ─────────────────────────────────────────────────
+
+
+class TestMetadataPreservedInWireFormat:
+    """P1: metadata must survive node_to_wire → wire_to_node round trip."""
+
+    def test_metadata_round_trips(self):
+        from constitutional_swarm.gossip_protocol import _node_to_wire, _wire_to_node
+        from constitutional_swarm.merkle_crdt import MerkleCRDT
+
+        crdt = MerkleCRDT("agent-0")
+        node = crdt.append("payload", metadata={"trace_id": "abc", "score": 42})
+        wire = _node_to_wire(node)
+        assert wire["metadata"] == {"trace_id": "abc", "score": 42}
+        reconstructed = _wire_to_node(wire)
+        assert reconstructed.metadata == {"trace_id": "abc", "score": 42}
+
+    def test_empty_metadata_round_trips(self):
+        from constitutional_swarm.gossip_protocol import _node_to_wire, _wire_to_node
+        from constitutional_swarm.merkle_crdt import MerkleCRDT
+
+        crdt = MerkleCRDT("agent-0")
+        node = crdt.append("payload")
+        wire = _node_to_wire(node)
+        assert wire.get("metadata") == {}
+        reconstructed = _wire_to_node(wire)
+        assert reconstructed.metadata == {}

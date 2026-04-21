@@ -131,7 +131,7 @@ class ViolationSubspace:
         return self.basis.T @ self.basis
 
     def project_component(self, h: np.ndarray) -> np.ndarray:
-        """Project ``h`` onto the violation subspace (the "bad" part).
+        """Return the violation component of ``h``.
 
         Parameters
         ----------
@@ -141,13 +141,16 @@ class ViolationSubspace:
         Returns
         -------
         np.ndarray
-            Same shape as ``h``; the component of ``h - mean`` that
-            lies in the violation subspace (added back to mean).
+            Same shape as ``h``; the projection of ``h - mean`` onto the
+            violation subspace (pure vector, **without** adding ``mean`` back).
+            This satisfies the decomposition identity::
+
+                project_component(h) + orthogonal_component(h) == h
         """
         self._check_dim(h)
         centered = h - self.mean
         P = self.projector()
-        return centered @ P.T + self.mean
+        return centered @ P.T
 
     def orthogonal_component(self, h: np.ndarray) -> np.ndarray:
         """Return ``h`` with its violation component removed.
@@ -283,6 +286,13 @@ def fit_subspace(
     # Ensure orthonormality (should already be, but guard against numerical drift)
     q, _ = np.linalg.qr(basis.T)
     basis = q.T[:k]
+    # Orient each basis vector so that the unsafe mean projects positively onto it.
+    # steer() only attenuates positive coordinates, so if unsafe activations land
+    # in the negative direction the steering is a no-op.
+    direction = unsafe_mean - safe_mean
+    for i in range(k):
+        if np.dot(basis[i], direction) < 0:
+            basis[i] = -basis[i]
     return ViolationSubspace(basis=basis, mean=pooled_mean)
 
 

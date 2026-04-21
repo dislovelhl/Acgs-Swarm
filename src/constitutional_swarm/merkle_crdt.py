@@ -10,7 +10,9 @@ Key properties:
     - Causal ordering: parent_cids encode happened-before relationships
     - CRDT merge: set union of nodes — commutative, associative, idempotent
     - Eventual Epistemic Convergence: all replicas reach identical state
-    - Byzantine rejection: malformed nodes (broken hash, missing parents) rejected
+    - Byzantine rejection: malformed nodes (broken hash, unresolvable CID) rejected
+                            (missing-parent acceptance is by CRDT design: nodes with
+                            unknown parents are stored and causality is resolved lazily)
 
 Integration with other MCFS phases:
     - Phase 1: bodes_passed flag records whether payload survived Latent DNA check
@@ -81,6 +83,7 @@ class DAGNode:
             "parent_cids": list(self.parent_cids),
             "bodes_passed": self.bodes_passed,
             "constitutional_hash": self.constitutional_hash,
+            "metadata": self.metadata,
         }
 
     def verify_cid(self) -> bool:
@@ -97,6 +100,7 @@ def compute_cid(
     payload_type: str = "artifact",
     bodes_passed: bool = False,
     constitutional_hash: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Compute the CID for a node before constructing it."""
     data = {
@@ -106,6 +110,7 @@ def compute_cid(
         "parent_cids": list(parent_cids),
         "bodes_passed": bodes_passed,
         "constitutional_hash": constitutional_hash,
+        "metadata": metadata or {},
     }
     return _sha256_hex(_canonical_bytes(data))
 
@@ -170,6 +175,7 @@ class MerkleCRDT:
                 payload_type=payload_type,
                 bodes_passed=bodes_passed,
                 constitutional_hash=constitutional_hash,
+                metadata=metadata or {},
             )
 
             node = DAGNode(

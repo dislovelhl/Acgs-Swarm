@@ -122,7 +122,15 @@ def spectral_project_torch(
     sigma = _spectral_norm_torch(H, max_iter=max_power_iter)
     if sigma <= r + 1e-10:
         return H
-    return H * (r / sigma)
+    H_proj = H * (r / sigma)
+    # Verification pass: power iteration is a lower bound; re-check and rescale
+    # until the projected matrix is actually within the sphere (≤ 3 passes).
+    for _ in range(3):
+        sigma_check = _spectral_norm_torch(H_proj, max_iter=max_power_iter)
+        if sigma_check <= r + 1e-10:
+            break
+        H_proj = H_proj * (r / sigma_check)
+    return H_proj
 
 
 def projected_rk4_step(
@@ -211,6 +219,8 @@ def integrate(
             "trajectory": list of (t, H, variance) tuples if record_every > 0.
     """
     t_start, t_end = t_span
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}")
     dt = (t_end - t_start) / n_steps
     H = H0.clone()
     t = t_start
@@ -575,6 +585,8 @@ class DrandClient:
         sigma: float,
         round_number: int | None = None,
         tail_bound: int | None = None,
+        *,
+        private_seed: int | None = None,
     ) -> tuple[DiscreteGaussianSampler, DrandBeaconEntry]:
         """Create a DiscreteGaussianSampler seeded from a drand beacon.
 
@@ -582,11 +594,19 @@ class DrandClient:
             sigma: Noise standard deviation.
             round_number: Specific round (None = latest).
             tail_bound: Truncation bound (None = 6σ).
+            private_seed: Optional private entropy mixed into the public beacon
+                seed via XOR.  **Without this, the noise is fully reconstructible
+                from the public beacon, which voids any DP guarantee.** Use this
+                parameter to add a secret component when strong DP is required.
+                When ``None``, the sampler is deterministic from the public beacon —
+                suitable only for auditability/demonstration purposes.
 
         Returns:
             (sampler, beacon_entry) — entry for audit/verification.
         """
         entry = self.at_round(round_number) if round_number is not None else self.latest()
         seed = self.seed_from_entry(entry)
+        if private_seed is not None:
+            seed ^= private_seed
         sampler = DiscreteGaussianSampler(sigma=sigma, tail_bound=tail_bound, seed=seed)
         return sampler, entry

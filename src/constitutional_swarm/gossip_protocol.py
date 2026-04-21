@@ -62,7 +62,7 @@ MAX_METADATA_BYTES = 65_536  # 64 KiB
 
 
 def _node_to_wire(node: DAGNode) -> dict[str, Any]:
-    """Serialize a DAGNode to a wire-format dict (includes CID)."""
+    """Serialize a DAGNode to a wire-format dict (includes CID and metadata)."""
     return {
         "cid": node.cid,
         "agent_id": node.agent_id,
@@ -71,6 +71,7 @@ def _node_to_wire(node: DAGNode) -> dict[str, Any]:
         "parent_cids": list(node.parent_cids),
         "bodes_passed": node.bodes_passed,
         "constitutional_hash": node.constitutional_hash,
+        "metadata": node.metadata,
     }
 
 
@@ -197,12 +198,26 @@ class GossipServer:
         crdt: The local MerkleCRDT replica to receive gossip into.
         host: Bind address.
         port: Bind port.
+        secret_token: Optional shared secret. When set, every connecting
+            client must send ``{"type":"auth","token":"<secret>"}`` as its
+            first message before any node batches are accepted.  Connections
+            that omit or fail the auth message are closed immediately.
+            This is a defence-in-depth measure; production deployments
+            should additionally use TLS and network-level access control.
     """
 
-    def __init__(self, crdt: MerkleCRDT, host: str = "127.0.0.1", port: int = 0) -> None:
+    def __init__(
+        self,
+        crdt: MerkleCRDT,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        *,
+        secret_token: str | None = None,
+    ) -> None:
         self.crdt = crdt
         self.host = host
         self.port = port
+        self._secret_token = secret_token
         self._server: Any = None  # websockets.Server
         self._actual_port: int = port
 
@@ -251,6 +266,28 @@ class GossipServer:
         peer = websocket.remote_address
         log.debug("Gossip connection from %s", peer)
         try:
+            # If a secret token is configured, the first message must be an
+            # auth frame {"type":"auth","token":"<secret>"}.  Any other first
+            # message (or a wrong token) closes the connection immediately.
+            if self._secret_token is not None:
+                try:
+                    first_msg = await websocket.__anext__()
+                except StopAsyncIteration:
+                    return
+                try:
+                    auth = json.loads(first_msg)
+                    if not (
+                        isinstance(auth, dict)
+                        and auth.get("type") == "auth"
+                        and auth.get("token") == self._secret_token
+                    ):
+                        raise ValueError("auth failed")
+                except (json.JSONDecodeError, ValueError):
+                    log.warning("Gossip auth failed from %s — closing", peer)
+                    await websocket.close(code=4401, reason="unauthorized")
+                    return
+                log.debug("Gossip auth OK from %s", peer)
+
             async for message in websocket:
                 try:
                     nodes = decode_batch(message)
@@ -286,11 +323,16 @@ class GossipClient:
         nodes: list[DAGNode],
         *,
         timeout: float = 5.0,
+        secret_token: str | None = None,
     ) -> bool:
         """Send nodes to a peer. Returns True on success, False on failure.
 
         Failures are logged at DEBUG level and swallowed — gossip is
         best-effort and partial delivery is acceptable for convergence.
+
+        Args:
+            secret_token: If provided, send an auth frame before the node
+                batch.  Must match the server's ``secret_token``.
         """
         if not nodes:
             return True
@@ -307,6 +349,9 @@ class GossipClient:
         try:
             async with asyncio.timeout(timeout):
                 async with websockets.connect(uri) as ws:
+                    if secret_token is not None:
+                        auth_msg = json.dumps({"type": "auth", "token": secret_token})
+                        await ws.send(auth_msg)
                     await ws.send(encode_batch(nodes))
             log.debug("Sent %d nodes to %s:%d", len(nodes), host, port)
             return True

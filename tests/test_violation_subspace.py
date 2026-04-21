@@ -333,3 +333,75 @@ class TestAdversarialScore:
         mass1 = pos_mass(steered1, mode_a) + pos_mass(steered1, mode_b)
         mass2 = pos_mass(steered2, mode_a) + pos_mass(steered2, mode_b)
         assert mass2 <= mass1 + 1e-6
+
+
+# ── Security regression tests ─────────────────────────────────────────────────
+
+
+class TestBasisOrientation:
+    """P1: fit_subspace must orient basis so unsafe activations project positively."""
+
+    def test_unsafe_direction_has_positive_coordinate(self):
+        """Coordinates of the unsafe mean relative to the pooled mean must be > 0."""
+        import numpy as np
+        from constitutional_swarm.violation_subspace import fit_subspace
+
+        rng = np.random.default_rng(42)
+        safe = [rng.normal(loc=-1.0, size=8) for _ in range(30)]
+        unsafe = [rng.normal(loc=+1.0, size=8) for _ in range(30)]
+
+        sub = fit_subspace(safe, unsafe, rank=1)
+        unsafe_mean = np.mean([np.asarray(u) for u in unsafe], axis=0)
+        coord = sub.coordinates(unsafe_mean)
+        assert coord[0] > 0, (
+            f"Unsafe mean coordinate should be positive; got {coord[0]:.4f}. "
+            "Negative means steer() is a no-op for unsafe inputs."
+        )
+
+    def test_steer_reduces_unsafe_activation(self):
+        """Steering must move an unsafe activation closer to the safe region."""
+        import numpy as np
+        from constitutional_swarm.violation_subspace import fit_subspace
+
+        rng = np.random.default_rng(99)
+        safe = [rng.normal(loc=-1.0, size=8) for _ in range(30)]
+        unsafe = [rng.normal(loc=+1.0, size=8) for _ in range(30)]
+
+        sub = fit_subspace(safe, unsafe, rank=1)
+        unsafe_pt = np.array([+1.0] * 8)
+        steered = sub.steer(unsafe_pt, gamma=1.0)
+        # After gamma=1 steering, the violation component should be zeroed
+        coord_after = sub.coordinates(steered)
+        assert coord_after[0] <= 0.05, (
+            f"Steered coordinate should be ≈0; got {coord_after[0]:.4f}"
+        )
+
+
+class TestProjectComponentDecomposition:
+    """P3: project_component + orthogonal_component must exactly sum to h."""
+
+    def test_decomposition_identity_zero_mean(self):
+        """With zero mean, project + orthogonal == h."""
+        import numpy as np
+        from constitutional_swarm.violation_subspace import ViolationSubspace
+
+        v = np.array([1.0, 0.0, 0.0, 0.0])
+        sub = ViolationSubspace(basis=v.reshape(1, -1), mean=np.zeros(4))
+        h = np.array([2.0, 3.0, 4.0, 5.0])
+        np.testing.assert_allclose(
+            sub.project_component(h) + sub.orthogonal_component(h), h
+        )
+
+    def test_decomposition_identity_nonzero_mean(self):
+        """With non-zero mean, project + orthogonal == h."""
+        import numpy as np
+        from constitutional_swarm.violation_subspace import ViolationSubspace
+
+        v = np.array([1.0, 0.0, 0.0, 0.0])
+        mean = np.array([0.5, 0.5, 0.5, 0.5])
+        sub = ViolationSubspace(basis=v.reshape(1, -1), mean=mean)
+        h = np.array([2.0, 3.0, 4.0, 5.0])
+        np.testing.assert_allclose(
+            sub.project_component(h) + sub.orthogonal_component(h), h,
+            err_msg="project_component + orthogonal_component must equal h for any mean",
+        )

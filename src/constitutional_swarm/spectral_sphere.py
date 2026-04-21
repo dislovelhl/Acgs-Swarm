@@ -144,7 +144,22 @@ def spectral_sphere_project(
         scale = r / sigma
         projected = [[matrix[i][j] * scale for j in range(n)] for i in range(n)]
         clipped = True
-        sigma = r  # By construction
+
+    # Verification pass: power iteration is a lower bound on sigma_max.
+    # If it underestimated, the projected matrix may still exceed radius r.
+    # Re-check and iteratively rescale until within the sphere (at most 3 passes).
+    for _ in range(3):
+        sigma_check = spectral_norm_power_iter(
+            list(map(list, projected)), max_iterations=max_power_iter
+        )
+        if sigma_check <= r + 1e-10:
+            sigma = sigma_check
+            break
+        scale = r / sigma_check
+        projected = [[projected[i][j] * scale for j in range(n)] for i in range(n)]
+        sigma = r
+    else:
+        sigma = r  # conservative: claim radius even if iteration didn't converge
 
     return SpectralProjectionResult(
         matrix=tuple(tuple(row) for row in projected),
@@ -206,6 +221,13 @@ class SpectralSphereManifold:
 
     def update_trust(self, from_agent: int, to_agent: int, delta: float) -> None:
         """Update the raw trust weight from from_agent toward to_agent."""
+        if not math.isfinite(delta):
+            raise ValueError(f"delta must be a finite number, got {delta!r}")
+        if not (0 <= from_agent < self._n and 0 <= to_agent < self._n):
+            raise IndexError(
+                f"agent index out of range [0, {self._n}): "
+                f"from_agent={from_agent}, to_agent={to_agent}"
+            )
         self._raw_trust[from_agent][to_agent] += delta
         self._projected = None  # Invalidate cache
 

@@ -7,8 +7,12 @@ can slot in without changing mesh finality logic.
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import sqlite3
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -56,25 +60,43 @@ class JSONLSettlementStore:
 
     Each line stores exactly one settled assignment/result snapshot. This is the
     default adapter for local development and single-node deployments.
+
+    File-level locking (``fcntl.LOCK_EX``) serialises concurrent ``append``
+    and pending-update calls so that duplicate-detection and read-modify-write
+    operations are atomic.
     """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.pending_path = self.path.with_name(f"{self.path.name}.pending")
+        self._lock_path = self.path.with_name(f"{self.path.name}.lock")
+
+    @contextmanager
+    def _file_lock(self) -> Generator[None, None, None]:
+        """Acquire an exclusive advisory lock around the settlement log."""
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     def append(self, record: SettlementRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         assignment_id = str(record.assignment["assignment_id"])
-        for existing in self.load_all():
-            if str(existing.assignment.get("assignment_id", "")) == assignment_id:
-                raise DuplicateSettlementError(f"Settlement {assignment_id} already exists")
-        payload = {
-            "assignment": record.assignment,
-            "result": record.result,
-            "constitutional_hash": record.constitutional_hash,
-        }
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        with self._file_lock():
+            for existing in self.load_all():
+                if str(existing.assignment.get("assignment_id", "")) == assignment_id:
+                    raise DuplicateSettlementError(f"Settlement {assignment_id} already exists")
+            payload = {
+                "assignment": record.assignment,
+                "result": record.result,
+                "constitutional_hash": record.constitutional_hash,
+            }
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
     def load_all(self) -> list[SettlementRecord]:
         if not self.path.exists():
@@ -103,6 +125,11 @@ class JSONLSettlementStore:
                         f"{self.path}:{lineno}: terminal truncated JSON line skipped",
                         stacklevel=2,
                     )
+                    # Truncate the file to remove the partial line so the next
+                    # append doesn't produce a permanently unreadable log.
+                    with self.path.open("r+b") as fh_trunc:
+                        fh_trunc.seek(-(len(raw_line.encode())), 2)
+                        fh_trunc.truncate()
                     continue
                 raise
             records.append(
@@ -116,17 +143,19 @@ class JSONLSettlementStore:
 
     def mark_pending(self, record: SettlementRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payloads = self._load_pending_payloads()
-        assignment_id = str(record.assignment["assignment_id"])
-        payloads[assignment_id] = self._payload_from_record(record)
-        self._write_pending_payloads(payloads)
+        with self._file_lock():
+            payloads = self._load_pending_payloads()
+            assignment_id = str(record.assignment["assignment_id"])
+            payloads[assignment_id] = self._payload_from_record(record)
+            self._write_pending_payloads(payloads)
 
     def clear_pending(self, assignment_id: str) -> None:
-        payloads = self._load_pending_payloads()
-        if assignment_id not in payloads:
-            return
-        payloads.pop(assignment_id, None)
-        self._write_pending_payloads(payloads)
+        with self._file_lock():
+            payloads = self._load_pending_payloads()
+            if assignment_id not in payloads:
+                return
+            payloads.pop(assignment_id, None)
+            self._write_pending_payloads(payloads)
 
     def load_pending(self) -> list[SettlementRecord]:
         return [

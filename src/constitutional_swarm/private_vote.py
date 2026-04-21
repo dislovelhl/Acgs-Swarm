@@ -621,10 +621,10 @@ def tally(
         scheme, the commit is rejected (fail-closed).
     """
     commits = list(commits)
-    reveals_by_commit: dict[bytes, RevealRecord] = {}
+    reveals_by_commit: dict[bytes, list[RevealRecord]] = {}
     for rv in reveals:
-        # Deterministic conflict rule: first reveal wins.
-        reveals_by_commit.setdefault(rv.commit, rv)
+        # Collect all reveals per commit — the valid one is found during tally.
+        reveals_by_commit.setdefault(rv.commit, []).append(rv)
 
     # Filter by epoch/subject + verify commit signatures + nullifier dedup.
     seen_nullifiers: dict[bytes, CommitRecord] = {}
@@ -682,16 +682,24 @@ def tally(
     totals: dict[BallotChoice, int] = {ch: 0 for ch in BallotChoice}
     tallied_commits: list[bytes] = []
     for c in accepted:
-        rv = reveals_by_commit.get(c.commit)
-        if rv is None:
+        rvs = reveals_by_commit.get(c.commit, [])
+        if not rvs:
             rejected.append((c.commit, "missing reveal"))
             continue
-        try:
-            _verify_reveal_against_commit(rv, c)
-        except InvalidRevealError as exc:
-            rejected.append((c.commit, str(exc)))
+        # Try all reveals for this commit in arrival order; accept the first valid one.
+        verified_rv: RevealRecord | None = None
+        last_exc_msg = ""
+        for rv in rvs:
+            try:
+                _verify_reveal_against_commit(rv, c)
+                verified_rv = rv
+                break
+            except InvalidRevealError as exc:
+                last_exc_msg = str(exc)
+        if verified_rv is None:
+            rejected.append((c.commit, last_exc_msg or "invalid reveal"))
             continue
-        totals[rv.choice] += 1
+        totals[verified_rv.choice] += 1
         tallied_commits.append(c.commit)
 
     return PrivateTally(
@@ -729,9 +737,18 @@ class PrivateBallotBox:
             raise InvalidCommitError("commit phase already closed")
         if record.epoch != self.epoch or record.subject != self.subject:
             raise InvalidCommitError("epoch/subject mismatch")
+        if record.version not in _SUPPORTED_VERSIONS:
+            raise InvalidCommitError(f"unsupported commit version {record.version}")
         if record.commit in self._commits:
             raise InvalidCommitError("duplicate commit digest")
         _verify_commit_signature(record)
+        # Validate v2 proof field consistency: having one without the other
+        # is a malformed record that would fail at tally time; reject early.
+        if record.version >= _V2_VERSION:
+            if (record.proof_scheme is None) != (record.validity_proof is None):
+                raise InvalidCommitError(
+                    "v2 commit: proof_scheme and validity_proof must both be set or both absent"
+                )
         prior = self._nullifiers.get(record.nullifier)
         if prior is not None and prior != record.commit:
             raise DoubleVoteError("nullifier reuse")

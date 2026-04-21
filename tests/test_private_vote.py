@@ -305,3 +305,134 @@ class TestTallyFunction:
         result = tally([c], [bad_reveal], epoch=EPOCH, subject=SUBJECT)
         assert result.total_valid == 0
         assert any("does not open" in reason for _, reason in result.rejected)
+
+
+# ── Security regression tests ─────────────────────────────────────────────────
+
+
+class TestMultipleRevealsProtection:
+    """P1: tally() must try all reveals for a commit, not just the first."""
+
+    def _make_vote(self, choice=None):
+        """Helper: build signed commit + matching reveal for given choice."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from constitutional_swarm.private_vote import (
+            BallotChoice, build_commit,
+        )
+        sk = Ed25519PrivateKey.generate()
+        choice = choice or BallotChoice.YEA
+        commit, reveal = build_commit(
+            voter_private_key=sk,
+            voter_secret=b"secret",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=choice,
+        )
+        return commit, reveal
+
+    def test_invalid_first_reveal_falls_back_to_valid(self):
+        """An attacker-injected bad reveal must not block the valid reveal."""
+        from constitutional_swarm.private_vote import (
+            BallotChoice, RevealRecord, tally,
+        )
+
+        commit, valid_reveal = self._make_vote(BallotChoice.YEA)
+
+        # Build an invalid reveal for the same commit (tampered choice, wrong sig)
+        bad_reveal = RevealRecord(
+            version=valid_reveal.version,
+            commit=valid_reveal.commit,
+            choice=BallotChoice.NAY,
+            nonce=valid_reveal.nonce,
+            signature=b"\xff" * 64,  # invalid signature
+        )
+
+        result = tally(
+            [commit],
+            [bad_reveal, valid_reveal],  # bad first
+            epoch=EPOCH,
+            subject=SUBJECT,
+        )
+        assert result.totals[BallotChoice.YEA] == 1, (
+            "valid reveal should be found even when preceded by an invalid reveal"
+        )
+        assert result.totals[BallotChoice.NAY] == 0
+
+    def test_only_invalid_reveals_causes_rejection(self):
+        """If ALL reveals for a commit are invalid, the commit must be rejected."""
+        from constitutional_swarm.private_vote import (
+            BallotChoice, RevealRecord, tally,
+        )
+
+        commit, valid_reveal = self._make_vote(BallotChoice.YEA)
+        bad_reveal = RevealRecord(
+            version=valid_reveal.version,
+            commit=valid_reveal.commit,
+            choice=BallotChoice.NAY,
+            nonce=valid_reveal.nonce,
+            signature=b"\x00" * 64,
+        )
+
+        result = tally([commit], [bad_reveal], epoch=EPOCH, subject=SUBJECT)
+        assert result.totals[BallotChoice.YEA] == 0
+        assert len(result.rejected) == 1
+
+
+class TestSubmitCommitV2Validation:
+    """P2: PrivateBallotBox.submit_commit must validate v2 field consistency."""
+
+    def _box(self):
+        from constitutional_swarm.private_vote import PrivateBallotBox
+        return PrivateBallotBox(epoch=EPOCH, subject=SUBJECT)
+
+    def _commit(self, proof_scheme=None, validity_proof=None):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from constitutional_swarm.private_vote import (
+            BallotChoice, CommitRecord, build_commit, _V2_VERSION,
+        )
+        sk = Ed25519PrivateKey.generate()
+        commit, _ = build_commit(
+            voter_private_key=sk,
+            voter_secret=b"s",
+            epoch=EPOCH,
+            subject=SUBJECT,
+            choice=BallotChoice.YEA,
+        )
+        # Rebuild as v2 with custom proof fields
+        return CommitRecord(
+            version=_V2_VERSION,
+            epoch=commit.epoch,
+            subject=commit.subject,
+            voter=commit.voter,
+            commit=commit.commit,
+            nullifier=commit.nullifier,
+            signature=commit.signature,
+            proof_scheme=proof_scheme,
+            validity_proof=validity_proof,
+        )
+
+    def test_v2_proof_scheme_without_validity_proof_rejected(self):
+        from constitutional_swarm.private_vote import InvalidCommitError
+        box = self._box()
+        bad = self._commit(proof_scheme="zkp_v1", validity_proof=None)
+        with pytest.raises(InvalidCommitError, match="both be set or both absent"):
+            box.submit_commit(bad)
+
+    def test_v2_validity_proof_without_proof_scheme_rejected(self):
+        from constitutional_swarm.private_vote import InvalidCommitError
+        box = self._box()
+        bad = self._commit(proof_scheme=None, validity_proof=b"proof_bytes")
+        with pytest.raises(InvalidCommitError, match="both be set or both absent"):
+            box.submit_commit(bad)
+
+    def test_v2_both_none_accepted(self):
+        """v2 with both fields None is valid (backward-compatible)."""
+        box = self._box()
+        valid = self._commit(proof_scheme=None, validity_proof=None)
+        box.submit_commit(valid)  # must not raise
+
+    def test_v2_both_set_accepted(self):
+        """v2 with both fields set is valid (requires registered prover at tally time)."""
+        box = self._box()
+        valid = self._commit(proof_scheme="zkp_v1", validity_proof=b"proof")
+        box.submit_commit(valid)  # must not raise

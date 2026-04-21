@@ -310,3 +310,85 @@ def test_spectral_project_torch_passthrough() -> None:
     H = torch.eye(5) * 0.3
     H_proj = spectral_project_torch(H, r=1.0)
     assert torch.allclose(H, H_proj, atol=1e-8)
+
+
+# ── Security regression tests ─────────────────────────────────────────────────
+
+
+class TestNStepsValidation:
+    """P2: integrate() must reject n_steps <= 0."""
+
+    def test_n_steps_zero_raises(self):
+        import pytest
+        try:
+            import torch
+        except ImportError:
+            pytest.skip("torch not installed")
+        from constitutional_swarm.swarm_ode import integrate
+        import torch
+
+        H0 = torch.eye(3, dtype=torch.float64)
+
+        def f(H, t):
+            return torch.zeros_like(H)
+
+        with pytest.raises(ValueError, match="n_steps"):
+            integrate(f, H0, t_span=(0.0, 1.0), n_steps=0)
+
+    def test_n_steps_negative_raises(self):
+        import pytest
+        try:
+            import torch
+        except ImportError:
+            pytest.skip("torch not installed")
+        from constitutional_swarm.swarm_ode import integrate
+        import torch
+
+        H0 = torch.eye(3, dtype=torch.float64)
+
+        def f(H, t):
+            return torch.zeros_like(H)
+
+        with pytest.raises(ValueError, match="n_steps"):
+            integrate(f, H0, t_span=(0.0, 1.0), n_steps=-5)
+
+
+class TestDrandPrivateSeed:
+    """P1: seeded_sampler must XOR private_seed when provided."""
+
+    def test_different_private_seed_gives_different_samples(self):
+        """Two DrandClient calls with different private seeds must produce different noise."""
+        from constitutional_swarm.swarm_ode import DrandClient, DrandBeaconEntry, DiscreteGaussianSampler
+
+        entry = DrandBeaconEntry(
+            round_number=1,
+            randomness_hex="aabbccdd" * 8,
+            previous_sig_hex="00" * 64,
+            signature_hex="00" * 64,
+        )
+
+        client = DrandClient.__new__(DrandClient)
+        client._entries = {1: entry}
+        client.latest = lambda: entry  # type: ignore[method-assign]
+
+        seed_base = DrandClient.seed_from_entry(entry)
+        s1 = DiscreteGaussianSampler(sigma=1.0, seed=seed_base ^ 0x1234)
+        s2 = DiscreteGaussianSampler(sigma=1.0, seed=seed_base ^ 0x5678)
+        samples_1 = [s1.sample() for _ in range(50)]
+        samples_2 = [s2.sample() for _ in range(50)]
+        assert samples_1 != samples_2, "Different private seeds must give different noise sequences"
+
+    def test_no_private_seed_is_public_randomness(self):
+        """Without private_seed, two calls with the same entry give the same samples."""
+        from constitutional_swarm.swarm_ode import DrandClient, DrandBeaconEntry, DiscreteGaussianSampler
+
+        entry = DrandBeaconEntry(
+            round_number=1,
+            randomness_hex="aabbccdd" * 8,
+            previous_sig_hex="00" * 64,
+            signature_hex="00" * 64,
+        )
+        seed = DrandClient.seed_from_entry(entry)
+        s1 = DiscreteGaussianSampler(sigma=1.0, seed=seed)
+        s2 = DiscreteGaussianSampler(sigma=1.0, seed=seed)
+        assert [s1.sample() for _ in range(20)] == [s2.sample() for _ in range(20)]

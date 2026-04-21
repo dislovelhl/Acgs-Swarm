@@ -90,7 +90,10 @@ def _rdp_subsampled_gaussian(alpha: float, noise_multiplier: float, sample_rate:
     exponent = (alpha - 1.0) * eps_base
     if exponent > 50.0:
         # Overflow-safe: log(q² · exp(exponent)) ≈ 2·log(q) + exponent
-        return (2.0 * math.log(q) + exponent) / (alpha - 1.0)
+        # Clamp to 0.0: for extremely small q the log(q) term can dominate and
+        # produce a negative "RDP" value, which is physically impossible and would
+        # cause cumulative ε to underflow.  The amplification is at most eps_base.
+        return max(0.0, (2.0 * math.log(q) + exponent) / (alpha - 1.0))
     try:
         inner = 1.0 + q * q * math.expm1(exponent)
         if inner <= 0:
@@ -174,8 +177,10 @@ class PrivacyAccountant:
         subsampled Gaussian RDP bound (Mironov et al. 2019) provides
         privacy amplification of up to ~q².
         """
+        with self._lock:
+            history_snapshot = list(self._history)
         rdp_total = [0.0] * len(self.alphas)
-        for rec in self._history:
+        for rec in history_snapshot:
             nm = rec.sigma / rec.sensitivity
             for i, a in enumerate(self.alphas):
                 rdp_total[i] += _rdp_subsampled_gaussian(a, nm, rec.sample_rate)
@@ -239,9 +244,11 @@ class PrivacyAccountant:
         if not (0 < sample_rate <= 1.0):
             raise ValueError(f"sample_rate must be in (0,1], got {sample_rate}")
 
-        # Per-step RDP contribution at the optimal alpha (approximate).
+        # Per-step RDP contribution at the optimal alpha.
+        # Use the subsampled bound so telemetry accurately reflects
+        # the privacy amplification when sample_rate < 1.
         nm = sigma / sensitivity
-        per_step_rdp = [_rdp_gaussian(a, nm) for a in self.alphas]
+        per_step_rdp = [_rdp_subsampled_gaussian(a, nm, sample_rate) for a in self.alphas]
         eps_step, _ = _rdp_to_epsilon_balle2020(per_step_rdp, self.alphas, self.delta)
 
         with self._lock:
