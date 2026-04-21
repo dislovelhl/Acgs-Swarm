@@ -46,6 +46,7 @@ from constitutional_swarm.settlement_store import (
     JSONLSettlementStore,
     SettlementRecord,
     SettlementStore,
+    SQLiteSettlementStore,
 )
 
 if TYPE_CHECKING:
@@ -297,7 +298,10 @@ class ConstitutionalMesh:
             raise ValueError("Specify either settlement_store or settlement_store_path, not both")
         self._settlement_store = settlement_store
         if self._settlement_store is None and settlement_store_path is not None:
-            self._settlement_store = JSONLSettlementStore(settlement_store_path)
+            if str(settlement_store_path).endswith(".db"):
+                self._settlement_store = SQLiteSettlementStore(settlement_store_path)
+            else:
+                self._settlement_store = JSONLSettlementStore(settlement_store_path)
         self._load_settlements()
         reconciliation_report = self.retry_pending_settlements()
         if reconciliation_report["failures"] > 0 or reconciliation_report["remaining"] > 0:
