@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from constitutional_swarm.mesh import ConstitutionalMesh, RemoteVoteRequest
 from constitutional_swarm.remote_vote_transport import (
@@ -332,3 +334,41 @@ class TestLocalRemotePeerValidation:
         )
         with pytest.raises(ValueError, match="public key does not match"):
             peer.handle_vote_request(wrong_key)
+
+
+@pytest.mark.asyncio
+async def test_remote_vote_client_connection_timeout_propagates() -> None:
+    """RemoteVoteClient.request_vote() must propagate TimeoutError when the server is unresponsive."""
+    import asyncio
+
+    async def _slow_handler(websocket: Any) -> None:
+        # Accept connection but never send a response.
+        await asyncio.sleep(30)
+
+    constitution = Constitution.default()
+    mesh = ConstitutionalMesh(constitution, seed=42)
+    mesh.register_local_signer("producer")
+    mesh.register_local_signer("peer-1")
+    mesh.register_local_signer("peer-2")
+    mesh.register_local_signer("peer-3")
+    assignment = mesh.request_validation("producer", "content", "art-timeout")
+
+    # Build a valid request (voter_id is just needed for the dataclass; server ignores it here).
+    request = RemoteVoteRequest(
+        assignment_id=assignment.assignment_id,
+        voter_id="peer-1",
+        producer_id="producer",
+        artifact_id="art-timeout",
+        content="content",
+        content_hash=assignment.content_hash,
+        constitutional_hash=assignment.constitutional_hash,
+        voter_public_key="00" * 32,
+        request_signer_public_key="00" * 32,
+        request_signature="00" * 64,
+    )
+
+    async with websockets.asyncio.server.serve(_slow_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        client = RemoteVoteClient()
+        with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+            await client.request_vote("127.0.0.1", port, request, timeout=0.1)
