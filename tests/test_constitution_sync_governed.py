@@ -271,7 +271,8 @@ class TestApplyGovernedIntegrity:
 
         prior = _version(0, ("safety-01",))
 
-        # Tamper: ship content inconsistent with expected_hash.
+        # Tamper only a non-governance field so certificate binding still passes
+        # and the rejection comes from the final content-hash integrity check.
         dist.update(YAML_E2)
         legit = dist.broadcast_message()
         proposed = _version(1, ("privacy-01", "safety-01"), parent=prior.digest)

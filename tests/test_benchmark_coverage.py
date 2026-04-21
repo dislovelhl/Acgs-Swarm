@@ -14,7 +14,9 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 
 
-def test_main_exits_zero_when_pytest_passes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
+def test_successful_pytest_run_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
     coverage_path = tmp_path / "coverage.json"
     coverage_path.write_text(
         json.dumps(

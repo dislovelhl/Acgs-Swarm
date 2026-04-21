@@ -91,6 +91,7 @@ class JSONLSettlementStore:
                 _fcntl.flock(fd, _fcntl.LOCK_EX)
             elif _msvcrt is not None:
                 if os.fstat(fd).st_size == 0:
+                    # ``msvcrt.locking`` needs at least one byte to lock.
                     os.write(fd, b"\0")
                 os.lseek(fd, 0, os.SEEK_SET)
                 _msvcrt.locking(fd, _msvcrt.LK_LOCK, 1)

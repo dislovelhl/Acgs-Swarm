@@ -25,14 +25,12 @@ if TYPE_CHECKING:
     from constitutional_swarm.latent_dna import LatentDNAWrapper
 
 _log = logging.getLogger(__name__)
-_ERROR_MSG_MAX_LEN = 160
 
 
 def _opaque_error_message(exc: Exception, *, error_id: str) -> str:
     """Compatibility-safe error message that does not leak exception details."""
     kind = type(exc).__name__
-    msg = f"{kind} (error_id={error_id})"
-    return msg[:_ERROR_MSG_MAX_LEN]
+    return f"{kind} (error_id={error_id})"
 
 
 @dataclass
