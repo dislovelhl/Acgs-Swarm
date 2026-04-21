@@ -167,6 +167,128 @@ class TestAgentManagement:
         assert summary["settlement_storage"]["pending"] == 0
         assert summary["pending_settlements"] == 0
 
+    def test_settlement_store_path_dot_db_auto_selects_sqlite(self, tmp_path) -> None:
+        mesh = ConstitutionalMesh(
+            Constitution.default(), seed=2, settlement_store_path=tmp_path / "auto.db"
+        )
+        summary = mesh.summary()
+        assert summary["settlement_storage"]["backend"] == "sqlite"
+
+    def test_settlement_store_path_dot_jsonl_auto_selects_jsonl(self, tmp_path) -> None:
+        mesh = ConstitutionalMesh(
+            Constitution.default(), seed=3, settlement_store_path=tmp_path / "auto.jsonl"
+        )
+        summary = mesh.summary()
+        assert summary["settlement_storage"]["backend"] == "jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Registration mode transitions
+# ---------------------------------------------------------------------------
+
+
+class TestRegistrationModeTransitions:
+    """Regression suite for agent registration mode transitions.
+
+    Invariant: re-registering an agent with a different mode must not leave
+    orphaned key material.  Local signers have private keys; remote agents do
+    not.  Transitioning between modes must atomically swap the key set.
+    """
+
+    def test_local_to_remote_purges_private_key(self) -> None:
+        const = Constitution.default()
+        mesh = ConstitutionalMesh(const, seed=1)
+        mesh.register_local_signer("agent-a")
+        assert "agent-a" in mesh._agent_vote_private_keys
+
+        remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("agent-a", vote_public_key=remote_key.public_key())
+
+        assert "agent-a" not in mesh._agent_vote_private_keys
+        assert "agent-a" in mesh._agent_vote_public_keys
+
+    def test_remote_to_local_adds_private_key(self) -> None:
+        const = Constitution.default()
+        mesh = ConstitutionalMesh(const, seed=2)
+        remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("agent-b", vote_public_key=remote_key.public_key())
+        assert "agent-b" not in mesh._agent_vote_private_keys
+
+        mesh.register_local_signer("agent-b")
+
+        assert "agent-b" in mesh._agent_vote_private_keys
+        assert "agent-b" in mesh._agent_vote_public_keys
+
+    def test_local_to_remote_updates_public_key(self) -> None:
+        const = Constitution.default()
+        mesh = ConstitutionalMesh(const, seed=3)
+        mesh.register_local_signer("agent-c")
+        old_pub = mesh._agent_vote_public_keys["agent-c"]
+
+        new_remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("agent-c", vote_public_key=new_remote_key.public_key())
+
+        assert mesh._agent_vote_public_keys["agent-c"] != old_pub
+
+    def test_remote_to_local_updates_public_key(self) -> None:
+        const = Constitution.default()
+        mesh = ConstitutionalMesh(const, seed=4)
+        old_remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("agent-d", vote_public_key=old_remote_key.public_key())
+        old_pub = mesh._agent_vote_public_keys["agent-d"]
+
+        new_local_key = Ed25519PrivateKey.generate()
+        mesh.register_local_signer("agent-d", vote_private_key=new_local_key)
+
+        assert mesh._agent_vote_public_keys["agent-d"] != old_pub
+
+    def test_unregister_clears_key_material(self) -> None:
+        const = Constitution.default()
+        mesh = ConstitutionalMesh(const, seed=5)
+        mesh.register_local_signer("agent-e")
+        assert "agent-e" in mesh._agent_vote_private_keys
+
+        mesh.unregister_agent("agent-e")
+
+        assert "agent-e" not in mesh._agent_vote_private_keys
+        assert "agent-e" not in mesh._agent_vote_public_keys
+
+    def test_unregister_then_reregister_gets_fresh_keys(self) -> None:
+        const = Constitution.default()
+        mesh = ConstitutionalMesh(const, seed=6)
+        mesh.register_local_signer("agent-f")
+        old_priv = mesh._agent_vote_private_keys["agent-f"]
+
+        mesh.unregister_agent("agent-f")
+        mesh.register_local_signer("agent-f")
+
+        assert mesh._agent_vote_private_keys["agent-f"] is not old_priv
+
+    def test_mode_transition_preserves_agent_count(self) -> None:
+        const = Constitution.default()
+        mesh = ConstitutionalMesh(const, seed=7)
+        mesh.register_local_signer("agent-g")
+        count_before = mesh.agent_count
+
+        remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("agent-g", vote_public_key=remote_key.public_key())
+        assert mesh.agent_count == count_before
+
+        mesh.register_local_signer("agent-g")
+        assert mesh.agent_count == count_before
+
+    def test_local_to_remote_twice_is_idempotent(self) -> None:
+        const = Constitution.default()
+        mesh = ConstitutionalMesh(const, seed=8)
+        mesh.register_local_signer("agent-h")
+
+        remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("agent-h", vote_public_key=remote_key.public_key())
+        mesh.register_remote_agent("agent-h", vote_public_key=remote_key.public_key())
+
+        assert "agent-h" not in mesh._agent_vote_private_keys
+        assert mesh.agent_count == 1
+
 
 # ---------------------------------------------------------------------------
 # Peer assignment
@@ -368,8 +490,9 @@ class TestVoting:
 
     def test_register_agent_requires_explicit_mode(self) -> None:
         mesh = ConstitutionalMesh(Constitution.default(), seed=7)
-        with pytest.raises(TypeError, match=r"register_remote_agent|register_local_signer"):
-            mesh.register_agent("agent-x")
+        with pytest.deprecated_call(match="register_agent\\(\\) is deprecated"):
+            with pytest.raises(TypeError, match=r"register_remote_agent|register_local_signer"):
+                mesh.register_agent("agent-x")
 
     def test_unknown_assignment_raises_key_error(self, mesh: ConstitutionalMesh) -> None:
         with pytest.raises(KeyError, match="not found"):
