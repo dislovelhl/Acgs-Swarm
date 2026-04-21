@@ -72,7 +72,12 @@ def main() -> None:
     totals = data["totals"]
     score = round(totals["percent_covered"], 2)
 
-    status = "ok" if result.returncode == 0 else ("test-failure" if result.returncode == 1 else "error")
+    if result.returncode == 0:
+        status = "ok"
+    elif result.returncode == 1:
+        status = "test-failure"
+    else:
+        status = "error"
 
     print(
         json.dumps(

@@ -315,7 +315,7 @@ class ConstitutionReceiver:
         raw_rules = parsed.get("rules", [])
         if raw_rules is None:
             raw_rules = []
-        if not isinstance(raw_rules, list | tuple):
+        if not isinstance(raw_rules, (list, tuple)):
             raise InvalidTransitionError("constitution rules must be a list of strings")
         if not all(isinstance(rule, str) for rule in raw_rules):
             raise InvalidTransitionError("constitution rules must be strings")
