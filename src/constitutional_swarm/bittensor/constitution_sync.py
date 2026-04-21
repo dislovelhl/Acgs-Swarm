@@ -317,7 +317,7 @@ class ConstitutionReceiver:
             raw_rules = []
         if not isinstance(raw_rules, list | tuple):
             raise InvalidTransitionError("constitution rules must be a list of strings")
-        if any(not isinstance(rule, str) for rule in raw_rules):
+        if not all(isinstance(rule, str) for rule in raw_rules):
             raise InvalidTransitionError("constitution rules must be strings")
         return ConstitutionVersion(
             epoch=epoch,
