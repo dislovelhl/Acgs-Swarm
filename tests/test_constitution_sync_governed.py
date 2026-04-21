@@ -70,19 +70,16 @@ class TestApplyGovernedHappyPath:
         receiver.apply(dist.broadcast_message())
         assert receiver.active_epoch is None
 
-        # Governed upgrade E0 -> E1 from the bootstrap epoch anchor.
-        v0 = _version(0, ())
-        v1 = _version(1, ("safety-01",), parent=v0.digest)
-        cert = _cert(v0, v1)
+        # Governed upgrade from the current active YAML_E1 payload to YAML_E2.
+        current = _version(0, ("safety-01",))
         old_stake = _stake({"a", "b", "c"})
         new_stake = _stake({"x", "y", "z"})
 
         dist.update(YAML_E2, description="adds privacy-01")
         msg = dist.broadcast_message()
 
-        # Re-aim certificate at the YAML we actually ship.
-        v2 = _version(1, ("privacy-01", "safety-01"), parent=v0.digest)
-        cert = _cert(v0, v2)
+        proposed = _version(1, ("privacy-01", "safety-01"), parent=current.digest)
+        cert = _cert(current, proposed)
 
         result = receiver.apply_governed(
             msg, certificate=cert, old_stake=old_stake, new_stake=new_stake
@@ -138,6 +135,7 @@ class TestApplyGovernedRejection:
         v0 = _version(0, ())
         v1 = _version(1, ("safety-01",), parent=v0.digest)
         cert = _cert(v0, v1, old_threshold=99)  # impossible threshold
+        dist.update(YAML_E1)
 
         result = receiver.apply_governed(
             dist.broadcast_message(),
@@ -155,6 +153,7 @@ class TestApplyGovernedRejection:
         # 3 rules in a single jump — exceeds budget.
         v1 = _version(1, ("a", "b", "c"), parent=v0.digest)
         cert = _cert(v0, v1, drift_budget=DriftBudget(max_rule_delta=2))
+        dist.update("name: ctx-v1\nrules:\n  - a\n  - b\n  - c\n")
 
         result = receiver.apply_governed(
             dist.broadcast_message(),
@@ -196,6 +195,7 @@ class TestApplyGovernedRejection:
         v0 = _version(0, ())
         v1 = _version(1, ("safety-01",), parent=v0.digest)
         cert = _cert(v0, v1, old_signers=frozenset({"ghost", "b", "c"}))
+        dist.update(YAML_E1)
         result = receiver.apply_governed(
             dist.broadcast_message(),
             certificate=cert,
@@ -224,6 +224,44 @@ class TestApplyGovernedRejection:
         assert receiver.active_hash == initial_hash
         assert receiver.active_epoch == initial_epoch
 
+    def test_rejects_certificate_with_wrong_active_prior(self):
+        dist = ConstitutionDistributor(YAML_E1)
+        receiver = ConstitutionReceiver(node_id="m")
+        receiver.apply(dist.broadcast_message())
+
+        wrong_prior = _version(0, ())
+        proposed = _version(1, ("privacy-01", "safety-01"), parent=wrong_prior.digest)
+        cert = _cert(wrong_prior, proposed)
+        dist.update(YAML_E2)
+
+        result = receiver.apply_governed(
+            dist.broadcast_message(),
+            certificate=cert,
+            old_stake=_stake({"a", "b", "c"}),
+            new_stake=_stake({"x", "y", "z"}),
+        )
+        assert not result.success
+        assert "prior" in result.message.lower()
+
+    def test_rejects_message_not_bound_to_certificate_proposal(self):
+        dist = ConstitutionDistributor(YAML_BOOT)
+        receiver = ConstitutionReceiver(node_id="m")
+        receiver.apply(dist.broadcast_message())
+
+        v0 = _version(0, ())
+        proposed = _version(1, ("safety-01",), parent=v0.digest)
+        cert = _cert(v0, proposed)
+        dist.update(YAML_E2)
+
+        result = receiver.apply_governed(
+            dist.broadcast_message(),
+            certificate=cert,
+            old_stake=_stake({"a", "b", "c"}),
+            new_stake=_stake({"x", "y", "z"}),
+        )
+        assert not result.success
+        assert "proposal" in result.message.lower()
+
 
 class TestApplyGovernedIntegrity:
     def test_hash_mismatch_after_valid_cert_still_rejects(self):
@@ -231,17 +269,17 @@ class TestApplyGovernedIntegrity:
         receiver = ConstitutionReceiver(node_id="m")
         receiver.apply(dist.broadcast_message())
 
-        v0 = _version(0, ())
-        v1 = _version(1, ("safety-01",), parent=v0.digest)
-        cert = _cert(v0, v1)
+        prior = _version(0, ("safety-01",))
 
         # Tamper: ship content inconsistent with expected_hash.
         dist.update(YAML_E2)
         legit = dist.broadcast_message()
+        proposed = _version(1, ("privacy-01", "safety-01"), parent=prior.digest)
+        cert = _cert(prior, proposed)
         tampered = ConstitutionSyncMessage(
             version_id=legit.version_id,
             expected_hash=legit.expected_hash,
-            yaml_content="malicious: true\n",
+            yaml_content="name: tampered\nrules:\n  - privacy-01\n  - safety-01\n",
             issued_at=legit.issued_at,
             issuer_id=legit.issuer_id,
             block_height=legit.block_height,

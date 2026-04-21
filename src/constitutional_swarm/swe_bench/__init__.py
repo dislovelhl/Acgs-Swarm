@@ -10,7 +10,7 @@ Exports
 SWEBenchAgent       : Single-agent solver with optional BODES governance.
 SWEPatch            : Structured output from a solve attempt.
 SWEBenchHarness     : Task-loading, agent-running, result-aggregation.
-SwarmCoordinator    : Multi-agent MerkleCRDT coordinator (swe_bench.swarm).
+CodexSWEBenchAgent  : Codex-backed agent adapter used by the eval scripts.
 """
 
 from __future__ import annotations

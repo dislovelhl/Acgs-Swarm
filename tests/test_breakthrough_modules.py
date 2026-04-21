@@ -975,7 +975,7 @@ class TestSWEBenchOpaque:
         agent = FailingAgent()
         result = agent.solve({"instance_id": "test-1", "problem_statement": "fix a bug"})
         assert result.success is False
-        assert "msg" not in result.metadata
+        assert result.metadata["msg"].startswith("RuntimeError")
         assert "super secret" not in str(result.metadata)
         assert "error_id" in result.metadata
 

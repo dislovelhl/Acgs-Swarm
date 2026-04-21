@@ -7,15 +7,25 @@ can slot in without changing mesh finality logic.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import sqlite3
+import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
 
 
 class DuplicateSettlementError(ValueError):
@@ -77,10 +87,26 @@ class JSONLSettlementStore:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if _fcntl is not None:
+                _fcntl.flock(fd, _fcntl.LOCK_EX)
+            elif _msvcrt is not None:
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                _msvcrt.locking(fd, _msvcrt.LK_LOCK, 1)
+            else:  # pragma: no cover - platform fallback of last resort
+                warnings.warn(
+                    "No supported file-locking primitive available; settlement log lock disabled",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if _fcntl is not None:
+                _fcntl.flock(fd, _fcntl.LOCK_UN)
+            elif _msvcrt is not None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
             os.close(fd)
 
     def append(self, record: SettlementRecord) -> None:
@@ -119,8 +145,6 @@ class JSONLSettlementStore:
                 # remains fail-loud because it indicates a damaged log, not an
                 # interrupted final write.
                 if is_terminal_line and not raw_line.endswith("\n"):
-                    import warnings
-
                     warnings.warn(
                         f"{self.path}:{lineno}: terminal truncated JSON line skipped",
                         stacklevel=2,

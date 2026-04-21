@@ -25,6 +25,14 @@ if TYPE_CHECKING:
     from constitutional_swarm.latent_dna import LatentDNAWrapper
 
 _log = logging.getLogger(__name__)
+_ERROR_MSG_MAX_LEN = 160
+
+
+def _opaque_error_message(exc: Exception, *, error_id: str) -> str:
+    """Compatibility-safe error message that does not leak exception details."""
+    kind = type(exc).__name__
+    msg = f"{kind} (error_id={error_id})"
+    return msg[:_ERROR_MSG_MAX_LEN]
 
 
 @dataclass
@@ -136,7 +144,11 @@ class SWEBenchAgent:
                 success=False,
                 governed=self.wrapper is not None,
                 duration_s=time.monotonic() - t0,
-                metadata={"error": type(exc).__name__, "error_id": err_id},
+                metadata={
+                    "error": type(exc).__name__,
+                    "error_id": err_id,
+                    "msg": _opaque_error_message(exc, error_id=err_id),
+                },
             )
 
         duration = time.monotonic() - t0

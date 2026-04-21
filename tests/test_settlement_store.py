@@ -41,9 +41,7 @@ class TestJSONLSettlementStoreLocking:
     def test_truncated_terminal_line_repaired_on_load(self, tmp_path):
         """A truncated last line must be skipped with a warning, not a crash."""
         import warnings
-        from constitutional_swarm.settlement_store import (
-            JSONLSettlementStore, SettlementRecord,
-        )
+        from constitutional_swarm.settlement_store import JSONLSettlementStore
         import json
 
         p = tmp_path / "settlements.jsonl"
@@ -60,3 +58,26 @@ class TestJSONLSettlementStoreLocking:
         assert any("truncated" in str(warning.message).lower() for warning in w)
         # After load, the file must be truncated (partial line removed)
         assert p.read_text(encoding="utf-8").endswith("\n")
+
+    def test_file_lock_uses_windows_fallback_when_fcntl_unavailable(self, tmp_path, monkeypatch):
+        """Module import must remain usable on Windows-style runtimes."""
+        import constitutional_swarm.settlement_store as settlement_store
+
+        calls: list[tuple[int, int]] = []
+
+        class _FakeMSVCRT:
+            LK_LOCK = 1
+            LK_UNLCK = 2
+
+            @staticmethod
+            def locking(fd: int, mode: int, length: int) -> None:
+                calls.append((mode, length))
+
+        store = settlement_store.JSONLSettlementStore(tmp_path / "settlements.jsonl")
+        monkeypatch.setattr(settlement_store, "_fcntl", None)
+        monkeypatch.setattr(settlement_store, "_msvcrt", _FakeMSVCRT)
+
+        with store._file_lock():
+            pass
+
+        assert calls == [(_FakeMSVCRT.LK_LOCK, 1), (_FakeMSVCRT.LK_UNLCK, 1)]

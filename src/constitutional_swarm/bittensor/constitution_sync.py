@@ -24,7 +24,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+
 from ..epoch_reconfig import (
+    ConstitutionVersion,
     InvalidTransitionError,
     TransitionCertificate,
     verify_transition,
@@ -298,6 +301,30 @@ class ConstitutionReceiver:
     def version_history(self) -> list[ConstitutionVersionRecord]:
         return list(self._history)
 
+    @staticmethod
+    def _version_from_yaml(
+        yaml_content: str,
+        *,
+        epoch: int,
+        parent_digest: bytes,
+    ) -> ConstitutionVersion:
+        """Build a canonical ConstitutionVersion from YAML content."""
+        parsed = yaml.safe_load(yaml_content) or {}
+        if not isinstance(parsed, dict):
+            raise InvalidTransitionError("constitution payload must decode to a mapping")
+        raw_rules = parsed.get("rules", [])
+        if raw_rules is None:
+            raw_rules = []
+        if not isinstance(raw_rules, list | tuple):
+            raise InvalidTransitionError("constitution rules must be a list of strings")
+        if any(not isinstance(rule, str) for rule in raw_rules):
+            raise InvalidTransitionError("constitution rules must be strings")
+        return ConstitutionVersion(
+            epoch=epoch,
+            rules=tuple(sorted(raw_rules)),
+            parent_digest=parent_digest,
+        )
+
     def apply(self, msg: ConstitutionSyncMessage) -> SyncResult:
         """Apply a sync message from the SN Owner.
 
@@ -376,7 +403,10 @@ class ConstitutionReceiver:
              receiver's ``active_epoch``. If the receiver has no active
              epoch yet, the certificate's ``prior.epoch`` is accepted as
              the bootstrap anchor.
-          3. Hash integrity and activation: delegates to :meth:`apply`.
+          3. Certificate/message binding: the active YAML must match the
+             certificate's ``prior`` version and ``msg`` must match the
+             certificate's ``proposed`` version.
+          4. Hash integrity and activation: delegates to :meth:`apply`.
 
         On success, bumps :attr:`active_epoch` to the certificate's
         proposed epoch. On any failure returns a ``SyncResult`` with
@@ -412,7 +442,47 @@ class ConstitutionReceiver:
                     old_hash=old_hash,
                 )
 
-        # 3. Hash integrity + activation.
+        # 3. Bind certificate to the currently active and proposed payloads.
+        if self._active is not None:
+            try:
+                active_version = self._version_from_yaml(
+                    self._active.yaml_content,
+                    epoch=proposal.prior.epoch,
+                    parent_digest=proposal.prior.parent_digest,
+                )
+            except InvalidTransitionError as exc:
+                return SyncResult(
+                    success=False,
+                    message=f"Active constitution rejected: {exc}",
+                    old_hash=old_hash,
+                )
+            if active_version != proposal.prior:
+                return SyncResult(
+                    success=False,
+                    message="Certificate prior does not match the active constitution",
+                    old_hash=old_hash,
+                )
+
+        try:
+            proposed_version = self._version_from_yaml(
+                msg.yaml_content,
+                epoch=proposal.proposed.epoch,
+                parent_digest=proposal.proposed.parent_digest,
+            )
+        except InvalidTransitionError as exc:
+            return SyncResult(
+                success=False,
+                message=f"Proposed constitution rejected: {exc}",
+                old_hash=old_hash,
+            )
+        if proposed_version != proposal.proposed:
+            return SyncResult(
+                success=False,
+                message="Sync message does not match certificate proposal",
+                old_hash=old_hash,
+            )
+
+        # 4. Hash integrity + activation.
         result = self.apply(msg)
         if result.success and result.new_hash and result.new_hash != old_hash:
             self._active_epoch = proposal.proposed.epoch

@@ -163,6 +163,8 @@ def test_agent_handles_exception_gracefully() -> None:
     result = agent.solve(_make_task())
     assert result.success is False
     assert result.metadata["error"] == "RuntimeError"
+    assert result.metadata["msg"].startswith("RuntimeError")
+    assert "LLM exploded" not in result.metadata["msg"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

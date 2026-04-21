@@ -9,7 +9,7 @@ Evaluation scaffold for running constitutional-swarm against the SWE-Bench softw
 ## Key Files
 | File | Description |
 |------|-------------|
-| `__init__.py` | Public exports: `SWEBenchAgent`, `SWEBenchHarness`, `SwarmCoordinator` |
+| `__init__.py` | Public exports: `CodexSWEBenchAgent`, `SWEBenchAgent`, `SWEBenchHarness`, `SWEPatch` |
 | `agent.py` | `SWEBenchAgent` — governed single-agent wrapper that executes SWE-Bench instances under `AgentDNA` + mesh settlement |
 | `harness.py` | `SWEBenchHarness` — orchestrates instance loading, agent invocation, and result scoring |
 | `swarm_coordinator.py` | `SwarmCoordinator` — distributes SWE-Bench instances across a mesh of agents via `SwarmExecutor` |

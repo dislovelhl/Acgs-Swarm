@@ -7,7 +7,7 @@ Usage:
     python scripts/benchmark_coverage.py
 
 Output (last line of stdout):
-    {"primary": 91.60, "sub_scores": {"covered": 7673, "total": 8377, "missing": 704}}
+    {"primary": 91.60, "status": "ok", "sub_scores": {"covered_lines": 7673, "total_lines": 8377, "missing_lines": 704, "tests_exit_code": 0}}
 
 Exit code: 0 on success, 1 on failure.
 """
@@ -45,7 +45,7 @@ def main() -> None:
         "-q",
         "--tb=no",
         "--no-header",
-        f"--cov=src/constitutional_swarm",
+        "--cov=src/constitutional_swarm",
         f"--cov-report=json:{COVERAGE_OUT}",
         "--cov-fail-under=0",
         *deselect_args,
@@ -72,14 +72,13 @@ def main() -> None:
     totals = data["totals"]
     score = round(totals["percent_covered"], 2)
 
-    # Count test outcomes from subprocess return code
-    # (pytest exits 0=all pass, 1=some fail, 2=error, etc.)
-    tests_ok = result.returncode in (0, 1)  # 1 = tests ran but some failed
+    status = "ok" if result.returncode == 0 else ("test-failure" if result.returncode == 1 else "error")
 
     print(
         json.dumps(
             {
                 "primary": score,
+                "status": status,
                 "sub_scores": {
                     "covered_lines": totals["covered_lines"],
                     "total_lines": totals["num_statements"],
@@ -90,7 +89,7 @@ def main() -> None:
         ),
         flush=True,
     )
-    sys.exit(0)
+    sys.exit(0 if result.returncode == 0 else 1)
 
 
 if __name__ == "__main__":
