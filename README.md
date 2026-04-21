@@ -440,6 +440,7 @@ The `AgentDNA.validate()` hot path routes through the ACGS Rust engine. The repo
 ## Runtime dependencies
 
 - `acgs-lite>=2.7.2`
+- `cryptography>=44.0.2`
 
 ## License
 
