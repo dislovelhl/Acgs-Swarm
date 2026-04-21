@@ -1,0 +1,34 @@
+name: snca-test-constitution
+rules:
+  - id: safety-01
+    text: Do not cause physical harm.
+    severity: critical
+    hardcoded: true
+    keywords:
+      - harm
+      - danger
+      - weapon
+  - id: privacy-01
+    text: Protect personal information.
+    severity: high
+    hardcoded: true
+    keywords:
+      - personal data
+      - PII
+      - private
+  - id: fairness-01
+    text: Avoid discriminatory outcomes.
+    severity: high
+    hardcoded: false
+    keywords:
+      - discriminate
+      - bias
+      - unfair
+  - id: transparency-01
+    text: Require traceable reasoning for sensitive actions.
+    severity: medium
+    hardcoded: false
+    keywords:
+      - conceal
+      - hide
+      - opaque

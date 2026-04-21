@@ -18,3 +18,11 @@ papers/*/main.pdf
 *-report.md
 SYSTEMIC_IMPROVEMENT.md
 HANDOFF_*.md
+
+# Coverage and runtime artifacts
+.coverage
+coverage.json
+coverage_benchmark.json
+codex-default.*.json
+logs/
+missions/
