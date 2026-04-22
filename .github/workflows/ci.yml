@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[${{ matrix.extras }}]"
+        run: pip install -e ".[${{ matrix.extras }},transport]"
       - name: Lint
         run: ruff check src/constitutional_swarm/
       - name: Test
@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install with research extras
-        run: pip install -e ".[dev,research]"
+        run: pip install -e ".[dev,research,transport]"
       - name: Test research stack
         env:
           OPENAI_API_KEY: test-key-for-unit-tests
