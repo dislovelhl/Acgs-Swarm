@@ -207,7 +207,11 @@ class HashCommitmentProver:
     scheme_id: str = "hash-commitment-v1"
 
     def prove(self, statement: ValidityStatement, witness: ValidityWitness) -> bytes:
-        if witness.choice not in BallotChoice:
+        try:
+            _choice_valid = witness.choice in BallotChoice
+        except TypeError:
+            _choice_valid = False
+        if not _choice_valid:
             raise ValueError("witness.choice must be a BallotChoice member")
         return _digest(
             b"acgs-validity-hashcommit-v1",

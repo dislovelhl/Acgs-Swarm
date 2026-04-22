@@ -24,6 +24,13 @@ from typing import Any
 
 import pytest
 
+try:
+    import constitutional_swarm.swarm_ode as _swarm_ode_mod  # noqa: F401
+
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Constitution fixtures
 # ---------------------------------------------------------------------------
@@ -201,6 +208,7 @@ class TestRuleConsistencyMetrics:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestDPNoiseHelpers:
     """Verify the calibrate_sigma / add_dp_noise DP functions added to swarm_ode."""
 
