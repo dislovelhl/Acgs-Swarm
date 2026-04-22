@@ -9,9 +9,12 @@ comparing its forward-pass output against the pure-numpy reference
 from __future__ import annotations
 
 import numpy as np
-import torch
-from constitutional_swarm.latent_dna import _BODESSubspaceHook
-from constitutional_swarm.violation_subspace import ViolationSubspace
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from constitutional_swarm.latent_dna import _BODESSubspaceHook  # noqa: E402
+from constitutional_swarm.violation_subspace import ViolationSubspace  # noqa: E402
 
 
 def _identity_leace(dim: int) -> ViolationSubspace:

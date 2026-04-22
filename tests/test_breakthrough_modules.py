@@ -36,7 +36,13 @@ from constitutional_swarm.federated_bridge import (
     CredentialStatus,
     FederatedConstitutionBridge,
 )
-from constitutional_swarm.swarm_ode import DiscreteGaussianSampler
+try:
+    from constitutional_swarm.swarm_ode import DiscreteGaussianSampler
+
+    _TORCH_AVAILABLE = True
+except ImportError:
+    DiscreteGaussianSampler = None  # type: ignore[assignment,misc]
+    _TORCH_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -323,6 +329,7 @@ class TestDebateResolver:
 # ===========================================================================
 
 
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestDiscreteGaussianSampler:
     """Tests for the discrete Gaussian DP noise sampler."""
 
@@ -858,6 +865,7 @@ class TestFederatedBridgePendingEnforcement:
         assert "PENDING" in decision.reason
 
 
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestDrandClientInputValidation:
     """DrandClient must validate chain_hash and enforce HTTPS."""
 
@@ -890,6 +898,7 @@ class TestDrandClientInputValidation:
 class TestConstitutionalHashConsolidation:
     """Assert all modules reference the canonical hash from constants.py."""
 
+    @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
     def test_all_modules_share_hash(self) -> None:
         from constitutional_swarm import debate_resolver, federated_bridge, mac_acgs_loop, swarm_ode
         from constitutional_swarm.bittensor import came_coordinator
@@ -932,6 +941,7 @@ class TestDefenseFloodingMitigation:
         assert verdict.approval_score >= 0.6
 
 
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestRNGIsolation:
     """Verify TrustDecayField uses local RNG, not global torch seed."""
 
@@ -951,6 +961,7 @@ class TestRNGIsolation:
         assert baseline == after, "TrustDecayField contaminated global RNG"
 
 
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestSensitivitySeedDiversity:
     """Verify sensitivity_clipped_noise produces different noise per call."""
 
@@ -1270,6 +1281,7 @@ class TestSpectralSphereODEIntegration:
         assert var > 1e-6, f"Variance collapsed to {var} — spectral sphere failed"
 
 
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestLatentDNARobustness:
     """Test latent DNA steering failure rollback (Phase 6 hardening)."""
 
