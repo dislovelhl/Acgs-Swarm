@@ -237,3 +237,69 @@ def test_summary_keys() -> None:
     s = m.summary()
     for key in ("num_agents", "radius", "spectral_norm", "clipped", "is_stable"):
         assert key in s, f"Missing key: {key}"
+
+
+# ── Security regression tests ─────────────────────────────────────────────────
+
+
+class TestSpectralNormGuaranteeAfterProjection:
+    """P1: spectral_sphere_project must guarantee result is within radius."""
+
+    def test_projected_norm_within_radius(self):
+        """After projection, actual spectral norm must be ≤ r + epsilon."""
+        from constitutional_swarm.spectral_sphere import (
+            spectral_norm_power_iter, spectral_sphere_project,
+        )
+        import random
+
+        rng = random.Random(7)
+        # Build a 5x5 matrix with large singular values
+        n = 5
+        matrix = [[rng.gauss(0, 3) for _ in range(n)] for _ in range(n)]
+        r = 1.0
+        result = spectral_sphere_project(matrix, r=r)
+        sigma_actual = spectral_norm_power_iter(
+            list(map(list, result.matrix)), max_iterations=100, tol=1e-12
+        )
+        assert sigma_actual <= r + 1e-6, (
+            f"Projected matrix spectral norm {sigma_actual:.8f} > r={r} + 1e-6"
+        )
+
+    def test_projection_idempotent(self):
+        """Projecting an already-projected matrix should be a no-op."""
+        from constitutional_swarm.spectral_sphere import spectral_sphere_project
+        import random
+
+        rng = random.Random(13)
+        n = 4
+        matrix = [[rng.gauss(0, 5) for _ in range(n)] for _ in range(n)]
+        r = 0.8
+        once = spectral_sphere_project(matrix, r=r)
+        twice = spectral_sphere_project(list(map(list, once.matrix)), r=r)
+        assert not twice.clipped, "Projecting an already-projected matrix should not clip"
+
+
+class TestUpdateTrustValidation:
+    """P2: update_trust must reject non-finite deltas and out-of-range indices."""
+
+    def _make_manifold(self, n=3):
+        from constitutional_swarm.spectral_sphere import SpectralSphereManifold
+        return SpectralSphereManifold(num_agents=n)
+
+    def test_nan_delta_rejected(self):
+        import math, pytest
+        m = self._make_manifold()
+        with pytest.raises(ValueError, match="finite"):
+            m.update_trust(0, 1, float("nan"))
+
+    def test_inf_delta_rejected(self):
+        import pytest
+        m = self._make_manifold()
+        with pytest.raises(ValueError, match="finite"):
+            m.update_trust(0, 1, float("inf"))
+
+    def test_out_of_range_index_rejected(self):
+        import pytest
+        m = self._make_manifold(n=3)
+        with pytest.raises(IndexError):
+            m.update_trust(0, 5, 1.0)

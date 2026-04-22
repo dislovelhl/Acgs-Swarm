@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from constitutional_swarm.compiler import DAGCompiler, GoalSpec, _deterministic_node_id
-from constitutional_swarm.swarm import NodeStatus
+from constitutional_swarm.swarm import NodeStatus, TaskDAG, TaskNode
 
 
 class TestGoalSpec:
@@ -299,3 +299,31 @@ steps:
                 compiler.compile_from_yaml(path)
         finally:
             path.unlink()
+
+
+class TestTaskDAGDirectCollision:
+    """Regression suite for TaskDAG.add_node() collision guard.
+
+    The GoalSpec-level duplicate title check (test_duplicate_titles_rejected)
+    exercises a different code path (DAGCompiler.compile).  These tests hit
+    TaskDAG.add_node() directly to pin the ValueError invariant.
+    """
+
+    def test_add_node_duplicate_node_id_raises(self) -> None:
+        dag = TaskDAG()
+        node_a = TaskNode(node_id="abc123deadbeef01", title="first task")
+        dag = dag.add_node(node_a)
+        with pytest.raises(ValueError, match="collision"):
+            dag.add_node(TaskNode(node_id="abc123deadbeef01", title="second task"))
+
+    def test_add_node_collision_message_includes_both_titles(self) -> None:
+        dag = TaskDAG()
+        dag = dag.add_node(TaskNode(node_id="aabbccddeeff0011", title="original"))
+        with pytest.raises(ValueError, match="original"):
+            dag.add_node(TaskNode(node_id="aabbccddeeff0011", title="duplicate"))
+
+    def test_add_node_different_node_ids_is_fine(self) -> None:
+        dag = TaskDAG()
+        dag = dag.add_node(TaskNode(node_id="aaaa000000000001", title="first"))
+        dag = dag.add_node(TaskNode(node_id="aaaa000000000002", title="second"))
+        assert len(dag.nodes) == 2

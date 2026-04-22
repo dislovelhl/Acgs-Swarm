@@ -81,7 +81,7 @@ def load_swe_bench_lite(
         return tasks
     except ImportError:
         pass
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("swebench load failed: %s", type(exc).__name__)
 
     # Strategy 3: empty fallback
@@ -179,9 +179,7 @@ class SWEBenchHarness:
         resolved = sum(1 for r in results if r.success)
         governed = [r for r in results if r.governed]
         mean_intervention = (
-            sum(r.intervention_rate for r in governed) / len(governed)
-            if governed
-            else 0.0
+            sum(r.intervention_rate for r in governed) / len(governed) if governed else 0.0
         )
         mean_duration = sum(r.duration_s for r in results) / total
 

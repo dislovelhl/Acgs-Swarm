@@ -24,6 +24,15 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+
+from ..epoch_reconfig import (
+    ConstitutionVersion,
+    InvalidTransitionError,
+    TransitionCertificate,
+    verify_transition,
+)
+
 # ---------------------------------------------------------------------------
 # Version record (immutable)
 # ---------------------------------------------------------------------------
@@ -254,6 +263,11 @@ class ConstitutionReceiver:
         self._active: ConstitutionVersionRecord | None = None
         self._history: list[ConstitutionVersionRecord] = []
         self._seen_hashes: set[str] = set()
+        # Phase 7.5 governed path: tracks the epoch of the latest
+        # certificate-ratified constitution. ``None`` until the first
+        # ``apply_governed()`` call succeeds. Ungoverned ``apply()`` paths
+        # leave this untouched so legacy deployments are not disrupted.
+        self._active_epoch: int | None = None
 
     @property
     def node_id(self) -> str:
@@ -276,8 +290,40 @@ class ConstitutionReceiver:
         return self._active.yaml_content
 
     @property
+    def active_epoch(self) -> int | None:
+        """Epoch of the last certificate-ratified update, or ``None`` if
+        no governed update has succeeded yet. Ungoverned :meth:`apply`
+        calls never set this value.
+        """
+        return self._active_epoch
+
+    @property
     def version_history(self) -> list[ConstitutionVersionRecord]:
         return list(self._history)
+
+    @staticmethod
+    def _version_from_yaml(
+        yaml_content: str,
+        *,
+        epoch: int,
+        parent_digest: bytes,
+    ) -> ConstitutionVersion:
+        """Build a canonical ConstitutionVersion from YAML content."""
+        parsed = yaml.safe_load(yaml_content)
+        if not isinstance(parsed, dict):
+            raise InvalidTransitionError("constitution payload must decode to a mapping")
+        raw_rules = parsed.get("rules", [])
+        if raw_rules is None:
+            raw_rules = []
+        if not isinstance(raw_rules, (list, tuple)):
+            raise InvalidTransitionError("constitution rules must be a list of strings")
+        if not all(isinstance(rule, str) for rule in raw_rules):
+            raise InvalidTransitionError("constitution rules must be strings")
+        return ConstitutionVersion(
+            epoch=epoch,
+            rules=tuple(sorted(raw_rules)),
+            parent_digest=parent_digest,
+        )
 
     def apply(self, msg: ConstitutionSyncMessage) -> SyncResult:
         """Apply a sync message from the SN Owner.
@@ -338,10 +384,115 @@ class ConstitutionReceiver:
         """
         return self.active_hash == task_constitution_hash
 
+    def apply_governed(
+        self,
+        msg: ConstitutionSyncMessage,
+        *,
+        certificate: TransitionCertificate,
+        old_stake: dict[str, int],
+        new_stake: dict[str, int],
+    ) -> SyncResult:
+        """Apply a sync message gated by a joint-consensus transition
+        certificate (Phase 7.5).
+
+        Verification order (fail-closed, cheapest checks first):
+
+          1. Certificate validity: joint quorum on both validator sets
+             plus drift budget, via :func:`verify_transition`.
+          2. Epoch continuity: the certificate must transition from the
+             receiver's ``active_epoch``. If the receiver has no active
+             epoch yet, the certificate's ``prior.epoch`` is accepted as
+             the bootstrap anchor.
+          3. Certificate/message binding: the active YAML must match the
+             certificate's ``prior`` version and ``msg`` must match the
+             certificate's ``proposed`` version.
+          4. Hash integrity and activation: delegates to :meth:`apply`.
+
+        On success, bumps :attr:`active_epoch` to the certificate's
+        proposed epoch. On any failure returns a ``SyncResult`` with
+        ``success=False`` and does not mutate receiver state.
+        """
+        old_hash = self.active_hash
+
+        # 1. Certificate validity (joint consensus + drift budget).
+        try:
+            verify_transition(
+                certificate,
+                old_stake=old_stake,
+                new_stake=new_stake,
+            )
+        except InvalidTransitionError as exc:
+            return SyncResult(
+                success=False,
+                message=f"Certificate rejected: {exc}",
+                old_hash=old_hash,
+            )
+
+        # 2. Epoch continuity check.
+        proposal = certificate.proposal
+        if self._active_epoch is not None:
+            if proposal.prior.epoch != self._active_epoch:
+                return SyncResult(
+                    success=False,
+                    message=(
+                        "Stale certificate: "
+                        f"cert.prior.epoch={proposal.prior.epoch} "
+                        f"!= active_epoch={self._active_epoch}"
+                    ),
+                    old_hash=old_hash,
+                )
+
+        # 3. Bind certificate to the currently active and proposed payloads.
+        if self._active is not None:
+            try:
+                active_version = self._version_from_yaml(
+                    self._active.yaml_content,
+                    epoch=proposal.prior.epoch,
+                    parent_digest=proposal.prior.parent_digest,
+                )
+            except InvalidTransitionError as exc:
+                return SyncResult(
+                    success=False,
+                    message=f"Active constitution rejected: {exc}",
+                    old_hash=old_hash,
+                )
+            if active_version != proposal.prior:
+                return SyncResult(
+                    success=False,
+                    message="Certificate prior does not match the active constitution",
+                    old_hash=old_hash,
+                )
+
+        try:
+            proposed_version = self._version_from_yaml(
+                msg.yaml_content,
+                epoch=proposal.proposed.epoch,
+                parent_digest=proposal.proposed.parent_digest,
+            )
+        except InvalidTransitionError as exc:
+            return SyncResult(
+                success=False,
+                message=f"Proposed constitution rejected: {exc}",
+                old_hash=old_hash,
+            )
+        if proposed_version != proposal.proposed:
+            return SyncResult(
+                success=False,
+                message="Sync message does not match certificate proposal",
+                old_hash=old_hash,
+            )
+
+        # 4. Hash integrity + activation.
+        result = self.apply(msg)
+        if result.success and result.new_hash and result.new_hash != old_hash:
+            self._active_epoch = proposal.proposed.epoch
+        return result
+
     def summary(self) -> dict[str, Any]:
         return {
             "node_id": self._node_id,
             "is_initialised": self.is_initialised,
             "active_hash": self.active_hash,
+            "active_epoch": self._active_epoch,
             "versions_seen": len(self._history),
         }

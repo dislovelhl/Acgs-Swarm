@@ -52,13 +52,17 @@ from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT
 
 log = logging.getLogger(__name__)
 
+# Maximum bytes allowed in a single node's metadata field.
+# Prevents memory exhaustion via oversized gossip payloads (DoS defence).
+MAX_METADATA_BYTES = 65_536  # 64 KiB
+
 # ---------------------------------------------------------------------------
 # Wire serialization helpers
 # ---------------------------------------------------------------------------
 
 
 def _node_to_wire(node: DAGNode) -> dict[str, Any]:
-    """Serialize a DAGNode to a wire-format dict (includes CID)."""
+    """Serialize a DAGNode to a wire-format dict (includes CID and metadata)."""
     return {
         "cid": node.cid,
         "agent_id": node.agent_id,
@@ -67,6 +71,7 @@ def _node_to_wire(node: DAGNode) -> dict[str, Any]:
         "parent_cids": list(node.parent_cids),
         "bodes_passed": node.bodes_passed,
         "constitutional_hash": node.constitutional_hash,
+        "metadata": node.metadata,
     }
 
 
@@ -75,7 +80,21 @@ def _wire_to_node(data: dict[str, Any]) -> DAGNode:
 
     The node's CID is taken from the wire — verify_cid() on the receiver
     ensures integrity before insertion into the replica.
+
+    Raises ValueError if the metadata field exceeds MAX_METADATA_BYTES to
+    prevent memory exhaustion via oversized gossip payloads.
     """
+    raw_metadata = data.get("metadata", {})
+    if isinstance(raw_metadata, dict):
+        metadata_size = len(json.dumps(raw_metadata).encode())
+        if metadata_size > MAX_METADATA_BYTES:
+            raise ValueError(
+                f"Gossip node metadata exceeds {MAX_METADATA_BYTES} bytes "
+                f"({metadata_size} bytes from agent '{data.get('agent_id', '?')}')"
+            )
+    else:
+        raw_metadata = {}
+
     return DAGNode(
         cid=data["cid"],
         agent_id=data["agent_id"],
@@ -84,7 +103,7 @@ def _wire_to_node(data: dict[str, Any]) -> DAGNode:
         parent_cids=tuple(data.get("parent_cids", [])),
         bodes_passed=data.get("bodes_passed", False),
         constitutional_hash=data.get("constitutional_hash", ""),
-        metadata=data.get("metadata", {}),
+        metadata=raw_metadata,
     )
 
 
@@ -93,12 +112,21 @@ def encode_batch(nodes: list[DAGNode]) -> str:
     return json.dumps([_node_to_wire(n) for n in nodes])
 
 
+# Maximum inbound batch limits to prevent resource exhaustion.
+MAX_BATCH_BYTES: int = 4 * 1024 * 1024  # 4 MB
+MAX_BATCH_NODES: int = 1000
+
+
 def decode_batch(message: str) -> list[DAGNode]:
     """Decode a JSON string to a list of DAGNodes."""
+    if len(message) > MAX_BATCH_BYTES:
+        raise ValueError(f"Gossip batch too large: {len(message)} bytes (limit {MAX_BATCH_BYTES})")
     try:
         items = json.loads(message)
         if not isinstance(items, list):
             raise ValueError(f"Expected JSON array, got {type(items)}")
+        if len(items) > MAX_BATCH_NODES:
+            raise ValueError(f"Gossip batch too many nodes: {len(items)} (limit {MAX_BATCH_NODES})")
         return [_wire_to_node(item) for item in items]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise ValueError(f"Malformed gossip batch: {exc}") from exc
@@ -170,12 +198,26 @@ class GossipServer:
         crdt: The local MerkleCRDT replica to receive gossip into.
         host: Bind address.
         port: Bind port.
+        secret_token: Optional shared secret. When set, every connecting
+            client must send ``{"type":"auth","token":"<secret>"}`` as its
+            first message before any node batches are accepted.  Connections
+            that omit or fail the auth message are closed immediately.
+            This is a defence-in-depth measure; production deployments
+            should additionally use TLS and network-level access control.
     """
 
-    def __init__(self, crdt: MerkleCRDT, host: str = "127.0.0.1", port: int = 0) -> None:
+    def __init__(
+        self,
+        crdt: MerkleCRDT,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        *,
+        secret_token: str | None = None,
+    ) -> None:
         self.crdt = crdt
         self.host = host
         self.port = port
+        self._secret_token = secret_token
         self._server: Any = None  # websockets.Server
         self._actual_port: int = port
 
@@ -224,6 +266,28 @@ class GossipServer:
         peer = websocket.remote_address
         log.debug("Gossip connection from %s", peer)
         try:
+            # If a secret token is configured, the first message must be an
+            # auth frame {"type":"auth","token":"<secret>"}.  Any other first
+            # message (or a wrong token) closes the connection immediately.
+            if self._secret_token is not None:
+                try:
+                    first_msg = await websocket.__anext__()
+                except StopAsyncIteration:
+                    return
+                try:
+                    auth = json.loads(first_msg)
+                    if not (
+                        isinstance(auth, dict)
+                        and auth.get("type") == "auth"
+                        and auth.get("token") == self._secret_token
+                    ):
+                        raise ValueError("auth failed")
+                except (json.JSONDecodeError, ValueError):
+                    log.warning("Gossip auth failed from %s — closing", peer)
+                    await websocket.close(code=4401, reason="unauthorized")
+                    return
+                log.debug("Gossip auth OK from %s", peer)
+
             async for message in websocket:
                 try:
                     nodes = decode_batch(message)
@@ -259,11 +323,16 @@ class GossipClient:
         nodes: list[DAGNode],
         *,
         timeout: float = 5.0,
+        secret_token: str | None = None,
     ) -> bool:
         """Send nodes to a peer. Returns True on success, False on failure.
 
         Failures are logged at DEBUG level and swallowed — gossip is
         best-effort and partial delivery is acceptable for convergence.
+
+        Args:
+            secret_token: If provided, send an auth frame before the node
+                batch.  Must match the server's ``secret_token``.
         """
         if not nodes:
             return True
@@ -280,6 +349,9 @@ class GossipClient:
         try:
             async with asyncio.timeout(timeout):
                 async with websockets.connect(uri) as ws:
+                    if secret_token is not None:
+                        auth_msg = json.dumps({"type": "auth", "token": secret_token})
+                        await ws.send(auth_msg)
                     await ws.send(encode_batch(nodes))
             log.debug("Sent %d nodes to %s:%d", len(nodes), host, port)
             return True
@@ -377,7 +449,7 @@ class SwarmNode:
         if self._gossip_batch_size > 0:
             # Sort by CID for determinism, take last N
             nodes.sort(key=lambda n: n.cid)
-            nodes = nodes[-self._gossip_batch_size:]
+            nodes = nodes[-self._gossip_batch_size :]
         return nodes
 
     async def gossip_round(
@@ -508,9 +580,7 @@ async def simulate_ws_gossip_convergence(
                     )
 
             # Gossip round (all nodes push to n_peers)
-            await asyncio.gather(
-                *[node.gossip_round(n_peers=n_peers, rng=rng) for node in nodes]
-            )
+            await asyncio.gather(*[node.gossip_round(n_peers=n_peers, rng=rng) for node in nodes])
             # Small pause to let receivers process
             await asyncio.sleep(0.02)
 
@@ -535,6 +605,7 @@ async def simulate_ws_gossip_convergence(
         "sizes": sizes,
         "unique_cids": len(cid_sets[0]) if converged else -1,
     }
+
 
 # Backwards-compatible alias — CI smoke test imports this name
 GossipNode = SwarmNode

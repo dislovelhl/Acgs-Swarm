@@ -66,6 +66,7 @@ class SwarmCoordinator:
         tasks: list[dict[str, Any]],
         *,
         max_tasks: int | None = None,
+        routing_weights: list[list[float]] | None = None,
     ) -> dict[str, Any]:
         """Run all agents in-process and merge results via a shared CRDT.
 
@@ -78,6 +79,12 @@ class SwarmCoordinator:
             SWE-bench task list.
         max_tasks:
             Cap on tasks to assign.
+        routing_weights:
+            Optional ``n_agents × n_tasks`` matrix of non-negative weights.
+            When provided, task ``j`` is assigned to the agent with the highest
+            ``routing_weights[i][j]`` (ties broken by lower index). This is how
+            a trust matrix / competency estimate from the swarm mesh is wired
+            into task distribution. ``None`` preserves the round-robin default.
 
         Returns
         -------
@@ -85,11 +92,30 @@ class SwarmCoordinator:
         ``crdt_size``, ``governed_count``, ``mean_intervention``.
         """
         subset = tasks if max_tasks is None else tasks[:max_tasks]
-        # Assign tasks round-robin to agents
-        assignments: list[tuple[SWEBenchAgent, dict[str, Any]]] = [
-            (self.agents[i % len(self.agents)], task)
-            for i, task in enumerate(subset)
-        ]
+        n_agents = len(self.agents)
+
+        if routing_weights is not None:
+            if len(routing_weights) != n_agents or any(
+                len(row) != len(subset) for row in routing_weights
+            ):
+                raise ValueError(
+                    f"routing_weights must be {n_agents}×{len(subset)}, "
+                    f"got {len(routing_weights)}×"
+                    f"{len(routing_weights[0]) if routing_weights else 0}"
+                )
+            assignments: list[tuple[SWEBenchAgent, dict[str, Any]]] = []
+            for j, task in enumerate(subset):
+                # argmax over agents for task j (ties -> lower index)
+                best_i = 0
+                best_w = routing_weights[0][j]
+                for i in range(1, n_agents):
+                    if routing_weights[i][j] > best_w:
+                        best_w = routing_weights[i][j]
+                        best_i = i
+                assignments.append((self.agents[best_i], task))
+        else:
+            # Round-robin default
+            assignments = [(self.agents[i % n_agents], task) for i, task in enumerate(subset)]
 
         # Shared CRDT — all agents write to it
         shared_crdt = MerkleCRDT("coordinator")
@@ -138,14 +164,9 @@ class SwarmCoordinator:
 
         try:
             # Solve in parallel
-            assignments = [
-                (self.agents[i % n_nodes], task)
-                for i, task in enumerate(subset)
-            ]
+            assignments = [(self.agents[i % n_nodes], task) for i, task in enumerate(subset)]
             solve_tasks = [
-                asyncio.get_event_loop().run_in_executor(
-                    None, agent.solve, task
-                )
+                asyncio.get_event_loop().run_in_executor(None, agent.solve, task)
                 for agent, task in assignments
             ]
             results = await asyncio.gather(*solve_tasks)
@@ -153,15 +174,11 @@ class SwarmCoordinator:
             for i, result in enumerate(results):
                 patches.append(result)
                 payload = json.dumps(asdict(result))
-                nodes[i % n_nodes].crdt.append(
-                    payload=payload, bodes_passed=result.governed
-                )
+                nodes[i % n_nodes].crdt.append(payload=payload, bodes_passed=result.governed)
 
             # Gossip rounds to converge
             for _ in range(self.n_gossip_rounds):
-                await asyncio.gather(
-                    *[n.gossip_round(n_peers=self.gossip_peers) for n in nodes]
-                )
+                await asyncio.gather(*[n.gossip_round(n_peers=self.gossip_peers) for n in nodes])
                 await asyncio.sleep(0.05)
 
             # Harvest from first converged node
@@ -176,16 +193,12 @@ class SwarmCoordinator:
     # ──────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _aggregate(
-        patches: list[SWEPatch], crdt: MerkleCRDT
-    ) -> dict[str, Any]:
+    def _aggregate(patches: list[SWEPatch], crdt: MerkleCRDT) -> dict[str, Any]:
         total = len(patches)
         resolved = sum(1 for p in patches if p.success)
         governed = [p for p in patches if p.governed]
         mean_intervention = (
-            sum(p.intervention_rate for p in governed) / len(governed)
-            if governed
-            else 0.0
+            sum(p.intervention_rate for p in governed) / len(governed) if governed else 0.0
         )
         return {
             "patches": patches,

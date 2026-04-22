@@ -70,6 +70,33 @@ Multi-Agent Trust Dynamics}
 
 \appendix
 
+\section{Proof of Theorem~\ref{thm:sinkhorn_collapses}}
+\label{app:proof_sinkhorn}
+
+\begin{proof}[Full proof]
+  Let $H^{(0)} \in \mathcal{B}_n$ be doubly stochastic and primitive ($H^{(0)} > 0$
+  entry-wise).  Every doubly stochastic matrix has the all-ones vector $\mathbf{1}/\sqrt{n}$
+  as the Perron eigenvector with eigenvalue $\lambda_1 = 1$.  For primitive $H^{(0)}$, the
+  Perron-Frobenius theorem (Gantmacher~1959) guarantees $|\lambda_i| < \lambda_1 = 1$ for
+  all $i \geq 2$.  Let $\lambda_2 = \max_{i \geq 2} |\lambda_i(H^{(0)})| < 1$.
+
+  The Sinkhorn map $\mathrm{Sink}_t$ preserves the doubly stochastic structure
+  ($\mathcal{B}_n$ is forward-invariant under alternating normalization).  Moreover,
+  $\mathrm{Sink}_t$ is a linear contraction on the orthogonal complement of
+  $\mathrm{span}\{\mathbf{1}\mathbf{1}^\top / n\}$ with contraction factor $\lambda_2^t$
+  per outer iteration (see Levin, Peres \& Wilmer~2009, Prop.~4.7, applied to the doubly
+  stochastic semigroup).  Formally,
+  \[
+    \left\|H^{(k)} - \frac{J}{n}\right\|_F
+    \;\leq\; C \cdot \lambda_2^{kt},
+  \]
+  where $C = \|H^{(0)} - J/n\|_F$ and each outer iteration contracts the residual by the
+  factor $\lambda_2^t$.  Setting the iteration count $k$ and writing $\hat\lambda = \lambda_2^t$
+  gives $\|H^{(k)} - J/n\|_F \leq C \cdot \hat\lambda^k$.  Since $\hat\lambda < 1$, the
+  sequence converges to $J/n$ exponentially, and $\mathrm{Var}(H^{(k)}) \to 0$ at the
+  same rate. \qed
+\end{proof}
+
 \section{Proof of Theorem~\ref{thm:spectral_sphere_prevents_collapse}}
 \label{app:proof_main}
 

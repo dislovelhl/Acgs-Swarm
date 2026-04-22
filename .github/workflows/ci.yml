@@ -78,7 +78,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install with bittensor extras
-        run: pip install -e ".[dev,bittensor]"
+        run: |
+          pip install -e ".[dev,bittensor]"
+          pip uninstall scalecodec -y || true
+          pip install cyscale --force-reinstall
       - name: Verify bittensor extras import
         run: python -c "from constitutional_swarm.bittensor.protocol import MinerConfig; print('bittensor extras OK')"
 

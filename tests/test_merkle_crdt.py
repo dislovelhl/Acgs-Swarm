@@ -267,11 +267,12 @@ def test_topological_order_deterministic() -> None:
 async def test_gossip_convergence_small() -> None:
     """5 agents, 10 rounds → all replicas must converge to identical CID sets."""
     result = await simulate_gossip_convergence(
-        n_agents=5, n_rounds=10, artifacts_per_round=2, gossip_partners=2,
+        n_agents=5,
+        n_rounds=10,
+        artifacts_per_round=2,
+        gossip_partners=2,
     )
-    assert result["converged"], (
-        f"Gossip did not converge: sizes={result['sizes']}"
-    )
+    assert result["converged"], f"Gossip did not converge: sizes={result['sizes']}"
     assert result["unique_cids"] == result["total_artifacts"]
     print("\nGossip convergence (5 agents, 10 rounds)")
     print(f"  total artifacts: {result['total_artifacts']}")
@@ -283,11 +284,12 @@ async def test_gossip_convergence_small() -> None:
 async def test_gossip_convergence_large() -> None:
     """20 agents, 20 rounds → eventual convergence even with sparse gossip."""
     result = await simulate_gossip_convergence(
-        n_agents=20, n_rounds=20, artifacts_per_round=3, gossip_partners=3,
+        n_agents=20,
+        n_rounds=20,
+        artifacts_per_round=3,
+        gossip_partners=3,
     )
-    assert result["converged"], (
-        f"Gossip did not converge with 20 agents: sizes={result['sizes']}"
-    )
+    assert result["converged"], f"Gossip did not converge with 20 agents: sizes={result['sizes']}"
     expected_total = 20 * 20 * 3
     assert result["unique_cids"] == expected_total
     print("\nGossip convergence (20 agents, 20 rounds)")
@@ -368,3 +370,48 @@ def test_merge_nodes_from_list() -> None:
     added = target.merge_nodes([n1, n2])
     assert added == 2
     assert target.size == 2
+
+
+# ── Security regression tests ─────────────────────────────────────────────────
+
+
+class TestMetadataInCID:
+    """P1: metadata must be included in the CID hash."""
+
+    def test_different_metadata_produces_different_cid(self):
+        """Two otherwise-identical nodes with different metadata must have different CIDs."""
+        from constitutional_swarm.merkle_crdt import compute_cid
+
+        cid_no_meta = compute_cid("agent", "payload", (), metadata={})
+        cid_with_meta = compute_cid("agent", "payload", (), metadata={"key": "value"})
+        assert cid_no_meta != cid_with_meta
+
+    def test_appended_node_metadata_round_trips_via_verify_cid(self):
+        """Nodes appended with metadata must verify correctly."""
+        from constitutional_swarm.merkle_crdt import MerkleCRDT
+
+        crdt = MerkleCRDT("agent-0")
+        node = crdt.append("hello", metadata={"source": "test"})
+        assert node.verify_cid(), "Node with metadata must verify correctly"
+
+    def test_node_without_metadata_still_verifies(self):
+        """Nodes without metadata must still compute correct CIDs."""
+        from constitutional_swarm.merkle_crdt import MerkleCRDT
+
+        crdt = MerkleCRDT("agent-0")
+        node = crdt.append("hello")
+        assert node.verify_cid()
+
+    def test_metadata_survives_merge(self):
+        """Metadata must survive a CRDT merge between two replicas."""
+        from constitutional_swarm.merkle_crdt import MerkleCRDT
+
+        crdt_a = MerkleCRDT("agent-a")
+        node = crdt_a.append("hello", metadata={"trace_id": "abc123"})
+
+        crdt_b = MerkleCRDT("agent-b")
+        crdt_b.merge(crdt_a)
+
+        retrieved = crdt_b.get(node.cid)
+        assert retrieved is not None
+        assert retrieved.metadata == {"trace_id": "abc123"}

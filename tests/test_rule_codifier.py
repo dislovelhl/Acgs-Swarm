@@ -351,16 +351,31 @@ class TestRuleCodificationE2E:
 
     # Three distinct 7-vector profiles
     _PRIVACY_VEC: ClassVar[dict[str, float]] = {
-        "safety": 0.10, "security": 0.15, "privacy": 0.92,
-        "fairness": 0.25, "reliability": 0.10, "transparency": 0.60, "efficiency": 0.08,
+        "safety": 0.10,
+        "security": 0.15,
+        "privacy": 0.92,
+        "fairness": 0.25,
+        "reliability": 0.10,
+        "transparency": 0.60,
+        "efficiency": 0.08,
     }
     _SECURITY_VEC: ClassVar[dict[str, float]] = {
-        "safety": 0.85, "security": 0.90, "privacy": 0.15,
-        "fairness": 0.10, "reliability": 0.72, "transparency": 0.25, "efficiency": 0.45,
+        "safety": 0.85,
+        "security": 0.90,
+        "privacy": 0.15,
+        "fairness": 0.10,
+        "reliability": 0.72,
+        "transparency": 0.25,
+        "efficiency": 0.45,
     }
     _FAIRNESS_VEC: ClassVar[dict[str, float]] = {
-        "safety": 0.18, "security": 0.12, "privacy": 0.28,
-        "fairness": 0.93, "reliability": 0.20, "transparency": 0.70, "efficiency": 0.15,
+        "safety": 0.18,
+        "security": 0.12,
+        "privacy": 0.28,
+        "fairness": 0.93,
+        "reliability": 0.20,
+        "transparency": 0.70,
+        "efficiency": 0.15,
     }
 
     @staticmethod

@@ -82,7 +82,7 @@ class DashboardRow:
     epoch_count: int
     total_gain: float
     avg_rate: float | None
-    strictly_increasing: str   # 'YES' | 'NO' | 'INSUFFICIENT DATA'
+    strictly_increasing: str  # 'YES' | 'NO' | 'INSUFFICIENT DATA'
     strictly_accelerating: str  # 'YES' | 'NO' | 'INSUFFICIENT DATA'
 
 
@@ -350,13 +350,19 @@ class EvolutionLog:
         """Return rows where value failed to strictly increase."""
         assert self._conn is not None
         rows = self._conn.execute(_Q_REGRESSION).fetchall()
-        return [RegressionRecord(metric=r["metric"], epoch=r["regressed_at"], delta=r["delta"]) for r in rows]
+        return [
+            RegressionRecord(metric=r["metric"], epoch=r["regressed_at"], delta=r["delta"])
+            for r in rows
+        ]
 
     def detect_deceleration(self) -> list[DecelerationRecord]:
         """Return rows where the rate of improvement failed to strictly increase."""
         assert self._conn is not None
         rows = self._conn.execute(_Q_DECELERATION).fetchall()
-        return [DecelerationRecord(metric=r["metric"], epoch=r["decel_at"], accel=r["accel"]) for r in rows]
+        return [
+            DecelerationRecord(metric=r["metric"], epoch=r["decel_at"], accel=r["accel"])
+            for r in rows
+        ]
 
     def detect_gaps(self) -> list[GapRecord]:
         """Return epochs that exist but whose predecessor does not."""

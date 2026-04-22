@@ -10,7 +10,9 @@ Key properties:
     - Causal ordering: parent_cids encode happened-before relationships
     - CRDT merge: set union of nodes — commutative, associative, idempotent
     - Eventual Epistemic Convergence: all replicas reach identical state
-    - Byzantine rejection: malformed nodes (broken hash, missing parents) rejected
+    - Byzantine rejection: malformed nodes (broken hash, unresolvable CID) rejected
+                            (missing-parent acceptance is by CRDT design: nodes with
+                            unknown parents are stored and causality is resolved lazily)
 
 Integration with other MCFS phases:
     - Phase 1: bodes_passed flag records whether payload survived Latent DNA check
@@ -23,6 +25,7 @@ No external dependencies — pure Python with hashlib and asyncio.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import threading
@@ -80,6 +83,7 @@ class DAGNode:
             "parent_cids": list(self.parent_cids),
             "bodes_passed": self.bodes_passed,
             "constitutional_hash": self.constitutional_hash,
+            "metadata": self.metadata,
         }
 
     def verify_cid(self) -> bool:
@@ -96,6 +100,7 @@ def compute_cid(
     payload_type: str = "artifact",
     bodes_passed: bool = False,
     constitutional_hash: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Compute the CID for a node before constructing it."""
     data = {
@@ -105,6 +110,7 @@ def compute_cid(
         "parent_cids": list(parent_cids),
         "bodes_passed": bodes_passed,
         "constitutional_hash": constitutional_hash,
+        "metadata": metadata or {},
     }
     return _sha256_hex(_canonical_bytes(data))
 
@@ -169,6 +175,7 @@ class MerkleCRDT:
                 payload_type=payload_type,
                 bodes_passed=bodes_passed,
                 constitutional_hash=constitutional_hash,
+                metadata=metadata or {},
             )
 
             node = DAGNode(
@@ -286,9 +293,7 @@ class MerkleCRDT:
             # Count how many of this node's parents exist in our DAG
             in_degree[node.cid] = sum(1 for p in node.parent_cids if p in nodes)
 
-        queue = sorted(
-            [cid for cid, deg in in_degree.items() if deg == 0]
-        )
+        queue = sorted([cid for cid, deg in in_degree.items() if deg == 0])
         result: list[DAGNode] = []
 
         while queue:
@@ -299,9 +304,8 @@ class MerkleCRDT:
                 if cid in node.parent_cids:
                     in_degree[node.cid] -= 1
                     if in_degree[node.cid] == 0:
-                        # Insert sorted for determinism
-                        queue.append(node.cid)
-                        queue.sort()
+                        # Insert in sorted order for determinism — O(log n) vs O(n log n)
+                        bisect.insort(queue, node.cid)
 
         return result
 

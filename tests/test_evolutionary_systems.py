@@ -601,8 +601,12 @@ class TestEmissionGenomeExtended:
             authenticity_weight=0.0,
             generation=0,
         )
-        w50 = g.compute_weight(reputation=0, tier=MinerTier.APPRENTICE, precedent_count=50, manifold_trust=0)
-        w100 = g.compute_weight(reputation=0, tier=MinerTier.APPRENTICE, precedent_count=100, manifold_trust=0)
+        w50 = g.compute_weight(
+            reputation=0, tier=MinerTier.APPRENTICE, precedent_count=50, manifold_trust=0
+        )
+        w100 = g.compute_weight(
+            reputation=0, tier=MinerTier.APPRENTICE, precedent_count=100, manifold_trust=0
+        )
         assert w50 == pytest.approx(w100)
 
     def test_frozen_dataclass(self):
@@ -760,12 +764,20 @@ class TestTournamentSelectionExtended:
         random.seed(42)
         evolver = EmissionEvolver(seed=42)
         g_weak = EmissionGenome(
-            genome_id="weak", reputation_weight=0.1, tier_multiplier_scale=0.1,
-            precedent_bonus=0.1, authenticity_weight=0.1, generation=0,
+            genome_id="weak",
+            reputation_weight=0.1,
+            tier_multiplier_scale=0.1,
+            precedent_bonus=0.1,
+            authenticity_weight=0.1,
+            generation=0,
         )
         g_strong = EmissionGenome(
-            genome_id="strong", reputation_weight=0.9, tier_multiplier_scale=0.9,
-            precedent_bonus=0.9, authenticity_weight=0.9, generation=0,
+            genome_id="strong",
+            reputation_weight=0.9,
+            tier_multiplier_scale=0.9,
+            precedent_bonus=0.9,
+            authenticity_weight=0.9,
+            generation=0,
         )
         scored = [(g_strong, 0.95), (g_weak, 0.1)]
         # With only 2 candidates and k=3 (clamped to 2), best always wins
@@ -781,20 +793,30 @@ class TestCrossoverExtended:
         random.seed(42)
         evolver = EmissionEvolver(seed=42)
         a = EmissionGenome(
-            genome_id="a", reputation_weight=0.0, tier_multiplier_scale=0.0,
-            precedent_bonus=0.0, authenticity_weight=0.0, generation=0,
+            genome_id="a",
+            reputation_weight=0.0,
+            tier_multiplier_scale=0.0,
+            precedent_bonus=0.0,
+            authenticity_weight=0.0,
+            generation=0,
         )
         b = EmissionGenome(
-            genome_id="b", reputation_weight=1.0, tier_multiplier_scale=1.0,
-            precedent_bonus=1.0, authenticity_weight=1.0, generation=0,
+            genome_id="b",
+            reputation_weight=1.0,
+            tier_multiplier_scale=1.0,
+            precedent_bonus=1.0,
+            authenticity_weight=1.0,
+            generation=0,
         )
         # Run many crossovers; at least one should mix genes
         found_mixed = False
         for _ in range(20):
             child = evolver._crossover(a, b, 1)
             params = [
-                child.reputation_weight, child.tier_multiplier_scale,
-                child.precedent_bonus, child.authenticity_weight,
+                child.reputation_weight,
+                child.tier_multiplier_scale,
+                child.precedent_bonus,
+                child.authenticity_weight,
             ]
             has_a = any(p == 0.0 for p in params)
             has_b = any(p == 1.0 for p in params)
@@ -808,12 +830,20 @@ class TestCrossoverExtended:
         random.seed(42)
         evolver = EmissionEvolver(seed=42)
         a = EmissionGenome(
-            genome_id="parent_a", reputation_weight=0.5, tier_multiplier_scale=0.5,
-            precedent_bonus=0.5, authenticity_weight=0.5, generation=0,
+            genome_id="parent_a",
+            reputation_weight=0.5,
+            tier_multiplier_scale=0.5,
+            precedent_bonus=0.5,
+            authenticity_weight=0.5,
+            generation=0,
         )
         b = EmissionGenome(
-            genome_id="parent_b", reputation_weight=0.8, tier_multiplier_scale=0.8,
-            precedent_bonus=0.8, authenticity_weight=0.8, generation=0,
+            genome_id="parent_b",
+            reputation_weight=0.8,
+            tier_multiplier_scale=0.8,
+            precedent_bonus=0.8,
+            authenticity_weight=0.8,
+            generation=0,
         )
         child = evolver._crossover(a, b, 1)
         assert child.parent_id == "parent_a"
@@ -834,6 +864,7 @@ class TestCeilingDetectionExtended:
         """Ceiling detected when stagnation_count >= threshold."""
         random.seed(42)
         from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+
         island = Island(
             identity=IslandIdentity(island_id="test", family="test"),
             population=[],
@@ -846,6 +877,7 @@ class TestCeilingDetectionExtended:
         """No ceiling when stagnation_count < threshold."""
         random.seed(42)
         from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+
         island = Island(
             identity=IslandIdentity(island_id="test", family="test"),
             population=[],
@@ -862,13 +894,22 @@ class TestMigrationExtended:
         """Best genome from source appears in target after migration."""
         random.seed(42)
         from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+
         best = EmissionGenome(
-            genome_id="best", reputation_weight=0.9, tier_multiplier_scale=2.0,
-            precedent_bonus=0.5, authenticity_weight=0.8, generation=5,
+            genome_id="best",
+            reputation_weight=0.9,
+            tier_multiplier_scale=2.0,
+            precedent_bonus=0.5,
+            authenticity_weight=0.8,
+            generation=5,
         )
         filler = EmissionGenome(
-            genome_id="filler", reputation_weight=0.1, tier_multiplier_scale=0.1,
-            precedent_bonus=0.1, authenticity_weight=0.1, generation=0,
+            genome_id="filler",
+            reputation_weight=0.1,
+            tier_multiplier_scale=0.1,
+            precedent_bonus=0.1,
+            authenticity_weight=0.1,
+            generation=0,
         )
         source = Island(
             identity=IslandIdentity(island_id="src", family="reputation_heavy"),
@@ -892,9 +933,14 @@ class TestMigrationExtended:
         """Migration creates a MigrationEvent."""
         random.seed(42)
         from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+
         best = EmissionGenome(
-            genome_id="best", reputation_weight=0.9, tier_multiplier_scale=2.0,
-            precedent_bonus=0.5, authenticity_weight=0.8, generation=5,
+            genome_id="best",
+            reputation_weight=0.9,
+            tier_multiplier_scale=2.0,
+            precedent_bonus=0.5,
+            authenticity_weight=0.8,
+            generation=5,
         )
         source = Island(
             identity=IslandIdentity(island_id="src", family="tier_heavy"),
@@ -918,14 +964,19 @@ class TestMigrationExtended:
         """Migration is a no-op when source has no best genome."""
         random.seed(42)
         from constitutional_swarm.bittensor.island_evolution import Island, IslandIdentity
+
         source = Island(
             identity=IslandIdentity(island_id="src", family="tier_heavy"),
             population=[],
             best_genome=None,
         )
         filler = EmissionGenome(
-            genome_id="f", reputation_weight=0.1, tier_multiplier_scale=0.1,
-            precedent_bonus=0.1, authenticity_weight=0.1, generation=0,
+            genome_id="f",
+            reputation_weight=0.1,
+            tier_multiplier_scale=0.1,
+            precedent_bonus=0.1,
+            authenticity_weight=0.1,
+            generation=0,
         )
         target = Island(
             identity=IslandIdentity(island_id="tgt", family="balanced"),
@@ -944,14 +995,22 @@ class TestFitnessEvaluationExtended:
         random.seed(42)
         evolver = EmissionEvolver(seed=42)
         genome = EmissionGenome(
-            genome_id="g", reputation_weight=1.0, tier_multiplier_scale=0.0,
-            precedent_bonus=0.0, authenticity_weight=0.0, generation=0,
+            genome_id="g",
+            reputation_weight=1.0,
+            tier_multiplier_scale=0.0,
+            precedent_bonus=0.0,
+            authenticity_weight=0.0,
+            generation=0,
         )
         obs = [
             MinerQualityObservation(
-                "m1", consensus_quality=0.9, acceptance_rate=0.9,
-                reputation=1.0, tier=MinerTier.MASTER,
-                precedent_contributions=0, manifold_trust=0.5,
+                "m1",
+                consensus_quality=0.9,
+                acceptance_rate=0.9,
+                reputation=1.0,
+                tier=MinerTier.MASTER,
+                precedent_contributions=0,
+                manifold_trust=0.5,
             )
         ]
         assert evolver.evaluate_genome(genome, obs) == 0.0
@@ -962,24 +1021,40 @@ class TestFitnessEvaluationExtended:
         evolver = EmissionEvolver(seed=42)
         # Genome weights reputation, but quality is inversely related to reputation
         genome = EmissionGenome(
-            genome_id="inv", reputation_weight=1.0, tier_multiplier_scale=0.0,
-            precedent_bonus=0.0, authenticity_weight=0.0, generation=0,
+            genome_id="inv",
+            reputation_weight=1.0,
+            tier_multiplier_scale=0.0,
+            precedent_bonus=0.0,
+            authenticity_weight=0.0,
+            generation=0,
         )
         obs = [
             MinerQualityObservation(
-                "m1", consensus_quality=0.1, acceptance_rate=0.1,
-                reputation=2.0, tier=MinerTier.APPRENTICE,
-                precedent_contributions=0, manifold_trust=0.0,
+                "m1",
+                consensus_quality=0.1,
+                acceptance_rate=0.1,
+                reputation=2.0,
+                tier=MinerTier.APPRENTICE,
+                precedent_contributions=0,
+                manifold_trust=0.0,
             ),
             MinerQualityObservation(
-                "m2", consensus_quality=0.5, acceptance_rate=0.5,
-                reputation=1.0, tier=MinerTier.APPRENTICE,
-                precedent_contributions=0, manifold_trust=0.0,
+                "m2",
+                consensus_quality=0.5,
+                acceptance_rate=0.5,
+                reputation=1.0,
+                tier=MinerTier.APPRENTICE,
+                precedent_contributions=0,
+                manifold_trust=0.0,
             ),
             MinerQualityObservation(
-                "m3", consensus_quality=0.9, acceptance_rate=0.9,
-                reputation=0.5, tier=MinerTier.APPRENTICE,
-                precedent_contributions=0, manifold_trust=0.0,
+                "m3",
+                consensus_quality=0.9,
+                acceptance_rate=0.9,
+                reputation=0.5,
+                tier=MinerTier.APPRENTICE,
+                precedent_contributions=0,
+                manifold_trust=0.0,
             ),
         ]
         rho = evolver.evaluate_genome(genome, obs)
@@ -992,19 +1067,31 @@ class TestFullEvolutionLoopExtended:
     def _sample_observations(self) -> list[MinerQualityObservation]:
         return [
             MinerQualityObservation(
-                "m1", consensus_quality=0.9, acceptance_rate=0.95,
-                reputation=1.8, tier=MinerTier.MASTER,
-                precedent_contributions=10, manifold_trust=0.8,
+                "m1",
+                consensus_quality=0.9,
+                acceptance_rate=0.95,
+                reputation=1.8,
+                tier=MinerTier.MASTER,
+                precedent_contributions=10,
+                manifold_trust=0.8,
             ),
             MinerQualityObservation(
-                "m2", consensus_quality=0.7, acceptance_rate=0.75,
-                reputation=1.3, tier=MinerTier.JOURNEYMAN,
-                precedent_contributions=3, manifold_trust=0.5,
+                "m2",
+                consensus_quality=0.7,
+                acceptance_rate=0.75,
+                reputation=1.3,
+                tier=MinerTier.JOURNEYMAN,
+                precedent_contributions=3,
+                manifold_trust=0.5,
             ),
             MinerQualityObservation(
-                "m3", consensus_quality=0.3, acceptance_rate=0.35,
-                reputation=0.8, tier=MinerTier.APPRENTICE,
-                precedent_contributions=0, manifold_trust=0.2,
+                "m3",
+                consensus_quality=0.3,
+                acceptance_rate=0.35,
+                reputation=0.8,
+                tier=MinerTier.APPRENTICE,
+                precedent_contributions=0,
+                manifold_trust=0.2,
             ),
         ]
 
@@ -1126,17 +1213,25 @@ class TestMapElitesExtended:
                 grid_same.challenge(
                     MinerApproach(
                         miner_uid="same",
-                        domain=d, strategy=s, fitness=0.7,
-                        acceptance_rate=0.7, reasoning_quality=0.7,
-                        speed_ms=300, sample_count=10,
+                        domain=d,
+                        strategy=s,
+                        fitness=0.7,
+                        acceptance_rate=0.7,
+                        reasoning_quality=0.7,
+                        speed_ms=300,
+                        sample_count=10,
                     )
                 )
                 grid_diverse.challenge(
                     MinerApproach(
                         miner_uid=f"miner-{idx}",
-                        domain=d, strategy=s, fitness=0.7,
-                        acceptance_rate=0.7, reasoning_quality=0.7,
-                        speed_ms=300, sample_count=10,
+                        domain=d,
+                        strategy=s,
+                        fitness=0.7,
+                        acceptance_rate=0.7,
+                        reasoning_quality=0.7,
+                        speed_ms=300,
+                        sample_count=10,
                     )
                 )
                 idx += 1

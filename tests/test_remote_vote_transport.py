@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from constitutional_swarm.mesh import ConstitutionalMesh, RemoteVoteRequest
 from constitutional_swarm.remote_vote_transport import (
@@ -195,3 +197,178 @@ def test_remote_peer_rejects_untrusted_request_signer() -> None:
     request = untrusted_mesh.prepare_remote_vote(assignment.assignment_id, "peer-1")
     with pytest.raises(ValueError, match="not trusted"):
         peer.handle_vote_request(request)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Remote vote transport failure-path tests
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeRemoteVoteRequestErrors:
+    """Failure paths in decode_remote_vote_request (lines 50-71)."""
+
+    def test_malformed_json(self) -> None:
+        with pytest.raises(ValueError, match="Malformed remote vote request"):
+            decode_remote_vote_request("{not-json!")
+
+    def test_non_dict_json_array(self) -> None:
+        with pytest.raises(ValueError, match="expected object, got"):
+            decode_remote_vote_request("[1,2,3]")
+
+    def test_non_dict_json_string(self) -> None:
+        with pytest.raises(ValueError, match="expected object, got"):
+            decode_remote_vote_request('"just a string"')
+
+    @pytest.mark.parametrize(
+        "missing_field",
+        [
+            "assignment_id",
+            "voter_id",
+            "producer_id",
+            "artifact_id",
+            "content",
+            "content_hash",
+            "constitutional_hash",
+            "voter_public_key",
+            "request_signer_public_key",
+            "request_signature",
+        ],
+    )
+    def test_missing_required_field(self, missing_field: str) -> None:
+        full_payload = {
+            "assignment_id": "a",
+            "voter_id": "v",
+            "producer_id": "p",
+            "artifact_id": "art",
+            "content": "c",
+            "content_hash": "ch",
+            "constitutional_hash": "const",
+            "voter_public_key": "vpk",
+            "request_signer_public_key": "rspk",
+            "request_signature": "rs",
+        }
+        del full_payload[missing_field]
+        import json
+
+        with pytest.raises(ValueError, match=f"missing {missing_field}"):
+            decode_remote_vote_request(json.dumps(full_payload))
+
+
+class TestDecodeRemoteVoteResponseErrors:
+    """Failure paths in decode_remote_vote_response (lines 78-99)."""
+
+    def test_malformed_json(self) -> None:
+        with pytest.raises(ValueError, match="Malformed remote vote response"):
+            decode_remote_vote_response("not-json{")
+
+    def test_non_dict_json(self) -> None:
+        with pytest.raises(ValueError, match="expected object, got"):
+            decode_remote_vote_response("[1]")
+
+    def test_missing_required_field(self) -> None:
+        import json
+
+        payload = {
+            "assignment_id": "a",
+            "voter_id": "v",
+            "approved": True,
+            "reason": "ok",
+            "constitutional_hash": "ch",
+            # missing content_hash
+            "signature": "sig",
+        }
+        with pytest.raises(ValueError, match="missing content_hash"):
+            decode_remote_vote_response(json.dumps(payload))
+
+
+class TestLocalRemotePeerValidation:
+    """Explicit tests for LocalRemotePeer.handle_vote_request guard clauses."""
+
+    def _make_peer_and_request(self) -> tuple[LocalRemotePeer, RemoteVoteRequest]:
+        """Create a valid peer + request pair for mutation tests."""
+        constitution = Constitution.default()
+        mesh = ConstitutionalMesh(constitution, seed=42)
+        peer = LocalRemotePeer(
+            agent_id="peer-1",
+            constitution=constitution,
+            trusted_request_signers={mesh.get_request_signing_public_key()},
+        )
+        mesh.register_local_signer("producer")
+        mesh.register_remote_agent("peer-1", vote_public_key=peer.public_key_hex)
+        mesh.register_local_signer("peer-2")
+        mesh.register_local_signer("peer-3")
+        assignment = mesh.request_validation("producer", "safe content", "art-val")
+        request = mesh.prepare_remote_vote(assignment.assignment_id, "peer-1")
+        return peer, request
+
+    def test_rejects_wrong_voter_id(self) -> None:
+        peer, request = self._make_peer_and_request()
+        wrong_voter = RemoteVoteRequest(
+            assignment_id=request.assignment_id,
+            voter_id="wrong-peer",
+            producer_id=request.producer_id,
+            artifact_id=request.artifact_id,
+            content=request.content,
+            content_hash=request.content_hash,
+            constitutional_hash=request.constitutional_hash,
+            voter_public_key=request.voter_public_key,
+            request_signer_public_key=request.request_signer_public_key,
+            request_signature=request.request_signature,
+        )
+        with pytest.raises(ValueError, match="intended for wrong-peer"):
+            peer.handle_vote_request(wrong_voter)
+
+    def test_rejects_mismatched_pubkey(self) -> None:
+        peer, request = self._make_peer_and_request()
+        wrong_key = RemoteVoteRequest(
+            assignment_id=request.assignment_id,
+            voter_id=request.voter_id,
+            producer_id=request.producer_id,
+            artifact_id=request.artifact_id,
+            content=request.content,
+            content_hash=request.content_hash,
+            constitutional_hash=request.constitutional_hash,
+            voter_public_key="0000000000000000000000000000000000000000000000000000000000000000",
+            request_signer_public_key=request.request_signer_public_key,
+            request_signature=request.request_signature,
+        )
+        with pytest.raises(ValueError, match="public key does not match"):
+            peer.handle_vote_request(wrong_key)
+
+
+@pytest.mark.asyncio
+async def test_remote_vote_client_connection_timeout_propagates() -> None:
+    """RemoteVoteClient.request_vote() must propagate TimeoutError when the server is unresponsive."""
+    import asyncio
+
+    async def _slow_handler(websocket: Any) -> None:
+        # Accept connection but never send a response.
+        await asyncio.sleep(30)
+
+    constitution = Constitution.default()
+    mesh = ConstitutionalMesh(constitution, seed=42)
+    mesh.register_local_signer("producer")
+    mesh.register_local_signer("peer-1")
+    mesh.register_local_signer("peer-2")
+    mesh.register_local_signer("peer-3")
+    assignment = mesh.request_validation("producer", "content", "art-timeout")
+
+    # Build a valid request (voter_id is just needed for the dataclass; server ignores it here).
+    request = RemoteVoteRequest(
+        assignment_id=assignment.assignment_id,
+        voter_id="peer-1",
+        producer_id="producer",
+        artifact_id="art-timeout",
+        content="content",
+        content_hash=assignment.content_hash,
+        constitutional_hash=assignment.constitutional_hash,
+        voter_public_key="00" * 32,
+        request_signer_public_key="00" * 32,
+        request_signature="00" * 64,
+    )
+
+    async with websockets.asyncio.server.serve(_slow_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        client = RemoteVoteClient()
+        with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+            await client.request_vote("127.0.0.1", port, request, timeout=0.1)

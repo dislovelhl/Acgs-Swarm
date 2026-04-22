@@ -15,12 +15,22 @@ Integration points
 
 from __future__ import annotations
 
+import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from constitutional_swarm.latent_dna import LatentDNAWrapper
+
+_log = logging.getLogger(__name__)
+
+
+def _opaque_error_message(exc: Exception, *, error_id: str) -> str:
+    """Compatibility-safe error message that does not leak exception details."""
+    kind = type(exc).__name__
+    return f"{kind} (error_id={error_id})"
 
 
 @dataclass
@@ -123,14 +133,20 @@ class SWEBenchAgent:
                 duration_s=time.monotonic() - t0,
                 metadata={"error": "timeout"},
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            err_id = uuid.uuid4().hex[:12]
+            _log.error("solve failed [%s]: %s", err_id, exc, exc_info=True)
             return SWEPatch(
                 task_id=task_id,
                 patch="",
                 success=False,
                 governed=self.wrapper is not None,
                 duration_s=time.monotonic() - t0,
-                metadata={"error": type(exc).__name__, "msg": str(exc)},
+                metadata={
+                    "error": type(exc).__name__,
+                    "error_id": err_id,
+                    "msg": _opaque_error_message(exc, error_id=err_id),
+                },
             )
 
         duration = time.monotonic() - t0
@@ -148,9 +164,7 @@ class SWEBenchAgent:
     # Extension point: override in subclasses or test doubles
     # ──────────────────────────────────────────────────────────────────────
 
-    def _generate_patch(
-        self, task: dict[str, Any]
-    ) -> tuple[str, dict[str, Any]]:
+    def _generate_patch(self, task: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Generate a unified-diff patch for ``task``.
 
         Default implementation is a no-op stub that returns an empty patch.

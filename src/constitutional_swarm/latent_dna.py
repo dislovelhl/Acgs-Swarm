@@ -51,9 +51,8 @@ try:
     import torch.nn as nn
     from torch import Tensor
 except ImportError as exc:
-    raise ImportError(
-        "latent_dna requires torch. Install with: pip install torch>=2.0"
-    ) from exc
+    raise ImportError("latent_dna requires torch. Install with: pip install torch>=2.0") from exc
+
 
 def _transformers_available() -> bool:
     """Return True if the transformers package is importable."""
@@ -101,9 +100,7 @@ class _BODESHook:
         gamma: float = 1.0,
     ) -> None:
         if v_viol.dim() != 1:
-            raise ValueError(
-                f"v_viol must be 1D [hidden_dim], got shape {tuple(v_viol.shape)}"
-            )
+            raise ValueError(f"v_viol must be 1D [hidden_dim], got shape {tuple(v_viol.shape)}")
         norm = v_viol.norm().item()
         if abs(norm - 1.0) > 1e-4:
             raise ValueError(
@@ -145,10 +142,14 @@ class _BODESHook:
         self.total_tokens += batch * seq_len
 
         v = self.v_viol.to(hidden.device, hidden.dtype)  # [hidden_dim]
+        # Re-normalize after dtype/device transfer to prevent precision drift
+        v_norm = v.norm()
+        if (v_norm - 1.0).abs() > 1e-5:
+            v = v / v_norm
 
         # Projection: [batch, seq_len]
         # proj[b, s] = hidden[b, s] · v_viol
-        proj = (hidden @ v)  # [batch, seq_len]
+        proj = hidden @ v  # [batch, seq_len]
 
         # CBF condition: steer where proj > threshold
         mask = proj > self.threshold  # [batch, seq_len], bool
@@ -158,17 +159,151 @@ class _BODESHook:
 
         if n_interventions > 0:
             # Orthogonal steering: h_safe = h - gamma * (h·v) * v
-            # proj_expanded: [batch, seq_len, 1]
-            proj_clamped = torch.where(mask, proj, torch.zeros_like(proj))
-            proj_expanded = proj_clamped.unsqueeze(-1)  # [batch, seq_len, 1]
-            v_expanded = v.unsqueeze(0).unsqueeze(0)    # [1, 1, hidden_dim]
+            # Wrapped in try/except for OOM/numerical safety — return
+            # original hidden state if steering fails.
+            try:
+                # proj_expanded: [batch, seq_len, 1]
+                proj_clamped = torch.where(mask, proj, torch.zeros_like(proj))
+                proj_expanded = proj_clamped.unsqueeze(-1)  # [batch, seq_len, 1]
+                v_expanded = v.unsqueeze(0).unsqueeze(0)  # [1, 1, hidden_dim]
 
-            # steering_delta: [batch, seq_len, hidden_dim]
-            steering_delta = self.gamma * proj_expanded * v_expanded
+                # steering_delta: [batch, seq_len, hidden_dim]
+                steering_delta = self.gamma * proj_expanded * v_expanded
 
-            # Only subtract where mask is True — preserves safe tokens exactly
-            mask_expanded = mask.unsqueeze(-1).expand_as(hidden)  # [batch, seq_len, hidden_dim]
-            hidden = torch.where(mask_expanded, hidden - steering_delta, hidden)
+                # Only subtract where mask is True — preserves safe tokens exactly
+                mask_expanded = mask.unsqueeze(-1).expand_as(hidden)  # [batch, seq_len, hidden_dim]
+                hidden = torch.where(mask_expanded, hidden - steering_delta, hidden)
+            except (RuntimeError, torch.cuda.OutOfMemoryError):
+                # Steering failed (OOM or numerical) — fail open to preserve
+                # model functionality. The downstream AgentDNA.validate layer
+                # will catch any violations that survive.
+                pass
+
+        if rest is None:
+            return hidden
+        return (hidden, *rest)
+
+
+class _BODESSubspaceHook:
+    """Forward hook implementing rank-``k`` subspace steering (Phase 7.4 activation).
+
+    Generalizes ``_BODESHook`` from a rank-1 violation direction to an
+    orthonormal rank-``k`` basis produced by
+    :class:`~constitutional_swarm.violation_subspace.ViolationSubspace`.
+    Each basis direction is independently gated against ``threshold`` —
+    tokens retain the safe (below-threshold) components untouched while
+    the offending components are attenuated by ``gamma``.
+
+    LEACE mode (``subspace.is_leace``) is supported: the forward pass
+    applies ``whitener`` before projecting onto ``basis`` and maps the
+    subspace-coordinate correction back through ``dewhitener`` before
+    subtracting from ``hidden``. This mirrors
+    :meth:`ViolationSubspace.steer` byte-for-byte (see
+    ``test_bodes_subspace_leace_hook.py``).
+
+    Args:
+        subspace: A ``ViolationSubspace`` with orthonormal basis.
+            LEACE-whitened or plain; both are supported.
+        threshold: Per-component safety margin τ. A component is steered
+            only when its coordinate (along the basis row) exceeds τ.
+        gamma: Steering strength ∈ (0, 1]. ``gamma=1`` zeros offending
+            components; smaller values produce a smoother retreat.
+    """
+
+    def __init__(
+        self,
+        subspace: Any,  # ViolationSubspace; typed as Any to avoid numpy import at module top
+        *,
+        threshold: float = 0.0,
+        gamma: float = 1.0,
+    ) -> None:
+        # Late import — keeps latent_dna importable when numpy isn't desired
+        from .violation_subspace import ViolationSubspace
+
+        if not isinstance(subspace, ViolationSubspace):
+            raise TypeError(f"subspace must be a ViolationSubspace, got {type(subspace).__name__}")
+        if not 0.0 < gamma <= 1.0:
+            raise ValueError(f"gamma must be in (0, 1], got {gamma}")
+
+        basis_np = subspace.basis  # (k, d) float64
+        mean_np = subspace.mean  # (d,) float64
+        # Preserve as float32 buffers; they are converted per-call to match hidden dtype.
+        self.basis = torch.from_numpy(basis_np).to(dtype=torch.float32)  # (k, d)
+        self.mean = torch.from_numpy(mean_np).to(dtype=torch.float32)  # (d,)
+        # LEACE whitening buffers (None unless subspace.is_leace).
+        self.whitener: torch.Tensor | None = None
+        self.dewhitener: torch.Tensor | None = None
+        if subspace.is_leace:
+            # Type-narrowing for mypy — ``__post_init__`` guarantees both exist.
+            assert subspace.whitener is not None and subspace.dewhitener is not None
+            self.whitener = torch.from_numpy(subspace.whitener).to(dtype=torch.float32)
+            self.dewhitener = torch.from_numpy(subspace.dewhitener).to(dtype=torch.float32)
+        self.is_leace: bool = subspace.is_leace
+        self.rank = int(basis_np.shape[0])
+        self.dim = int(basis_np.shape[1])
+        self.threshold = threshold
+        self.gamma = gamma
+
+        self.interventions: int = 0
+        self.total_tokens: int = 0
+
+    def __call__(
+        self,
+        module: nn.Module,
+        input: tuple[Any, ...],
+        output: Any,
+    ) -> Any:
+        if isinstance(output, tuple):
+            hidden = output[0]
+            rest = output[1:]
+        else:
+            hidden = output
+            rest = None
+
+        batch, seq_len, hidden_dim = hidden.shape
+        self.total_tokens += batch * seq_len
+
+        if hidden_dim != self.dim:
+            # Fail-open: shape mismatch means the hook was misconfigured for
+            # this layer. Preserve model functionality — downstream string
+            # validation still catches violations.
+            return output
+
+        B = self.basis.to(hidden.device, hidden.dtype)  # (k, d)
+        mu = self.mean.to(hidden.device, hidden.dtype)  # (d,)
+
+        centered = hidden - mu  # [B, S, d]
+        if self.is_leace:
+            assert self.whitener is not None and self.dewhitener is not None
+            W = self.whitener.to(hidden.device, hidden.dtype)  # (d, d)
+            Winv = self.dewhitener.to(hidden.device, hidden.dtype)  # (d, d)
+            # Whiten before projecting: centered_w = centered @ W.T
+            centered_w = centered @ W.T  # [B, S, d]
+            coords = centered_w @ B.T  # [B, S, k]
+        else:
+            coords = centered @ B.T  # [B, S, k]
+
+        # Any-component exceed → token is "intervened"
+        per_comp_mask = coords > self.threshold  # [B, S, k], bool
+        any_mask = per_comp_mask.any(dim=-1)  # [B, S]
+        n_interventions = int(any_mask.sum().item())
+        self.interventions += n_interventions
+
+        if n_interventions > 0:
+            try:
+                zero = torch.zeros_like(coords)
+                masked_coords = torch.where(per_comp_mask, coords, zero)  # [B, S, k]
+                if self.is_leace:
+                    # bad = (masked_coords @ B) @ Winv.T  — match numpy steer()
+                    bad = (masked_coords @ B) @ Winv.T  # [B, S, d]
+                else:
+                    # steering_delta[b, s] = gamma * sum_k masked_coords[b, s, k] * B[k]
+                    bad = masked_coords @ B  # [B, S, d]
+                steering_delta = self.gamma * bad
+                hidden = hidden - steering_delta
+            except (RuntimeError, torch.cuda.OutOfMemoryError):
+                # Fail-open on OOM / numerical failure — string validator backstops.
+                pass
 
         if rest is None:
             return hidden
@@ -246,9 +381,10 @@ class LatentDNAWrapper:
     def __init__(
         self,
         model: _HFModelLike,
-        v_viol: Tensor,
-        layer_idx: int,
+        v_viol: Tensor | None = None,
+        layer_idx: int = 0,
         *,
+        subspace: Any | None = None,
         threshold: float = 0.0,
         gamma: float = 1.0,
         layer_attr_path: str | None = None,
@@ -256,7 +392,17 @@ class LatentDNAWrapper:
         self.model = model
         self.layer_idx = layer_idx
 
-        self._hook_impl = _BODESHook(v_viol, threshold=threshold, gamma=gamma)
+        if (v_viol is None) == (subspace is None):
+            raise ValueError(
+                "Pass exactly one of `v_viol` (rank-1 direction) or "
+                "`subspace` (ViolationSubspace rank-k basis)."
+            )
+
+        if subspace is not None:
+            self._hook_impl: Any = _BODESSubspaceHook(subspace, threshold=threshold, gamma=gamma)
+        else:
+            assert v_viol is not None
+            self._hook_impl = _BODESHook(v_viol, threshold=threshold, gamma=gamma)
         self._handle: torch.utils.hooks.RemovableHook | None = None
 
         # Resolve the target layer
@@ -365,10 +511,8 @@ class LatentDNAWrapper:
             )
         stats = self.intervention_stats()
         if tokenizer is not None:
-            new_ids = output_ids[:, input_ids.shape[-1]:]
-            stats["generated_text"] = tokenizer.batch_decode(
-                new_ids, skip_special_tokens=True
-            )
+            new_ids = output_ids[:, input_ids.shape[-1] :]
+            stats["generated_text"] = tokenizer.batch_decode(new_ids, skip_special_tokens=True)
         return output_ids, stats
 
     # ──────────────────────────────────────────────────────────────────────
@@ -387,9 +531,7 @@ class LatentDNAWrapper:
         )
 
     @staticmethod
-    def _resolve_layer(
-        model: _HFModelLike, attr_path: str, layer_idx: int
-    ) -> nn.Module:
+    def _resolve_layer(model: _HFModelLike, attr_path: str, layer_idx: int) -> nn.Module:
         obj: Any = model
         for part in attr_path.split("."):
             obj = getattr(obj, part)
@@ -443,9 +585,7 @@ class LatentDNAWrapper:
 
         activations: list[Tensor] = []
 
-        def _capture_hook(
-            module: nn.Module, input: tuple[Any, ...], output: Any
-        ) -> None:
+        def _capture_hook(module: nn.Module, input: tuple[Any, ...], output: Any) -> None:
             h = output[0] if isinstance(output, tuple) else output
             # Mean over seq_len: [batch, hidden_dim]
             activations.append(h.mean(dim=1).detach().cpu())
@@ -468,8 +608,8 @@ class LatentDNAWrapper:
         finally:
             handle.remove()
 
-        safe_mean = torch.cat(safe_acts, dim=0).mean(dim=0)     # [hidden_dim]
-        unsafe_mean = torch.cat(unsafe_acts, dim=0).mean(dim=0) # [hidden_dim]
+        safe_mean = torch.cat(safe_acts, dim=0).mean(dim=0)  # [hidden_dim]
+        unsafe_mean = torch.cat(unsafe_acts, dim=0).mean(dim=0)  # [hidden_dim]
 
         v_viol = unsafe_mean - safe_mean
         v_viol = v_viol / v_viol.norm()
@@ -532,9 +672,7 @@ class LatentDNAWrapper:
 
         activations: list[Tensor] = []
 
-        def _capture_hook(
-            module: nn.Module, input: tuple[Any, ...], output: Any
-        ) -> None:
+        def _capture_hook(module: nn.Module, input: tuple[Any, ...], output: Any) -> None:
             h = output[0] if isinstance(output, tuple) else output
             activations.append(h.mean(dim=1).detach().cpu())
 
@@ -556,12 +694,12 @@ class LatentDNAWrapper:
         finally:
             handle.remove()
 
-        safe_cat = torch.cat(safe_acts, dim=0)     # [N, hidden_dim]
+        safe_cat = torch.cat(safe_acts, dim=0)  # [N, hidden_dim]
         unsafe_cat = torch.cat(unsafe_acts, dim=0)  # [N, hidden_dim]
 
         # Contrastive PCA: SVD on centered paired differences
-        diffs = unsafe_cat - safe_cat                              # [N, hidden_dim]
-        diffs_centered = diffs - diffs.mean(dim=0, keepdim=True)   # center
+        diffs = unsafe_cat - safe_cat  # [N, hidden_dim]
+        diffs_centered = diffs - diffs.mean(dim=0, keepdim=True)  # center
         _U, _S, Vh = torch.linalg.svd(diffs_centered, full_matrices=False)
 
         if n_components == 1:

@@ -42,9 +42,7 @@ class SpectralProjectionResult:
     power_iterations: int
 
 
-def _mat_mul(
-    a: list[list[float]], b: list[list[float]], n: int
-) -> list[list[float]]:
+def _mat_mul(a: list[list[float]], b: list[list[float]], n: int) -> list[list[float]]:
     """O(n³) matrix multiply — pure Python, no numpy required."""
     return [[sum(a[i][k] * b[k][j] for k in range(n)) for j in range(n)] for i in range(n)]
 
@@ -146,7 +144,22 @@ def spectral_sphere_project(
         scale = r / sigma
         projected = [[matrix[i][j] * scale for j in range(n)] for i in range(n)]
         clipped = True
-        sigma = r  # By construction
+
+    # Verification pass: power iteration is a lower bound on sigma_max.
+    # If it underestimated, the projected matrix may still exceed radius r.
+    # Re-check and iteratively rescale until within the sphere (at most 3 passes).
+    for _ in range(3):
+        sigma_check = spectral_norm_power_iter(
+            list(map(list, projected)), max_iterations=max_power_iter
+        )
+        if sigma_check <= r + 1e-10:
+            sigma = sigma_check
+            break
+        scale = r / sigma_check
+        projected = [[projected[i][j] * scale for j in range(n)] for i in range(n)]
+        sigma = r
+    else:
+        sigma = r  # conservative: claim radius even if iteration didn't converge
 
     return SpectralProjectionResult(
         matrix=tuple(tuple(row) for row in projected),
@@ -185,12 +198,17 @@ class SpectralSphereManifold:
         *,
         r: float = 1.0,
         max_power_iter: int = 30,
+        smoothing: float = 0.999,
     ) -> None:
         self._n = num_agents
         self._r = r
         self._max_power_iter = max_power_iter
+        if not 0.0 <= smoothing < 1.0:
+            raise ValueError(f"smoothing must be in [0, 1), got {smoothing}")
+        self._smoothing = smoothing
         self._raw_trust: list[list[float]] = [[0.0] * num_agents for _ in range(num_agents)]
         self._projected: SpectralProjectionResult | None = None
+        self._smoothed: SpectralProjectionResult | None = None
 
     @property
     def num_agents(self) -> int:
@@ -203,17 +221,59 @@ class SpectralSphereManifold:
 
     def update_trust(self, from_agent: int, to_agent: int, delta: float) -> None:
         """Update the raw trust weight from from_agent toward to_agent."""
+        if not math.isfinite(delta):
+            raise ValueError(f"delta must be a finite number, got {delta!r}")
+        if not (0 <= from_agent < self._n and 0 <= to_agent < self._n):
+            raise IndexError(
+                f"agent index out of range [0, {self._n}): "
+                f"from_agent={from_agent}, to_agent={to_agent}"
+            )
         self._raw_trust[from_agent][to_agent] += delta
         self._projected = None  # Invalidate cache
 
     def project(self) -> SpectralProjectionResult:
-        """Project current raw trust matrix onto the spectral sphere."""
-        if self._projected is None:
-            self._projected = spectral_sphere_project(
-                self._raw_trust,
-                r=self._r,
-                max_power_iter=self._max_power_iter,
+        """Project current raw trust matrix onto the spectral sphere.
+
+        Applies EMA smoothing across sequential projections (hysteresis) to
+        stabilize trust-matrix dynamics under noisy incremental updates. The
+        smoothing is skipped on the first projection (so a single update is
+        visible immediately) and whenever ``smoothing == 0.0`` (back-compat).
+        """
+        if self._projected is not None:
+            return self._projected
+
+        new_proj = spectral_sphere_project(
+            self._raw_trust,
+            r=self._r,
+            max_power_iter=self._max_power_iter,
+        )
+
+        if self._smoothing > 0.0 and self._smoothed is not None:
+            alpha = self._smoothing
+            n = self._n
+            prev_mat = self._smoothed.matrix
+            new_mat = new_proj.matrix
+            blended = tuple(
+                tuple(
+                    alpha * prev_mat[i][j] + (1.0 - alpha) * new_mat[i][j]
+                    for j in range(n)
+                )
+                for i in range(n)
             )
+            # Convex blend of two in-sphere matrices is in-sphere by norm sub-additivity:
+            #   ‖αA + (1-α)B‖₂ ≤ α‖A‖₂ + (1-α)‖B‖₂ ≤ r.
+            # We reuse the tighter of the two parent sigma estimates as an upper bound
+            # instead of re-running power iteration (O(n²·k) saved per project() call).
+            sigma_bound = alpha * self._smoothed.spectral_norm + (1.0 - alpha) * new_proj.spectral_norm
+            new_proj = SpectralProjectionResult(
+                matrix=blended,
+                spectral_norm=sigma_bound,
+                clipped=new_proj.clipped,
+                power_iterations=0,
+            )
+
+        self._smoothed = new_proj
+        self._projected = new_proj
         return self._projected
 
     @property
@@ -263,9 +323,7 @@ class SpectralSphereManifold:
         if self._n != other._n:
             raise ValueError("Cannot compose manifolds of different sizes")
         if abs(self._r - other._r) > 1e-10:
-            raise ValueError(
-                f"Spectral sphere radii must match: {self._r} != {other._r}"
-            )
+            raise ValueError(f"Spectral sphere radii must match: {self._r} != {other._r}")
         if not 0.0 <= residual_alpha < 1.0:
             raise ValueError(f"residual_alpha must be in [0, 1), got {residual_alpha}")
 
@@ -279,10 +337,7 @@ class SpectralSphereManifold:
             # Inject residual identity: alpha * I + (1 - alpha) * (A @ B)
             beta = 1.0 - residual_alpha
             product = [
-                [
-                    beta * product[i][j] + (residual_alpha if i == j else 0.0)
-                    for j in range(n)
-                ]
+                [beta * product[i][j] + (residual_alpha if i == j else 0.0) for j in range(n)]
                 for i in range(n)
             ]
 

@@ -28,7 +28,9 @@ from constitutional_swarm.gossip_protocol import (
 )
 from constitutional_swarm.merkle_crdt import DAGNode, MerkleCRDT, compute_cid
 
-websockets = pytest.importorskip("websockets", reason="websockets not installed — skip transport tests")
+websockets = pytest.importorskip(
+    "websockets", reason="websockets not installed — skip transport tests"
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -88,6 +90,7 @@ def test_decode_rejects_malformed_json() -> None:
 def test_decode_rejects_non_array() -> None:
     """A JSON object (not array) must raise ValueError."""
     import json
+
     with pytest.raises(ValueError, match="Expected JSON array"):
         decode_batch(json.dumps({"cid": "abc"}))
 
@@ -100,6 +103,7 @@ def test_encode_empty_batch() -> None:
 def test_tampered_node_rejected_by_crdt() -> None:
     """A tampered node (CID mismatch) decoded from wire must be rejected on merge."""
     import json
+
     node = _make_node(payload="original")
     wire = json.loads(encode_batch([node]))
     wire[0]["payload"] = "TAMPERED"  # CID no longer matches
@@ -159,6 +163,7 @@ def test_registry_sample_empty() -> None:
 
 def test_registry_sample_bounded() -> None:
     import random
+
     reg = GossipPeerRegistry()
     for p in range(10):
         reg.add("127.0.0.1", 8760 + p)
@@ -185,9 +190,7 @@ async def test_server_receives_nodes() -> None:
         n2 = source.append(payload="second-node")
 
         client = GossipClient()
-        success = await client.send_batch(
-            "127.0.0.1", server.actual_port, [n1, n2]
-        )
+        success = await client.send_batch("127.0.0.1", server.actual_port, [n1, n2])
         assert success, "send_batch should return True on success"
 
         # Small wait for server to process
@@ -213,6 +216,7 @@ async def test_server_rejects_tampered_nodes() -> None:
         wire = json.loads(encode_batch([node]))
         wire[0]["payload"] = "TAMPERED"
         import websockets as ws
+
         uri = f"ws://127.0.0.1:{server.actual_port}"
         async with ws.connect(uri) as websocket:
             await websocket.send(json.dumps(wire))
@@ -332,12 +336,9 @@ async def test_five_node_convergence() -> None:
         n_peers=2,
         seed=42,
     )
-    assert result["converged"], (
-        f"WebSocket gossip did not converge: sizes={result['sizes']}"
-    )
+    assert result["converged"], f"WebSocket gossip did not converge: sizes={result['sizes']}"
     assert result["unique_cids"] == result["total_artifacts"], (
-        f"CID count mismatch: unique={result['unique_cids']}, "
-        f"total={result['total_artifacts']}"
+        f"CID count mismatch: unique={result['unique_cids']}, total={result['total_artifacts']}"
     )
     print("\nWebSocket gossip convergence (5 nodes, 10 rounds)")
     print(f"  total artifacts: {result['total_artifacts']}")
@@ -413,3 +414,32 @@ async def test_byzantine_node_does_not_corrupt_swarm() -> None:
     finally:
         await asyncio.gather(*[n.stop() for n in honest_nodes])
         await byzantine_server.stop()
+
+
+# ── Security regression tests ─────────────────────────────────────────────────
+
+
+class TestMetadataPreservedInWireFormat:
+    """P1: metadata must survive node_to_wire → wire_to_node round trip."""
+
+    def test_metadata_round_trips(self):
+        from constitutional_swarm.gossip_protocol import _node_to_wire, _wire_to_node
+        from constitutional_swarm.merkle_crdt import MerkleCRDT
+
+        crdt = MerkleCRDT("agent-0")
+        node = crdt.append("payload", metadata={"trace_id": "abc", "score": 42})
+        wire = _node_to_wire(node)
+        assert wire["metadata"] == {"trace_id": "abc", "score": 42}
+        reconstructed = _wire_to_node(wire)
+        assert reconstructed.metadata == {"trace_id": "abc", "score": 42}
+
+    def test_empty_metadata_round_trips(self):
+        from constitutional_swarm.gossip_protocol import _node_to_wire, _wire_to_node
+        from constitutional_swarm.merkle_crdt import MerkleCRDT
+
+        crdt = MerkleCRDT("agent-0")
+        node = crdt.append("payload")
+        wire = _node_to_wire(node)
+        assert wire.get("metadata") == {}
+        reconstructed = _wire_to_node(wire)
+        assert reconstructed.metadata == {}

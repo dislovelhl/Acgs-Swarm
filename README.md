@@ -4,28 +4,61 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 <img width="1280" height="640" alt="acgswarm" src="https://github.com/user-attachments/assets/dbc67c5d-2d46-4125-81ea-cfd5457b1c5a" />
 
-**Orchestrator-free multi-agent governance via embedded Agent DNA, stigmergic task coordination, constitutional peer validation, and manifold-constrained trust.**
+**Orchestrator-free constitutional governance for multi-agent systems.**
 
-`constitutional-swarm` provides five composable patterns for governed multi-agent systems. Core constitutional checks stay local (443 ns/check), while remote/public-key peer validation remains available when you install the transport runtime. The core package depends on `acgs-lite` and `cryptography`, with optional extras for WebSocket transport and the MCFS research stack.
+## What this package is
+
+`constitutional-swarm` is a governed multi-agent runtime built on [`acgs-lite`](https://pypi.org/project/acgs-lite/). It embeds governance per agent, supports orchestrator-free execution, adds peer validation and durable settlement, and ships advanced trust and governance research modules. Core constitutional checks stay local (sub-10 µs per check; see [performance notes](#performance-notes)); remote/public-key peer validation is available via the optional transport runtime.
 
 ## Installation
 
 ```bash
-# Core install — no torch required
+# Stable core — no torch required
 pip install constitutional-swarm
+
+# With WebSocket gossip transport
+pip install "constitutional-swarm[transport]"
 
 # With MCFS research stack (latent DNA steering, swarm ODE dynamics)
 pip install "constitutional-swarm[research]"
 
-# With WebSocket gossip transport
-pip install "constitutional-swarm[transport]"
+# With Bittensor subnet integration
+pip install "constitutional-swarm[bittensor]"
 ```
 
 Requires Python 3.11+.
 
-## Quick Start
+## Positioning
 
-### Pattern A — Agent DNA (embedded validation)
+constitutional-swarm extends ACGS from governing single actions to governing agent societies. It combines local constitutional enforcement, orchestrator-free execution, peer-validated settlement, bounded trust dynamics, and a path toward decentralized constitutional evolution. The package includes both deployable governance primitives and frontier research modules; this README distinguishes them explicitly so users can adopt the stable core without absorbing the full research stack.
+
+> ACGS-lite governs an action. constitutional-swarm governs a society of agents.
+
+## Status
+
+- **Stable core** — `AgentDNA`, DAG execution, `ConstitutionalMesh`, settlement durability, `EvolutionLog`
+- **Production-direction trust model** — `SpectralSphereManifold`
+- **Research baseline** — `GovernanceManifold` (Birkhoff/Sinkhorn); retained as a research control
+- **Frontier modules** — `latent_dna`, `swarm_ode`, `merkle_crdt`, `swe_bench`
+
+## Architecture in one view
+
+| Layer | Purpose |
+|-------|---------|
+| **AgentDNA** | Local constitutional co-processor embedded in every agent |
+| **DAG execution** | Orchestrator-free task execution via `DAGCompiler` + `SwarmExecutor` |
+| **ConstitutionalMesh** | Peer validation with proof-bearing settlement |
+| **Trust dynamics** | Bounded influence propagation (`SpectralSphereManifold` / `GovernanceManifold`) |
+| **Constitutional evolution** | `EvolutionLog`, precedent formation, constitution sync |
+| **Research modules** | `latent_dna`, `swarm_ode`, `merkle_crdt`, MCFS evaluation scaffolds |
+
+## Quick starts by maturity tier
+
+### A. Core runtime
+
+The deployable surface. Start here.
+
+#### Pattern A — Agent DNA (embedded validation)
 
 Every agent carries an immutable constitutional validator. Governance is O(1) and local.
 
@@ -38,7 +71,7 @@ dna = AgentDNA.from_rules([
 ])
 
 result = dna.validate("summarize patient notes")
-print(result.valid, result.latency_ns)  # True, ~443
+print(result.valid, result.latency_ns)  # True, sub-10 µs typical
 
 # Use as a decorator
 @dna.govern
@@ -53,15 +86,16 @@ dna = AgentDNA.from_yaml("constitution.yaml")
 dna = AgentDNA.default(agent_id="worker-1")  # permissive defaults
 ```
 
-### Pattern B — Stigmergic Swarm (DAG-compiled task execution)
+#### Pattern B — Stigmergic Swarm (DAG-compiled task execution)
 
 Compile a goal into a `TaskDAG`. Agents self-select ready tasks by capability — no orchestrator.
 
 ```python
 from constitutional_swarm import (
-    DAGCompiler, GoalSpec, SwarmExecutor, CapabilityRegistry, ArtifactStore, Artifact,
+    DAGCompiler, GoalSpec, SwarmExecutor, CapabilityRegistry, Capability,
+    ArtifactStore, Artifact,
 )
-import uuid, time
+import uuid
 
 spec = GoalSpec(
     goal="Analyse and summarise quarterly reports",
@@ -81,8 +115,14 @@ store = ArtifactStore()
 executor = SwarmExecutor(registry, store)
 executor.load_dag(dag)
 
-# Agents self-select and execute tasks
+# Register agent capabilities — without this, available_tasks() returns nothing.
 agent_id = "worker-1"
+registry.register(agent_id, [
+    Capability(name="fetch",   domain="data"),
+    Capability(name="analyse", domain="analytics"),
+    Capability(name="write",   domain="writing"),
+])
+
 for task in executor.available_tasks(agent_id):
     receipt = executor.claim(task.node_id, agent_id)
     artifact = Artifact(
@@ -96,7 +136,7 @@ for task in executor.available_tasks(agent_id):
     executor.submit(receipt.task_id, artifact)
 ```
 
-### Pattern C — Constitutional Mesh (Byzantine-tolerant peer validation)
+#### Pattern C — Constitutional Mesh (Byzantine-tolerant peer validation)
 
 Every output is validated by randomly assigned peers. Quorum acceptance produces a cryptographic `MeshProof`.
 
@@ -108,15 +148,14 @@ constitution = Constitution.from_yaml("constitution.yaml")
 
 mesh = ConstitutionalMesh(
     constitution,
-    peers_per_validation=3,  # peers assigned per output
-    quorum=2,                 # votes needed to accept
+    peers_per_validation=3,
+    quorum=2,
 )
 
 mesh.register_local_signer("agent-a", domain="writing")
 mesh.register_local_signer("agent-b", domain="writing")
 mesh.register_local_signer("agent-c", domain="writing")
 
-# Assign peers and collect votes
 assignment = mesh.request_validation("agent-a", content="Draft report…", artifact_id="doc-1")
 mesh.validate_and_vote(assignment.assignment_id, "agent-b")
 mesh.validate_and_vote(assignment.assignment_id, "agent-c")
@@ -156,23 +195,27 @@ mesh.submit_vote(
 )
 ```
 
-Built-in runtime path:
+Built-in runtime path (requires `[transport]` extra):
 
 ```python
+import asyncio
 from constitutional_swarm import ConstitutionalMesh, LocalRemotePeer, RemoteVoteServer
 
-mesh = ConstitutionalMesh(constitution)
-mesh.register_local_signer("producer", domain="writing")
-remote_peer = LocalRemotePeer(agent_id="agent-d", constitution=constitution)
-mesh.register_remote_agent("agent-d", domain="writing", vote_public_key=remote_peer.public_key_hex)
+async def main():
+    mesh = ConstitutionalMesh(constitution)
+    mesh.register_local_signer("producer", domain="writing")
+    remote_peer = LocalRemotePeer(agent_id="agent-d", constitution=constitution)
+    mesh.register_remote_agent("agent-d", domain="writing", vote_public_key=remote_peer.public_key_hex)
 
-async with RemoteVoteServer(remote_peer.handle_vote_request, host="127.0.0.1", port=0) as server:
-    result = await mesh.full_validation_remote(
-        "producer",
-        "safe distributed review content",
-        "art-remote",
-        peer_routes={"agent-d": ("127.0.0.1", server.actual_port)},
-    )
+    async with RemoteVoteServer(remote_peer.handle_vote_request, host="127.0.0.1", port=0) as server:
+        result = await mesh.full_validation_remote(
+            "producer",
+            "safe distributed review content",
+            "art-remote",
+            peer_routes={"agent-d": ("127.0.0.1", server.actual_port)},
+        )
+
+asyncio.run(main())
 ```
 
 Security notes:
@@ -180,6 +223,8 @@ Security notes:
 - remote peers reject requests when `sha256(content) != content_hash`
 - plain `ws://` transport is allowed only on localhost; non-local use requires TLS via `ssl_context`
 - production remote peers should set `trusted_request_signers={mesh.get_request_signing_public_key()}`
+- **persist the mesh request-signing key across restarts.** It is generated per-process by default; without persistence, peers that pinned `trusted_request_signers` will reject requests after a restart and trust silently breaks
+- **never set `allow_untrusted_request_signers=True` in production.** It exists for tests only and disables the signer-pinning check — leaving it on in prod erases the main transport trust boundary
 
 Registration modes:
 - `register_local_signer(...)` — the mesh may sign for this peer in-process
@@ -191,7 +236,7 @@ Settlement semantics:
 - quorum does not just mark a result as "currently accepted"
 - it freezes a `MeshResult` / `MeshProof` snapshot with stable finality
 - late votes are rejected after settlement so the proof root cannot drift
-- optional settlement stores can persist finalized proofs across restarts
+- optional settlement stores persist finalized proofs across restarts
 
 Choosing a settlement backend:
 
@@ -201,30 +246,82 @@ from acgs_lite import Constitution
 
 constitution = Constitution.default()
 
-# Append-only local file
 jsonl_mesh = ConstitutionalMesh(
     constitution,
     settlement_store=JSONLSettlementStore("artifacts/mesh-settlements.jsonl"),
 )
 
-# Stdlib SQLite
 sqlite_mesh = ConstitutionalMesh(
     constitution,
     settlement_store=SQLiteSettlementStore("artifacts/mesh-settlements.db"),
 )
-
-print(jsonl_mesh.summary()["settlement_storage"])
-print(sqlite_mesh.summary()["settlement_storage"])
 ```
 
-### Pattern D — Governance Manifold (bounded trust propagation)
+#### Pattern D — Evolution Log (declarative metric invariants)
 
-Projects raw agent interaction matrices onto the Birkhoff polytope (doubly stochastic) via Sinkhorn-Knopp, guaranteeing bounded influence at any scale.
+Enforces five structural invariants at write time: strict monotonicity, strict acceleration, contiguous history, uniqueness, and minimum evidence. No loops, no conditionals — declare the contract and the database rejects violations.
+
+```python
+from constitutional_swarm import EvolutionLog, DecelerationBlockedError
+
+with EvolutionLog(":memory:") as log:
+    for epoch, value in [(1, 10.0), (2, 12.0), (3, 16.0), (4, 22.0), (5, 30.0)]:
+        log.record(epoch, "capability", value)
+
+    try:
+        log.record(6, "capability", 38.0)   # delta=8, prior delta=8 → rejected
+    except DecelerationBlockedError:
+        pass
+
+    log.record(6, "capability", 40.0)  # delta=10 > prior delta=8 → accepted
+
+    dashboard = {r.metric: r for r in log.dashboard()}
+    assert dashboard["capability"].strictly_accelerating == "YES"
+
+    assert log.admissible_min("capability", 7) == 51.0  # 40 + 10 + 1
+    assert log.admit("capability", 7, 55.0) is True
+    assert log.admit("capability", 7, 50.0) is False
+    assert log.valid_trajectory("capability", 1, 6) is True
+```
+
+The log is append-only: `UPDATE` and `DELETE` are blocked by triggers. Single-epoch metrics report `"INSUFFICIENT DATA"` rather than a misleading answer.
+
+### B. Advanced runtime — trust dynamics
+
+#### Pattern E — SpectralSphereManifold (production-direction trust model)
+
+Bounded spectral norm with negative trust allowed and residual identity injection. This is the current production-direction trust model; it preserves boundedness while retaining specialization under repeated swarm composition.
+
+```python
+from constitutional_swarm.spectral_sphere import SpectralSphereManifold
+
+manifold = SpectralSphereManifold(num_agents=3, r=1.0)
+manifold.update_trust(from_agent=0, to_agent=1, delta=0.8)
+manifold.update_trust(from_agent=1, to_agent=2, delta=-0.3)  # negative trust permitted
+projection = manifold.project()
+```
+
+### C. Research stack
+
+MCFS-style modules and evaluation scaffolds. APIs may change.
+
+- `latent_dna` — BODES hook + `LatentDNAWrapper.generate_governed()` for LLM residual steering (requires `[research]`)
+- `swarm_ode` — projected RK4 continuous-time trust dynamics
+- `merkle_crdt` — content-addressed DAG artifact store (SHA-256 CIDs, set-union merge)
+- `gossip_protocol` — WebSocket gossip transport for `MerkleCRDT` (requires `[transport]`)
+- `swe_bench/` — evaluation scaffold: `SWEBenchAgent`, `SWEBenchHarness`, `SwarmCoordinator`
+
+## Trust dynamics: baseline and current direction
+
+`constitutional-swarm` ships two trust models. Which you use is an architectural choice, and this section is deliberately explicit.
+
+**Baseline: `GovernanceManifold` (Birkhoff / Sinkhorn-Knopp)**
+
+Projects raw agent interaction matrices onto the Birkhoff polytope (doubly stochastic) via Sinkhorn-Knopp, guaranteeing bounded influence at any scale. It gave us a rigorous first trust geometry with spectral norm ≤ 1, compositional closure, and trust conservation.
 
 ```python
 from constitutional_swarm import GovernanceManifold, sinkhorn_knopp
 
-# Raw trust matrix (3 agents)
 raw = [[1.0, 0.5, 0.2],
        [0.3, 1.0, 0.7],
        [0.1, 0.4, 1.0]]
@@ -232,56 +329,24 @@ raw = [[1.0, 0.5, 0.2],
 result = sinkhorn_knopp(raw, max_iterations=20, epsilon=1e-6)
 print(result.converged, result.spectral_bound)  # True, ≤1.0
 
-# Or use the stateful GovernanceManifold (tracks interaction history)
 manifold = GovernanceManifold(num_agents=3)
 manifold.update_trust(from_agent=0, to_agent=1, delta=0.8)
 projection = manifold.project()
 ```
 
-### Pattern E — Evolution Log (declarative metric invariants)
+**Failure mode we observed.** Repeated real swarm composition revealed that Birkhoff/Sinkhorn projection drives the swarm toward uniformity — specialization collapses under iterated application. The regression is encoded empirically as an `xfail` test in [`tests/test_manifold_degeneration.py`](tests/test_manifold_degeneration.py); we kept the baseline as a research control.
 
-Enforces five structural invariants at write time: strict monotonicity, strict acceleration, contiguous history, uniqueness, and minimum evidence. No loops, no conditionals — declare the contract and the database rejects violations.
+**Current production direction: `SpectralSphereManifold`.** Bounded spectral norm, negative trust allowed, residual identity injection. Preserves boundedness without forcing uniformity. This is theory informing product, not theory being discarded.
 
-```python
-from constitutional_swarm import EvolutionLog, NonIncreasingValueError, DecelerationBlockedError
-
-with EvolutionLog(":memory:") as log:
-    # Seed data — accelerating capability curve
-    for epoch, value in [(1, 10.0), (2, 12.0), (3, 16.0), (4, 22.0), (5, 30.0)]:
-        log.record(epoch, "capability", value)
-
-    # Write-time enforcement
-    try:
-        log.record(6, "capability", 38.0)   # delta=8, prior delta=8 → rejected
-    except DecelerationBlockedError:
-        pass  # constant rate is not acceleration
-
-    log.record(6, "capability", 40.0)  # delta=10 > prior delta=8 → accepted
-
-    # Query the contract
-    dashboard = {r.metric: r for r in log.dashboard()}
-    assert dashboard["capability"].strictly_accelerating == "YES"
-
-    # Generative search: what is the minimum valid next value?
-    assert log.admissible_min("capability", 7) == 51.0  # 40 + 10 + 1
-
-    # Dry-run admission check (mirrors Prolog admit/3)
-    assert log.admit("capability", 7, 55.0) is True
-    assert log.admit("capability", 7, 50.0) is False  # delta=10, prior=10 → not strict
-
-    # Validate an entire trajectory
-    assert log.valid_trajectory("capability", 1, 6) is True
-```
-
-The log is append-only: `UPDATE` and `DELETE` are blocked by triggers. Single-epoch metrics report `"INSUFFICIENT DATA"` rather than a misleading answer.
+See the `spectral_sphere` reference (Anonymous, 2026) and the `manifold` reference (Xie et al., 2025) for mathematical background.
 
 ## Key Features
 
-- **Agent DNA** — `AgentDNA` embeds a constitutional co-processor in every agent; 443 ns/validation via the ACGS Rust engine
-- **Stigmergic DAGs** — `DAGCompiler` + `SwarmExecutor` for orchestrator-free task execution; agents claim `ready_nodes()` by capability
+- **Agent DNA** — `AgentDNA` embeds a constitutional co-processor in every agent; validation is routed through the ACGS Rust engine (sub-10 µs typical; see [performance notes](#performance-notes))
+- **Stigmergic DAGs** — `DAGCompiler` + `SwarmExecutor` for orchestrator-free task execution; agents claim ready tasks via `executor.available_tasks(agent_id)` filtered by registered capability
 - **Constitutional Mesh** — `ConstitutionalMesh` provides Byzantine-tolerant peer validation with cryptographic `MeshProof` chains; MACI prevents self-validation
-- **Sinkhorn-Knopp manifold** — `GovernanceManifold` and `sinkhorn_knopp()` project trust matrices onto the Birkhoff polytope; spectral norm ≤ 1
-- **Evolution Log** — `EvolutionLog` enforces strict monotonicity + acceleration as structural database invariants; regressions and decelerations are rejected at write time
+- **Spectral-sphere manifold** — `SpectralSphereManifold` is the production-direction trust model; `GovernanceManifold` and `sinkhorn_knopp()` remain as the Birkhoff baseline
+- **Evolution Log** — `EvolutionLog` enforces strict monotonicity + acceleration as structural database invariants
 - **Artifact store** — `ArtifactStore` tracks task outputs (`Artifact`) by ID
 - **Capability registry** — `CapabilityRegistry` maps agents to `Capability` sets for task claiming
 - **Benchmarking** — `SwarmBenchmark` for measuring validation throughput at scale
@@ -319,7 +384,8 @@ The log is append-only: `UPDATE` and `DELETE` are blocked by triggers. Single-ep
 | `TaskNode` | Single unit of work: `title`, `required_capabilities`, `depends_on`, `status` |
 | `DAGCompiler` | `.compile(GoalSpec)` → `TaskDAG`; `.compile_from_yaml(path)` |
 | `GoalSpec` | Goal description with subtask list |
-| `GovernanceManifold` | Tracks agent interactions; `.project()` → `ManifoldProjectionResult` |
+| `SpectralSphereManifold` | Production-direction trust model; bounded spectral norm, negative trust allowed, residual identity injection |
+| `GovernanceManifold` | Birkhoff/Sinkhorn baseline; retained as research control |
 | `ManifoldProjectionResult` | `matrix`, `iterations`, `converged`, `max_deviation`, `spectral_bound` |
 | `sinkhorn_knopp` | Projects any non-negative matrix onto the Birkhoff polytope |
 | `Artifact` | Task output record |
@@ -329,13 +395,13 @@ The log is append-only: `UPDATE` and `DELETE` are blocked by triggers. Single-ep
 | `TaskContract` | Records the agreement between a task and a claiming agent |
 | `ContractStatus` | Enum: `PENDING`, `ACTIVE`, `COMPLETED`, `FAILED` |
 | `WorkReceipt` | Receipt issued when an agent completes a task node |
-| `ExecutionStatus` | Enum: `BLOCKED`, `READY`, `ACTIVE`, `COMPLETED`, `FAILED` |
+| `ExecutionStatus` | Enum: `BLOCKED`, `READY`, `CLAIMED`, `RUNNING`, `COMPLETED`, `FAILED`, `REJECTED`, `EXPIRED` |
 | `SwarmBenchmark` | Measures DNA validation throughput at scale |
-| `BenchmarkResult` | Benchmark output: `agents`, `validations_per_second`, `p99_ns` |
+| `BenchmarkResult` | Benchmark output: `total_time_ms`, `avg_validation_ns`, `coordination_overhead`, `throughput_tasks_per_sec`, `agent_utilization`, `num_agents`, `num_domains`, `num_tasks`, `dag_depth` |
 
-## Bittensor Integration
+## Advanced: Bittensor subnet integration
 
-Run constitutional governance miners and validators on a Bittensor subnet.
+Run constitutional governance miners and validators on a Bittensor subnet. This is a decentralized validator network layer, not part of the stable core.
 
 ```bash
 pip install "constitutional-swarm[bittensor]"
@@ -367,9 +433,14 @@ python scripts/testnet_deploy.py validator \
 
 Testnet TAO faucet: https://test.taostats.io/faucet
 
+## Performance notes
+
+The `AgentDNA.validate()` hot path routes through the ACGS Rust engine. The repository's regression test asserts an average below 10 µs per validation (`tests/test_constitutional_swarm.py::...avg_ns < 10_000`). Reference benchmarks on a modern x86 laptop have observed ~443 ns/call, but that figure depends on hardware, rule count, pattern complexity, and the Rust engine build. Do not treat 443 ns as a product guarantee — treat the sub-10 µs bound as the contract and benchmark your own workload before quoting numbers externally.
+
 ## Runtime dependencies
 
 - `acgs-lite>=2.7.2`
+- `cryptography>=44.0.2`
 
 ## License
 

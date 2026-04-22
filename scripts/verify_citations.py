@@ -150,9 +150,10 @@ def _verify_one(c: Citation, timeout: float) -> Citation:
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — allowlisted
                 return resp.status, resp.status == 200, None
         except urllib.error.HTTPError as e:
-            # 301/302 DOI redirects = valid. 403/429 = publisher anti-bot
-            # (DOI itself resolves, which is what we care about).
-            ok = e.code in (301, 302, 403, 429)
+            # 301/302 DOI redirects = valid. 403/429 = publisher anti-bot (DOI
+            # itself resolves, which is what we care about). 5xx = transient
+            # server error from upstream resolver — not an invalid citation.
+            ok = e.code in (301, 302, 403, 429) or e.code >= 500
             return e.code, ok, None if ok else f"HTTP {e.code}"
         except urllib.error.URLError as e:
             return None, False, f"URLError: {type(e.reason).__name__}"
