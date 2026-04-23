@@ -41,6 +41,9 @@ The module accepts any duck-typed model with .config.model_type, .generate(),
 and indexable layers — no hard transformers dependency at import time.
 """
 
+# ruff: noqa: RUF002, RUF003
+# ruff: noqa: RUF100
+
 from __future__ import annotations
 
 import importlib.util
