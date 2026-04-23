@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.3.0] - 2026-04-23
+
+### Breaking Changes
+
+`register_agent()` has been **removed** (not just deprecated). Calling it now raises
+`AttributeError`. See [MIGRATION.md](MIGRATION.md) for the upgrade guide.
+
+**Before (0.2.x):**
+```python
+# public-key-only peer
+mesh.register_agent("agent-1", vote_public_key=pub_key)
+```
+
+**After (0.3.0):**
+```python
+# public-key-only peer (signing happens outside this process)
+mesh.register_remote_agent("agent-1", vote_public_key=pub_key)
+
+# local signer (this process holds and uses the private key)
+mesh.register_local_signer("agent-1", vote_private_key=priv_key)
+```
+
+### Added
+- Added `MIGRATION.md` with a mapping table and before/after examples for the
+  `register_agent()` → `register_local_signer()` / `register_remote_agent()` migration.
+- Added two new `collect_remote_votes()` tests: missing-route `KeyError` and
+  wrong-`assignment_id` response handling.
+
+### Changed
+- `register_agent()` now raises `AttributeError` (removed; was `DeprecationWarning` in 0.2.x).
+- `collect_remote_votes()` KeyError message now names the missing peer ID and
+  shows the expected `peer_routes` key syntax.
+- `HarnessResult.resolved` and `LocalSWEBenchHarness.evaluate()` docstrings now
+  document the `evaluation_mode="local_dockerless"` distinction so downstream
+  consumers can distinguish local results from official SWE-bench leaderboard scores.
+
 ## [0.2.0] - 2026-04-16
 
 ### Added

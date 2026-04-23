@@ -27,7 +27,6 @@ import random
 import threading
 import time
 import uuid
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -390,45 +389,13 @@ class ConstitutionalMesh:
                 self._rebuild_manifold()
                 self._restore_archive_for_agent(agent_id)
 
-    def register_agent(
-        self,
-        agent_id: str,
-        domain: str = "",
-        *,
-        vote_public_key: Ed25519PublicKey | bytes | str | None = None,
-        vote_private_key: Ed25519PrivateKey | bytes | str | None = None,
-    ) -> None:
-        """Compatibility wrapper with no implicit private-key storage.
-
-        .. deprecated::
-            Use :meth:`register_remote_agent` or :meth:`register_local_signer` instead.
-            This method will be removed in v0.3.0.
-
-        Callers must choose either ``register_remote_agent()`` or
-        ``register_local_signer()``. This method only accepts an explicit
-        public key and forwards to remote-agent registration.
-        """
-        warnings.warn(
-            "register_agent() is deprecated and will be removed in v0.3.0. "
-            "Use register_remote_agent() for public-key-only peers or "
-            "register_local_signer() for locally managed signer peers.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if vote_private_key is not None:
-            raise TypeError(
-                "register_agent() no longer accepts vote_private_key; "
-                "use register_local_signer() for locally managed signer keys"
-            )
-        if vote_public_key is None:
-            raise TypeError(
-                "Use register_remote_agent() for public-key-only peers or "
-                "register_local_signer() for locally managed signer peers"
-            )
-        self.register_remote_agent(
-            agent_id,
-            domain=domain,
-            vote_public_key=vote_public_key,
+    def register_agent(self, *args: Any, **kwargs: Any) -> None:
+        """Removed in v0.3.0. Use register_local_signer() or register_remote_agent()."""
+        raise AttributeError(
+            "register_agent() removed in v0.3.0. "
+            "Use register_local_signer() for local agents or "
+            "register_remote_agent() for remote peers. "
+            "See MIGRATION.md for the upgrade guide."
         )
 
     def unregister_agent(self, agent_id: str) -> None:
@@ -854,7 +821,10 @@ class ConstitutionalMesh:
 
             route = peer_routes.get(peer_id)
             if route is None:
-                raise KeyError(f"Missing remote route for peer {peer_id}")
+                raise KeyError(
+                    f"No route found for remote peer '{peer_id}'. "
+                    f"Pass peer_routes={{'{peer_id}': (host, port), ...}} to collect_remote_votes()."
+                )
             request = self.prepare_remote_vote(assignment_id, peer_id)
             response = await client.request_vote(route[0], route[1], request, timeout=timeout)
             self._submit_remote_vote_response(assignment_id, peer_id, response)

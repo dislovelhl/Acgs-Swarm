@@ -229,7 +229,7 @@ Security notes:
 Registration modes:
 - `register_local_signer(...)` — the mesh may sign for this peer in-process
 - `register_remote_agent(...)` — public-key-only peer; signing happens outside the process
-- `register_agent(...)` — compatibility wrapper that now requires explicit mode selection
+- ~~`register_agent(...)`~~ — **REMOVED in v0.3.0**. See [MIGRATION.md](MIGRATION.md)
 
 Settlement semantics:
 
