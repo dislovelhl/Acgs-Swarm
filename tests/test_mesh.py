@@ -1443,3 +1443,24 @@ class TestCollectRemoteVotes:
                 peer_routes={remote_peer: ("127.0.0.1", 9999)},
                 client=_FakeClient(bad_response),
             )
+
+    async def test_collect_remote_votes_wrong_voter_id_raises_value_error(self) -> None:
+        mesh, producer, remote_peer = _minimal_mesh_with_remote_peer()
+        assignment = mesh.request_validation(producer, "safe content", "art-crv-3")
+        assert remote_peer in assignment.peers
+
+        impersonated_response = _FakeRemoteVoteResponse(
+            assignment_id=assignment.assignment_id,
+            voter_id="wrong-peer-id",  # voter_id != the peer we asked
+            approved=True,
+            reason="ok",
+            constitutional_hash=assignment.constitutional_hash,
+            content_hash=assignment.content_hash,
+            signature="ignored",
+        )
+        with pytest.raises(ValueError, match="voter mismatch"):
+            await mesh.collect_remote_votes(
+                assignment.assignment_id,
+                peer_routes={remote_peer: ("127.0.0.1", 9999)},
+                client=_FakeClient(impersonated_response),
+            )

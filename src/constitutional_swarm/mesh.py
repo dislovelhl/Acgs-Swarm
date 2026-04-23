@@ -395,7 +395,7 @@ class ConstitutionalMesh:
             "register_agent() removed in v0.3.0. "
             "Use register_local_signer() for local agents or "
             "register_remote_agent() for remote peers. "
-            "See MIGRATION.md for the upgrade guide."
+            "See https://github.com/dislovelhl/constitutional-swarm/blob/main/MIGRATION.md"
         )
 
     def unregister_agent(self, agent_id: str) -> None:
