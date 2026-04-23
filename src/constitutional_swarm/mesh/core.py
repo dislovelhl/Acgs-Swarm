@@ -22,12 +22,13 @@ each other's work, with cryptographic proof, at sub-microsecond cost.
 from __future__ import annotations
 
 import hashlib
-import math
+import logging
 import random
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -41,6 +42,31 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from acgs_lite import Constitution
 from constitutional_swarm.dna import AgentDNA
 from constitutional_swarm.manifold import GovernanceManifold
+from constitutional_swarm.mesh.exceptions import (
+    AssignmentSettledError,
+    DuplicateVoteError,
+    InsufficientPeersError,
+    InvalidVoteSignatureError,
+    MeshHaltedError,
+    RecoveredAssignmentError,
+    RemoteVoteReplayError,
+    SettlementPersistenceError,
+    UnauthorizedVoterError,
+)
+from constitutional_swarm.mesh.peers import (
+    PeerAssignment,
+    _AgentInfo,
+    _matrix_spectral_norm,
+    _summarize_metric,
+    _trust_variance,
+)
+from constitutional_swarm.mesh.settlement import (
+    MeshProof,
+    MeshResult,
+    ReconciliationReport,
+    _compute_merkle_root,
+)
+from constitutional_swarm.mesh.voting import RemoteVoteRequest, ValidationVote
 from constitutional_swarm.settlement_store import (
     JSONLSettlementStore,
     SettlementRecord,
@@ -52,158 +78,8 @@ if TYPE_CHECKING:
     import constitutional_swarm.spectral_sphere as spectral_sphere_mod
     from constitutional_swarm.remote_vote_transport import RemoteVoteClient, RemoteVoteResponse
 
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
 
-
-class InsufficientPeersError(Exception):
-    """Not enough peers available for validation."""
-
-
-class DuplicateVoteError(Exception):
-    """Peer already voted on this assignment."""
-
-
-class UnauthorizedVoterError(Exception):
-    """Voter is not assigned to this validation."""
-
-
-class InvalidVoteSignatureError(Exception):
-    """Vote signature is missing or does not match the registered agent key."""
-
-
-class AssignmentSettledError(Exception):
-    """Assignment is already settled; further votes are rejected."""
-
-
-class MeshHaltedError(RuntimeError):
-    """Mesh has been halted — all operations blocked until resumed."""
-
-
-class SettlementPersistenceError(RuntimeError):
-    """Raised when a settled result cannot be persisted after freeze."""
-
-
-# ---------------------------------------------------------------------------
-# Data structures (all frozen — immutable by design)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class PeerAssignment:
-    """A validation assignment linking a producer's output to peer validators."""
-
-    assignment_id: str
-    producer_id: str
-    artifact_id: str
-    content: str
-    content_hash: str
-    peers: tuple[str, ...]
-    constitutional_hash: str
-    timestamp: float
-
-
-@dataclass(frozen=True, slots=True)
-class ValidationVote:
-    """A peer's Ed25519-signed vote on a producer's output."""
-
-    assignment_id: str
-    voter_id: str
-    approved: bool
-    reason: str
-    signature: str
-    constitutional_hash: str
-    content_hash: str
-    timestamp: float
-
-    @property
-    def vote_hash(self) -> str:
-        """Deterministic hash of this vote for proof chain."""
-        payload = (
-            f"{self.assignment_id}:{self.voter_id}:{self.approved}"
-            f":{self.reason}:{self.signature}:{self.constitutional_hash}:{self.content_hash}"
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()[:32]
-
-
-@dataclass(frozen=True, slots=True)
-class RemoteVoteRequest:
-    """Signable vote request for a public-key-only remote peer."""
-
-    assignment_id: str
-    voter_id: str
-    producer_id: str
-    artifact_id: str
-    content: str
-    content_hash: str
-    constitutional_hash: str
-    voter_public_key: str
-    request_signer_public_key: str
-    request_signature: str
-
-
-@dataclass(frozen=True, slots=True)
-class MeshProof:
-    """Cryptographic proof of peer validation.
-
-    A Merkle-style proof linking the producer's output, each peer's vote,
-    and the constitutional hash into a single verifiable root.
-    Anyone can independently verify this proof.
-    """
-
-    assignment_id: str
-    content_hash: str
-    constitutional_hash: str
-    vote_hashes: tuple[str, ...]
-    root_hash: str
-    accepted: bool
-    timestamp: float
-
-    def verify(self) -> bool:
-        """Independently verify the proof chain.
-
-        Recomputes the Merkle root from vote hashes and checks
-        it matches the stored root.
-        """
-        recomputed = _compute_merkle_root(
-            self.assignment_id,
-            self.content_hash,
-            self.constitutional_hash,
-            self.vote_hashes,
-            self.accepted,
-        )
-        return recomputed == self.root_hash
-
-
-@dataclass(frozen=True, slots=True)
-class MeshResult:
-    """Result of a peer validation with cryptographic proof."""
-
-    assignment_id: str
-    accepted: bool
-    votes_for: int
-    votes_against: int
-    quorum_met: bool
-    pending_votes: int
-    constitutional_hash: str
-    proof: MeshProof | None
-    settled: bool = False
-    settled_at: float | None = None
-
-
-# ---------------------------------------------------------------------------
-# Agent info (internal, mutable for reputation tracking)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _AgentInfo:
-    agent_id: str
-    domain: str
-    reputation: float = 1.0
-    validations_performed: int = 0
-    validations_received: int = 0
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +116,7 @@ class ConstitutionalMesh:
         risk_scoring: bool = False,
         settlement_store_path: str | Path | None = None,
         settlement_store: SettlementStore | None = None,
+        auto_reconcile: bool = True,
         request_signing_private_key: Ed25519PrivateKey | bytes | str | None = None,
     ) -> None:
         if quorum > peers_per_validation:
@@ -302,10 +179,16 @@ class ConstitutionalMesh:
             else:
                 self._settlement_store = JSONLSettlementStore(settlement_store_path)
         self._load_settlements()
-        reconciliation_report = self.retry_pending_settlements()
-        if reconciliation_report["failures"] > 0 or reconciliation_report["remaining"] > 0:
-            raise SettlementPersistenceError(
-                "Pending settlement reconciliation did not complete successfully at startup"
+        if auto_reconcile:
+            reconciliation_report = self.reconcile_pending_settlements()
+            log_fn = logger.warning if reconciliation_report.failed > 0 else logger.info
+            log_fn(
+                "Startup settlement reconciliation completed",
+                extra={
+                    "auto_reconcile": True,
+                    "settlement_backend": self._describe_settlement_backend(),
+                    **reconciliation_report.as_log_fields(),
+                },
             )
 
     def _check_halted(self) -> None:
@@ -562,6 +445,10 @@ class ConstitutionalMesh:
             assignment = self._assignments.get(assignment_id)
             if assignment is None:
                 raise KeyError(f"Assignment {assignment_id} not found")
+            if assignment.is_recovered:
+                raise RecoveredAssignmentError(
+                    f"Assignment {assignment_id} is already durably settled"
+                )
             if assignment_id in self._final_results:
                 raise AssignmentSettledError(f"Assignment {assignment_id} is already settled")
             if voter_id not in assignment.peers:
@@ -643,13 +530,17 @@ class ConstitutionalMesh:
         (read-your-writes), then the lock is released before persisting.
         """
         with self._lock:
-            final = self._final_results.get(assignment_id)
-            if final is not None:
-                return final
-
             assignment = self._assignments.get(assignment_id)
             if assignment is None:
                 raise KeyError(f"Assignment {assignment_id} not found")
+            if assignment.is_recovered:
+                raise RecoveredAssignmentError(
+                    f"Assignment {assignment_id} is already durably settled"
+                )
+
+            final = self._final_results.get(assignment_id)
+            if final is not None:
+                return final
 
             preview = self._preview_result(assignment)
             if not preview.quorum_met:
@@ -674,21 +565,25 @@ class ConstitutionalMesh:
                 settled=True,
                 settled_at=settled_at,
             )
-            record = self._build_settlement_record(assignment, final)
+            pending_record = self._build_settlement_record(assignment, final)
+            recovered_assignment = replace(assignment, is_recovered=True)
+            settled_record = self._build_settlement_record(recovered_assignment, final)
         # Persist outside the lock — store I/O must not block mesh operations.
         # A durable pending marker is written first so startup reconciliation can
         # recover frozen-but-not-yet-durable settlements after a crash.
         try:
             if self._settlement_store is not None:
-                self._settlement_store.mark_pending(record)
+                self._settlement_store.mark_pending(pending_record)
             with self._lock:
                 existing = self._final_results.get(assignment_id)
                 if existing is not None:
                     return existing
                 self._final_results[assignment_id] = final
-            self._persist_settlement_record(record)
+            self._persist_settlement_record(settled_record)
             if self._settlement_store is not None:
                 self._settlement_store.clear_pending(assignment_id)
+            with self._lock:
+                self._assignments[assignment_id] = recovered_assignment
         except Exception as exc:
             raise SettlementPersistenceError(
                 f"Settlement {assignment_id} was frozen in memory but could not be persisted"
@@ -776,7 +671,10 @@ class ConstitutionalMesh:
                 self.validate_and_vote(assignment.assignment_id, peer_id)
             except AssignmentSettledError:
                 break
-        return self.settle(assignment.assignment_id)
+        result = self.get_result(assignment.assignment_id)
+        if result.quorum_met and not result.settled:
+            return self.settle(assignment.assignment_id)
+        return result
 
     async def collect_remote_votes(
         self,
@@ -867,6 +765,12 @@ class ConstitutionalMesh:
             public_key = self._agent_vote_public_keys.get(voter_id)
             if public_key is None:
                 raise UnauthorizedVoterError(f"{voter_id} has no registered vote public key")
+            voter_public_key = public_key.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            ).hex()
+            nonce = uuid.uuid4().hex
+            timestamp = time.time()
             request_signer_public_key = self.get_request_signing_public_key()
             request_signature = self._request_signing_private_key.sign(
                 self.build_remote_vote_request_payload(
@@ -877,10 +781,9 @@ class ConstitutionalMesh:
                     content=assignment.content,
                     content_hash=assignment.content_hash,
                     constitutional_hash=assignment.constitutional_hash,
-                    voter_public_key=public_key.public_bytes(
-                        encoding=serialization.Encoding.Raw,
-                        format=serialization.PublicFormat.Raw,
-                    ).hex(),
+                    voter_public_key=voter_public_key,
+                    nonce=nonce,
+                    timestamp=timestamp,
                 )
             ).hex()
             return RemoteVoteRequest(
@@ -891,10 +794,9 @@ class ConstitutionalMesh:
                 content=assignment.content,
                 content_hash=assignment.content_hash,
                 constitutional_hash=assignment.constitutional_hash,
-                voter_public_key=public_key.public_bytes(
-                    encoding=serialization.Encoding.Raw,
-                    format=serialization.PublicFormat.Raw,
-                ).hex(),
+                voter_public_key=voter_public_key,
+                nonce=nonce,
+                timestamp=timestamp,
                 request_signer_public_key=request_signer_public_key,
                 request_signature=request_signature,
             )
@@ -932,16 +834,48 @@ class ConstitutionalMesh:
         content_hash: str,
         constitutional_hash: str,
         voter_public_key: str,
+        nonce: str,
+        timestamp: float,
     ) -> bytes:
         payload = (
             f"{assignment_id}:{voter_id}:{producer_id}:{artifact_id}:"
-            f"{content}:{content_hash}:{constitutional_hash}:{voter_public_key}"
+            f"{content}:{content_hash}:{constitutional_hash}:{voter_public_key}:"
+            f"{nonce}:{format(timestamp, '.17g')}"
         )
         return payload.encode("utf-8")
 
     @staticmethod
-    def verify_remote_vote_request(request: RemoteVoteRequest) -> bool:
+    def _evict_remote_vote_nonce_cache_entries(
+        nonce_cache: OrderedDict[str, float],
+        *,
+        now: float,
+        replay_window_seconds: float,
+    ) -> None:
+        expiry_cutoff = now - replay_window_seconds
+        while nonce_cache:
+            oldest_nonce, last_seen = next(iter(nonce_cache.items()))
+            if last_seen > expiry_cutoff:
+                break
+            nonce_cache.pop(oldest_nonce)
+
+    @staticmethod
+    def verify_remote_vote_request(
+        request: RemoteVoteRequest,
+        *,
+        replay_window_seconds: float = 300.0,
+        nonce_cache: OrderedDict[str, float] | None = None,
+        now: float | None = None,
+    ) -> bool:
         """Verify a remote vote request signature."""
+        if replay_window_seconds <= 0:
+            raise ValueError("Remote vote replay window must be positive")
+        current_time = time.time() if now is None else now
+        if not request.nonce:
+            raise ValueError("Remote vote request is missing nonce")
+        if request.timestamp is None:
+            raise ValueError("Remote vote request is missing timestamp")
+        if abs(current_time - float(request.timestamp)) > replay_window_seconds:
+            raise ValueError("Remote vote request timestamp is outside replay window")
         try:
             public_key = ConstitutionalMesh._coerce_public_key(request.request_signer_public_key)
             public_key.verify(
@@ -955,10 +889,26 @@ class ConstitutionalMesh:
                     content_hash=request.content_hash,
                     constitutional_hash=request.constitutional_hash,
                     voter_public_key=request.voter_public_key,
+                    nonce=request.nonce,
+                    timestamp=float(request.timestamp),
                 ),
             )
-        except (ValueError, InvalidSignature):
-            return False
+        except (ValueError, InvalidSignature) as exc:
+            raise ValueError("Remote vote request signature is invalid") from exc
+        if nonce_cache is not None:
+            ConstitutionalMesh._evict_remote_vote_nonce_cache_entries(
+                nonce_cache,
+                now=current_time,
+                replay_window_seconds=replay_window_seconds,
+            )
+            if request.nonce in nonce_cache:
+                raise RemoteVoteReplayError(
+                    f"Remote vote request nonce {request.nonce!r} was already used inside the replay window"
+                )
+            nonce_cache[request.nonce] = current_time
+            nonce_cache.move_to_end(request.nonce)
+            while len(nonce_cache) > 10_000:
+                nonce_cache.popitem(last=False)
         return True
 
     @staticmethod
@@ -1408,6 +1358,7 @@ class ConstitutionalMesh:
 
         for record in self._settlement_store.load_all():
             assignment = self._deserialize_assignment(record.assignment)
+            assignment = replace(assignment, is_recovered=True)
             result = self._deserialize_result(record.result)
             if assignment.constitutional_hash != self.constitutional_hash:
                 raise ValueError(
@@ -1417,44 +1368,111 @@ class ConstitutionalMesh:
             self._votes.setdefault(assignment.assignment_id, [])
             self._final_results[assignment.assignment_id] = result
 
-    def retry_pending_settlements(self) -> dict[str, int]:
-        """Replay durable pending-journal settlements into the primary store."""
+    def reconcile_pending_settlements(self) -> ReconciliationReport:
+        """Replay durable pending settlements into the primary store once."""
+        backend = self._describe_settlement_backend()
         if self._settlement_store is None:
-            return {"pending": 0, "reconciled": 0, "remaining": 0, "failures": 0}
+            logger.info(
+                "Pending settlement reconciliation started",
+                extra={"settlement_backend": backend, "pending_records": 0},
+            )
+            report = ReconciliationReport()
+            logger.info(
+                "Pending settlement reconciliation completed",
+                extra={"settlement_backend": backend, **report.as_log_fields()},
+            )
+            return report
 
         pending_records = self._settlement_store.load_pending()
-        reconciled = 0
-        failures = 0
+        logger.info(
+            "Pending settlement reconciliation started",
+            extra={"settlement_backend": backend, "pending_records": len(pending_records)},
+        )
+        report = ReconciliationReport()
 
         for record in pending_records:
-            assignment = self._deserialize_assignment(record.assignment)
-            result = self._deserialize_result(record.result)
-            if assignment.constitutional_hash != self.constitutional_hash:
-                raise ValueError(
-                    "Persisted settlement constitutional hash does not match current mesh"
+            assignment_id = str(record.assignment.get("assignment_id", "<unknown>"))
+            errors = list(report.errors)
+            try:
+                assignment = self._deserialize_assignment(record.assignment)
+                assignment = replace(assignment, is_recovered=record.is_recovered)
+                result = self._deserialize_result(record.result)
+                if assignment.constitutional_hash != self.constitutional_hash:
+                    raise ValueError(
+                        "Persisted settlement constitutional hash does not match current mesh"
+                    )
+
+                with self._lock:
+                    existing_assignment = self._assignments.get(assignment.assignment_id)
+                    if assignment.is_recovered or (
+                        existing_assignment is not None and existing_assignment.is_recovered
+                    ):
+                        self._settlement_store.clear_pending(assignment.assignment_id)
+                        report = ReconciliationReport(
+                            attempted=report.attempted,
+                            settled=report.settled,
+                            skipped_recovered=report.skipped_recovered + 1,
+                            failed=report.failed,
+                            errors=errors,
+                        )
+                        continue
+                    self._assignments.setdefault(assignment.assignment_id, assignment)
+                    self._votes.setdefault(assignment.assignment_id, [])
+                    self._final_results.setdefault(assignment.assignment_id, result)
+
+                report = ReconciliationReport(
+                    attempted=report.attempted + 1,
+                    settled=report.settled,
+                    skipped_recovered=report.skipped_recovered,
+                    failed=report.failed,
+                    errors=errors,
+                )
+                self._persist_settlement_record(
+                    self._build_settlement_record(
+                        replace(assignment, is_recovered=True),
+                        result,
+                    )
+                )
+                with self._lock:
+                    current_assignment = self._assignments.get(assignment.assignment_id)
+                    if current_assignment is not None and not current_assignment.is_recovered:
+                        self._assignments[assignment.assignment_id] = replace(
+                            current_assignment,
+                            is_recovered=True,
+                        )
+                self._settlement_store.clear_pending(assignment.assignment_id)
+                report = ReconciliationReport(
+                    attempted=report.attempted,
+                    settled=report.settled + 1,
+                    skipped_recovered=report.skipped_recovered,
+                    failed=report.failed,
+                    errors=errors,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"{assignment_id}: {exc}")
+                report = ReconciliationReport(
+                    attempted=report.attempted,
+                    settled=report.settled,
+                    skipped_recovered=report.skipped_recovered,
+                    failed=report.failed + 1,
+                    errors=errors,
                 )
 
-            with self._lock:
-                self._assignments.setdefault(assignment.assignment_id, assignment)
-                self._votes.setdefault(assignment.assignment_id, [])
-                self._final_results.setdefault(assignment.assignment_id, result)
+        logger.info(
+            "Pending settlement reconciliation completed",
+            extra={"settlement_backend": backend, **report.as_log_fields()},
+        )
+        return report
 
-            try:
-                self._persist_settlement_record(record)
-            except (OSError, RuntimeError, ValueError):
-                failures += 1
-                continue
+    def retry_pending_settlements(self) -> ReconciliationReport:
+        """Backward-compatible alias for pending settlement reconciliation."""
+        return self.reconcile_pending_settlements()
 
-            self._settlement_store.clear_pending(assignment.assignment_id)
-            reconciled += 1
-
-        remaining = len(self._settlement_store.load_pending())
-        return {
-            "pending": len(pending_records),
-            "reconciled": reconciled,
-            "remaining": remaining,
-            "failures": failures,
-        }
+    def _describe_settlement_backend(self) -> str | None:
+        """Return the configured settlement backend for structured logs."""
+        if self._settlement_store is None:
+            return None
+        return str(self._settlement_store.describe().get("backend"))
 
     def _build_settlement_record(
         self, assignment: PeerAssignment, result: MeshResult
@@ -1463,6 +1481,7 @@ class ConstitutionalMesh:
             assignment=self._serialize_assignment(assignment),
             result=self._serialize_result(result),
             constitutional_hash=assignment.constitutional_hash,
+            is_recovered=assignment.is_recovered,
         )
 
     @staticmethod
@@ -1475,6 +1494,7 @@ class ConstitutionalMesh:
             "peers": list(assignment.peers),
             "constitutional_hash": assignment.constitutional_hash,
             "timestamp": assignment.timestamp,
+            "is_recovered": assignment.is_recovered,
         }
 
     @staticmethod
@@ -1488,6 +1508,7 @@ class ConstitutionalMesh:
             peers=tuple(str(peer) for peer in data["peers"]),
             constitutional_hash=str(data["constitutional_hash"]),
             timestamp=float(data["timestamp"]),
+            is_recovered=bool(data.get("is_recovered", False)),
         )
 
     @staticmethod
@@ -1676,96 +1697,3 @@ class ConstitutionalMesh:
             f"{assignment_id}:{voter_id}:{approved}:{reason}:{constitutional_hash}:{content_hash}"
         )
         return payload.encode("utf-8")
-
-
-# ---------------------------------------------------------------------------
-# Merkle proof computation
-# ---------------------------------------------------------------------------
-
-
-def _compute_merkle_root(
-    assignment_id: str,
-    content_hash: str,
-    constitutional_hash: str,
-    vote_hashes: tuple[str, ...],
-    accepted: bool,
-) -> str:
-    """Compute the Merkle root for a validation proof.
-
-    Structure:
-        root
-        ├── leaf: assignment_id + content_hash + constitutional_hash + accepted
-        └── votes_root
-            ├── vote_hash_0
-            ├── vote_hash_1
-            └── vote_hash_N
-
-    This allows independent verification: given the content hash,
-    constitutional hash, and vote hashes, anyone can recompute
-    the root and verify the proof.
-    """
-    # Leaf: assignment identity + content + constitutional hash + final decision
-    leaf = hashlib.sha256(
-        f"{assignment_id}:{content_hash}:{constitutional_hash}:{accepted}".encode()
-    ).hexdigest()[:32]
-
-    # Votes subtree: iterative hashing of vote hashes
-    if not vote_hashes:
-        votes_root = hashlib.sha256(b"empty").hexdigest()[:32]
-    else:
-        votes_root = vote_hashes[0]
-        for vh in vote_hashes[1:]:
-            combined = f"{votes_root}:{vh}"
-            votes_root = hashlib.sha256(combined.encode()).hexdigest()[:32]
-
-    # Root: combine leaf and votes
-    root = hashlib.sha256(f"{leaf}:{votes_root}".encode()).hexdigest()[:32]
-    return root
-
-
-def _trust_variance(matrix: tuple[tuple[float, ...], ...]) -> float:
-    """Variance of matrix entries around their mean."""
-    values = [value for row in matrix for value in row]
-    if not values:
-        return 0.0
-    mean = sum(values) / len(values)
-    return sum((value - mean) ** 2 for value in values) / len(values)
-
-
-def _matrix_spectral_norm(
-    matrix: tuple[tuple[float, ...], ...],
-    *,
-    max_iterations: int = 20,
-    tol: float = 1e-8,
-) -> float:
-    """Estimate the matrix spectral norm via power iteration on M^T M."""
-    n = len(matrix)
-    if n == 0:
-        return 0.0
-    vector = [1.0 / math.sqrt(n)] * n
-    sigma = 0.0
-    for _ in range(max_iterations):
-        mv = [sum(matrix[i][j] * vector[j] for j in range(n)) for i in range(n)]
-        mtmv = [sum(matrix[j][i] * mv[j] for j in range(n)) for i in range(n)]
-        new_norm = math.sqrt(sum(value * value for value in mtmv))
-        if new_norm < 1e-14:
-            return 0.0
-        new_sigma = math.sqrt(new_norm)
-        vector = [value / new_norm for value in mtmv]
-        if abs(new_sigma - sigma) / (sigma + 1e-12) < tol:
-            return new_sigma
-        sigma = new_sigma
-    return sigma
-
-
-def _summarize_metric(
-    metrics: list[dict[str, float | str]],
-    key: str,
-) -> dict[str, float]:
-    """Return mean/min/max for one recorded shadow metric."""
-    values = [float(metric[key]) for metric in metrics]
-    return {
-        "mean": sum(values) / len(values),
-        "min": min(values),
-        "max": max(values),
-    }

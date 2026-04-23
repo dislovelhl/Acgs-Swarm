@@ -5,9 +5,19 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import constitutional_swarm.compiler as compiler_module
 import pytest
-from constitutional_swarm.compiler import DAGCompiler, GoalSpec, _deterministic_node_id
-from constitutional_swarm.swarm import NodeStatus, TaskDAG, TaskNode
+from constitutional_swarm import (
+    ArtifactStore,
+    Capability,
+    CapabilityRegistry,
+    DAGCompiler,
+    ExecutionStatus,
+    GoalSpec,
+    SwarmExecutor,
+    TaskDAG,
+    TaskNode,
+)
 
 
 class TestGoalSpec:
@@ -28,13 +38,17 @@ class TestDeterministicNodeId:
     """Test deterministic ID generation."""
 
     def test_same_title_same_id(self) -> None:
-        assert _deterministic_node_id("hello") == _deterministic_node_id("hello")
+        assert compiler_module._deterministic_node_id("hello") == compiler_module._deterministic_node_id(
+            "hello"
+        )
 
     def test_different_titles_different_ids(self) -> None:
-        assert _deterministic_node_id("hello") != _deterministic_node_id("world")
+        assert compiler_module._deterministic_node_id(
+            "hello"
+        ) != compiler_module._deterministic_node_id("world")
 
     def test_id_is_16_hex_chars(self) -> None:
-        node_id = _deterministic_node_id("test title")
+        node_id = compiler_module._deterministic_node_id("test title")
         assert len(node_id) == 16
         int(node_id, 16)  # must be valid hex
 
@@ -81,7 +95,7 @@ class TestDAGCompiler:
         compiler = DAGCompiler()
         dag = compiler.compile(self._auth_spec())
         dag = dag.mark_ready()
-        ready = [n for n in dag.nodes.values() if n.status == NodeStatus.READY]
+        ready = [n for n in dag.nodes.values() if n.status == ExecutionStatus.READY]
         assert len(ready) == 1
         assert ready[0].title == "Design auth schema"
 
@@ -149,7 +163,7 @@ class TestDAGCompiler:
         dag = compiler.compile(spec)
         assert len(dag.nodes) == 1
         dag = dag.mark_ready()
-        ready = [n for n in dag.nodes.values() if n.status == NodeStatus.READY]
+        ready = [n for n in dag.nodes.values() if n.status == ExecutionStatus.READY]
         assert len(ready) == 1
 
     def test_diamond_dag(self) -> None:
@@ -170,7 +184,7 @@ class TestDAGCompiler:
 
         # Only A should be ready initially
         dag = dag.mark_ready()
-        ready = [n for n in dag.nodes.values() if n.status == NodeStatus.READY]
+        ready = [n for n in dag.nodes.values() if n.status == ExecutionStatus.READY]
         assert len(ready) == 1
         assert ready[0].title == "A"
 
@@ -190,7 +204,7 @@ class TestDAGCompiler:
 
         # Walk the chain
         dag = dag.mark_ready()
-        ready = [n for n in dag.nodes.values() if n.status == NodeStatus.READY]
+        ready = [n for n in dag.nodes.values() if n.status == ExecutionStatus.READY]
         assert len(ready) == 1
         assert ready[0].title == "Step-0"
 
@@ -327,3 +341,91 @@ class TestTaskDAGDirectCollision:
         dag = dag.add_node(TaskNode(node_id="aaaa000000000001", title="first"))
         dag = dag.add_node(TaskNode(node_id="aaaa000000000002", title="second"))
         assert len(dag.nodes) == 2
+
+
+class TestDAGCompilerForcedCollision:
+    """Regression coverage for deterministic hash collisions in DAG compilation."""
+
+    def _two_step_spec(self) -> GoalSpec:
+        return GoalSpec(
+            goal="compile with forced collision",
+            domains=["backend"],
+            steps=[
+                {"title": "Design schema", "domain": "backend", "depends_on": []},
+                {"title": "Ship API", "domain": "backend", "depends_on": []},
+            ],
+        )
+
+    def test_compile_rejects_forced_hash_collision(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            compiler_module,
+            "_deterministic_node_id",
+            lambda _title: "deadbeefdeadbeef",
+        )
+
+        with pytest.raises(ValueError, match="Deterministic node ID collision detected"):
+            DAGCompiler().compile(self._two_step_spec())
+
+    def test_compile_short_circuits_before_taskdag_add_node_on_hash_collision(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        add_attempts: list[str] = []
+        original_add_node = TaskDAG.add_node
+
+        def tracking_add_node(self: TaskDAG, node: TaskNode) -> TaskDAG:
+            add_attempts.append(node.title)
+            return original_add_node(self, node)
+
+        monkeypatch.setattr(
+            compiler_module,
+            "_deterministic_node_id",
+            lambda _title: "feedfacefeedface",
+        )
+        monkeypatch.setattr(TaskDAG, "add_node", tracking_add_node)
+
+        with pytest.raises(ValueError, match="Deterministic node ID collision detected"):
+            DAGCompiler().compile(self._two_step_spec())
+
+        assert add_attempts == []
+
+    def test_swarm_executor_behaves_normally_after_collision_rejection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compiler = DAGCompiler()
+        colliding_spec = self._two_step_spec()
+        real_node_id = compiler_module._deterministic_node_id
+
+        monkeypatch.setattr(
+            compiler_module,
+            "_deterministic_node_id",
+            lambda _title: "cafebabecafebabe",
+        )
+        with pytest.raises(ValueError, match="Deterministic node ID collision detected"):
+            compiler.compile(colliding_spec)
+
+        monkeypatch.setattr(compiler_module, "_deterministic_node_id", real_node_id)
+        clean_dag = compiler.compile(
+            GoalSpec(
+                goal="healthy dag after rejected collision",
+                domains=["backend"],
+                steps=[
+                    {
+                        "title": "Implement backend",
+                        "domain": "backend",
+                        "depends_on": [],
+                        "required_capabilities": ["backend-api"],
+                    },
+                ],
+            )
+        )
+        registry = CapabilityRegistry()
+        registry.register("backend-agent", [Capability(name="backend-api", domain="backend")])
+        executor = SwarmExecutor(registry, ArtifactStore())
+
+        executor.load_dag(clean_dag)
+        tasks = executor.available_tasks("backend-agent")
+
+        assert [task.title for task in tasks] == ["Implement backend"]
+        assert tasks[0].status == ExecutionStatus.READY
