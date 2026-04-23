@@ -66,3 +66,35 @@ mesh.register_local_signer("agent-2", domain="safety", vote_private_key=priv_key
 `unregister_agent(agent_id)` still exists and removes whichever registration is
 present (local signer or remote peer). There is no separate `unregister_local_signer()`
 or `unregister_remote_agent()` — `unregister_agent()` covers both cases.
+
+## 0.3 -> 1.0
+
+### `transport_security`
+
+The old `ssl_context: SSLContext | None = None` parameter is now derived from
+`transport_security: "plaintext" | "tls" | "auto"`.
+
+- Passing both `ssl_context` and `transport_security` now raises `ValueError`.
+- Non-localhost plaintext binds are no longer silently allowed.
+- Use `transport_security="auto"` (default) to select `tls` for non-loopback
+  hosts and plaintext only for loopback, or set `transport_security="tls"`
+  explicitly when you need a strict encrypted transport.
+
+### Settlement `schema_version`
+
+Records without `schema_version` are read as v1, and current writers emit v1.
+Persisted JSONL and SQLite settlement journals are auto-migrated via
+idempotent `ALTER` on load, so no operator action is required.
+
+### Public API narrowing
+
+Advanced names such as `RemoteVoteClient`, `SettlementStore`, and `MeshProof`
+remain importable, but they should now be imported from their submodule paths
+instead of the top-level package.
+
+Examples:
+
+```python
+from constitutional_swarm.remote_vote_transport import RemoteVoteClient
+from constitutional_swarm.settlement_store import SettlementStore
+```

@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [1.0.0] - 2026-04-23
+
+### Added
+- Signed envelope for remote votes: nonce + timestamp + Ed25519 signature; replay window enforced server-side (task sec-wss-envelope)
+- Startup settlement reconciliation: `ConstitutionalMesh.reconcile_pending_settlements()` returns a `ReconciliationReport`; optional `auto_reconcile` kwarg on mesh construction (task sec-startup-reconcile)
+- `RemoteVoteReplayError`, `RecoveredAssignmentError` exceptions exposed via top-level import
+- `SettlementRecord.schema_version` (default 1) and `is_recovered` flag persisted in JSONL + SQLite stores (idempotent ALTER on load) (tasks sec-schema-version-prep, sec-settle-replay)
+- `GoalStep` dataclass with Mapping compatibility; unknown keys preserved in `GoalStep.extra` (task refactor-goalspec)
+- Shadow spectral invariant test (`tests/test_shadow_spectral_invariant.py`, N=100 zero-divergence) (task cov-e2e-remote)
+
+### Changed
+- Remote vote transport: tri-state `transport_security: Literal["plaintext", "tls", "auto"]`; `auto` resolves to `tls` unless host is loopback; passing both `ssl_context` and `transport_security` raises `ValueError` (task sec-wss-envelope)
+- Envelope requirement: remote vote requests missing nonce/timestamp are rejected; no legacy compat path
+- Public API narrowed: top-level `__all__` now = `["AgentDNA", "ConstitutionalMesh", "GovernanceManifold", "SwarmExecutor", "TaskDAG"]`. Advanced names remain importable from submodules (e.g. `from constitutional_swarm.remote_vote_transport import RemoteVoteClient`) (task api-narrow-final)
+- `mesh.py` split into `mesh/` package: `core`, `voting`, `settlement`, `peers`, `exceptions` (backward-compat facade in `__init__.py`) (task refactor-mesh-split)
+- `remote_vote_transport.py` split into `remote_vote_transport/` package: `protocol`, `transport`, `peer` (backward-compat facade) (task refactor-transport-split)
+
+### Removed
+- Legacy envelope compat path for unsigned remote vote requests
+
+### Migration
+- See `MIGRATION.md` for the 0.3 -> 1.0 upgrade guide (transport_security, schema_version, register_agent)
+
 ## [0.3.0] - 2026-04-23
 
 ### Breaking Changes
