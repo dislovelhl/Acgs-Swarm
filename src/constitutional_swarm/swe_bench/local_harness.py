@@ -72,6 +72,13 @@ class HarnessResult:
     resolved:
         True iff every FAIL_TO_PASS and PASS_TO_PASS test passed after
         applying the patch.
+
+        .. note::
+            This harness runs without Docker (``evaluation_mode="local_dockerless"``).
+            Results may differ from official SWE-bench leaderboard scores, which
+            use per-instance Docker images with pinned build environments. Use
+            ``result.metadata["evaluation_mode"]`` to distinguish local from
+            official results in downstream consumers.
     fail_to_pass_passed / fail_to_pass_failed:
         Counts from the FAIL_TO_PASS phase.
     pass_to_pass_passed / pass_to_pass_failed:
@@ -182,6 +189,14 @@ class LocalSWEBenchHarness:
 
         Always returns a :class:`HarnessResult` — exceptions in subprocesses
         are caught and surfaced via ``error`` / ``log_tail``.
+
+        .. note::
+            This harness runs **without Docker** (``evaluation_mode="local_dockerless"``).
+            It reproduces the mechanical test-pass/fail signal but does not reproduce
+            the exact CI environment used by the official SWE-bench leaderboard.
+            The returned :class:`HarnessResult` carries
+            ``metadata["evaluation_mode"] = "local_dockerless"`` so downstream
+            scripts can distinguish local results from official leaderboard results.
         """
         import time
 

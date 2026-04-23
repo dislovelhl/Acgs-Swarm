@@ -6,6 +6,7 @@ import json
 import sqlite3
 import time
 import warnings
+from dataclasses import dataclass
 
 import pytest
 from constitutional_swarm.mesh import (
@@ -488,11 +489,10 @@ class TestVoting:
         with pytest.raises(UnauthorizedVoterError, match="locally managed signer"):
             mesh.validate_and_vote(assignment.assignment_id, "peer-1")
 
-    def test_register_agent_requires_explicit_mode(self) -> None:
+    def test_register_agent_removed_raises_attribute_error(self) -> None:
         mesh = ConstitutionalMesh(Constitution.default(), seed=7)
-        with pytest.deprecated_call(match="register_agent\\(\\) is deprecated"):
-            with pytest.raises(TypeError, match=r"register_remote_agent|register_local_signer"):
-                mesh.register_agent("agent-x")
+        with pytest.raises(AttributeError, match="register_agent.*removed"):
+            mesh.register_agent("agent-x")
 
     def test_unknown_assignment_raises_key_error(self, mesh: ConstitutionalMesh) -> None:
         with pytest.raises(KeyError, match="not found"):
@@ -1346,3 +1346,121 @@ class TestMeshSettlePersistenceIntegration:
         assert restored.settled is True
         assert restored.proof is not None
         assert restored.proof.verify() is True
+
+
+# ---------------------------------------------------------------------------
+# collect_remote_votes()
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeRemoteVoteResponse:
+    """Minimal stand-in for RemoteVoteResponse — avoids importing the transport extra."""
+
+    assignment_id: str
+    voter_id: str
+    approved: bool
+    reason: str
+    constitutional_hash: str
+    content_hash: str
+    signature: str
+
+
+class _FakeClient:
+    """FakeClient that returns a configurable response without a network call."""
+
+    def __init__(self, response: _FakeRemoteVoteResponse) -> None:
+        self._response = response
+
+    async def request_vote(
+        self,
+        host: str,
+        port: int,
+        request: RemoteVoteRequest,
+        *,
+        timeout: float = 5.0,
+    ) -> _FakeRemoteVoteResponse:
+        return self._response
+
+
+def _minimal_mesh_with_remote_peer() -> tuple[ConstitutionalMesh, str, str]:
+    """Return (mesh, producer_id, remote_peer_id) with one peer per validation."""
+    mesh = ConstitutionalMesh(
+        Constitution.default(),
+        seed=99,
+        peers_per_validation=1,
+        quorum=1,
+    )
+    mesh.register_local_signer("producer")
+    remote_key = Ed25519PrivateKey.generate()
+    mesh.register_remote_agent("remote-peer", vote_public_key=remote_key.public_key())
+    return mesh, "producer", "remote-peer"
+
+
+class TestCollectRemoteVotes:
+    """Behaviour tests for collect_remote_votes() — placed here to avoid the
+    module-level pytest.importorskip('websockets') guard in test_remote_vote_transport.py."""
+
+    async def test_collect_remote_votes_missing_route_raises_key_error(self) -> None:
+        mesh, producer, remote_peer = _minimal_mesh_with_remote_peer()
+        assignment = mesh.request_validation(producer, "safe content", "art-crv-1")
+        assert remote_peer in assignment.peers, "remote-peer must be selected (peers_per_validation=1)"
+
+        with pytest.raises(KeyError, match=remote_peer):
+            await mesh.collect_remote_votes(
+                assignment.assignment_id,
+                peer_routes={},  # no route for remote-peer
+                client=_FakeClient(
+                    _FakeRemoteVoteResponse(
+                        assignment_id=assignment.assignment_id,
+                        voter_id=remote_peer,
+                        approved=True,
+                        reason="ok",
+                        constitutional_hash=assignment.constitutional_hash,
+                        content_hash=assignment.content_hash,
+                        signature="ignored",
+                    )
+                ),
+            )
+
+    async def test_collect_remote_votes_wrong_assignment_id_raises_value_error(self) -> None:
+        mesh, producer, remote_peer = _minimal_mesh_with_remote_peer()
+        assignment = mesh.request_validation(producer, "safe content", "art-crv-2")
+        assert remote_peer in assignment.peers, "remote-peer must be selected (peers_per_validation=1)"
+
+        bad_response = _FakeRemoteVoteResponse(
+            assignment_id="wrong-assignment-id",
+            voter_id=remote_peer,
+            approved=True,
+            reason="ok",
+            constitutional_hash=assignment.constitutional_hash,
+            content_hash=assignment.content_hash,
+            signature="ignored",
+        )
+        with pytest.raises(ValueError, match="assignment mismatch"):
+            await mesh.collect_remote_votes(
+                assignment.assignment_id,
+                peer_routes={remote_peer: ("127.0.0.1", 9999)},
+                client=_FakeClient(bad_response),
+            )
+
+    async def test_collect_remote_votes_wrong_voter_id_raises_value_error(self) -> None:
+        mesh, producer, remote_peer = _minimal_mesh_with_remote_peer()
+        assignment = mesh.request_validation(producer, "safe content", "art-crv-3")
+        assert remote_peer in assignment.peers
+
+        impersonated_response = _FakeRemoteVoteResponse(
+            assignment_id=assignment.assignment_id,
+            voter_id="wrong-peer-id",  # voter_id != the peer we asked
+            approved=True,
+            reason="ok",
+            constitutional_hash=assignment.constitutional_hash,
+            content_hash=assignment.content_hash,
+            signature="ignored",
+        )
+        with pytest.raises(ValueError, match="voter mismatch"):
+            await mesh.collect_remote_votes(
+                assignment.assignment_id,
+                peer_routes={remote_peer: ("127.0.0.1", 9999)},
+                client=_FakeClient(impersonated_response),
+            )
