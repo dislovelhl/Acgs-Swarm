@@ -24,7 +24,7 @@ from constitutional_swarm.execution import (
 NodeStatus = ExecutionStatus
 
 
-def _neg_priority(node: "TaskNode") -> int:
+def _neg_priority(node: TaskNode) -> int:
     return -node.priority
 
 

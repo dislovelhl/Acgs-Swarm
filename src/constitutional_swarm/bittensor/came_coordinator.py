@@ -52,7 +52,7 @@ try:
 except ImportError:  # pragma: no cover
     EvolutionLog = None  # type: ignore[assignment,misc]
 
-from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH  # noqa: E402
+from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
 
 # ---------------------------------------------------------------------------
 # Public result / config dataclasses
