@@ -415,6 +415,23 @@ Run constitutional governance miners and validators on a Bittensor subnet. This 
 pip install "constitutional-swarm[bittensor]"
 ```
 
+**Local no-network quickstart:**
+```bash
+python scripts/testnet_deploy.py --constitution examples/constitution.yaml
+```
+
+Expected output snippet:
+```text
+Running local Constitutional Swarm testnet simulation...
+  Mode: local (no Bittensor SDK, wallet, RPC, axon, or external network)
+  Agents registered: 5
+  local-case-0: accepted=True votes_for=2 votes_against=0 quorum_met=True
+MEASUREMENT agents_registered=5 validations=4 votes_cast=8 accepted=4 rejected=0 final_spectral_bound=1.00000 stable=True
+```
+
+Measurable local outcome: 5 agents registered, 4 validations settled, 8 votes cast,
+4 accepted decisions, and a stable final trust manifold.
+
 **Register a subnet on testnet:**
 ```bash
 python scripts/testnet_deploy.py register \
