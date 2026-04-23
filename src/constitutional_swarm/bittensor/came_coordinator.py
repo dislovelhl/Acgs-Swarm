@@ -31,6 +31,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -51,8 +53,6 @@ try:
     from constitutional_swarm.evolution_log import EvolutionLog
 except ImportError:  # pragma: no cover
     EvolutionLog = None  # type: ignore[assignment,misc]
-
-from constitutional_swarm.constants import CONSTITUTIONAL_HASH as _CONSTITUTIONAL_HASH
 
 # ---------------------------------------------------------------------------
 # Public result / config dataclasses
