@@ -20,8 +20,8 @@ jobs:
   security-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Install
@@ -41,7 +41,7 @@ jobs:
             > .artifacts/security-audit-report.md || true
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-report
           path: .artifacts/
