@@ -4,7 +4,7 @@
 # tests
 
 ## Purpose
-Pytest suite covering every module in `src/constitutional_swarm`. Current baseline: **1019 passed, 2 xfailed** (both expected — Birkhoff uniformity collapse, which is the research control result). Tests are organized one-to-one with source modules plus a few cross-cutting integration suites.
+Pytest suite covering every module in `src/constitutional_swarm`. Current baseline: **1603 passed, 1 skipped, 2 xfailed** (xfails expected — Birkhoff uniformity collapse, which is the research control result). Tests are organized one-to-one with source modules plus a few cross-cutting integration suites.
 
 ## Key Files
 | File | Description |

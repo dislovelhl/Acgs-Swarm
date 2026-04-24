@@ -1,5 +1,3 @@
-<!-- Generated: 2026-04-20 | Updated: 2026-04-20 -->
-
 # constitutional-swarm
 
 ## Purpose
@@ -10,24 +8,16 @@ Orchestrator-free constitutional governance runtime for multi-agent systems. Bui
 |------|-------------|
 | `pyproject.toml` | Package metadata, optional extras (`transport`, `research`, `bittensor`), ruff config, pytest config (`pythonpath = ["src"]`) |
 | `uv.lock` | Locked dependency graph for `uv` |
-| `README.md` | User-facing overview, install paths, maturity tiers, public API examples |
-| `CHANGELOG.md` | Release notes for shipped package behavior |
 | `CLAUDE.md` | Claude Code working notes (submodule rules, test commands, module map, invariants) |
-| `HANDOFF_CODEX.md` | Historical implementation handoff for Codex/OMX agents |
 | `SECURITY.md` | Security contact and disclosure policy |
 | `CODEOWNERS` | Review routing for protected paths |
 | `references.bib` | Shared BibTeX entries for papers/ drafts |
-| `security-audit-report.md` | Snapshot of latest security audit findings |
-| `delivery-hygiene-report.md` | Tracker for release hygiene items |
-| `style-improvement-report.md` | Lint/style debt tracker (e.g., the 53 pre-existing RUF002/RUF003 in `latent_dna.py`) |
-| `test-coverage-report.md` | Coverage summary, including the 2 expected xfails (Birkhoff collapse) |
-| `SYSTEMIC_IMPROVEMENT.md` | Cross-cutting architectural improvement notes |
 
 ## Subdirectories
 | Directory | Purpose |
 |-----------|---------|
 | `src/` | Python package source for `constitutional_swarm` (see `src/AGENTS.md`) |
-| `tests/` | Pytest suite — 1019 passing + 2 expected xfails (see `tests/AGENTS.md`) |
+| `tests/` | Pytest suite — 1603 passing, 1 skipped, 2 xfailed (see `tests/AGENTS.md`) |
 | `docs/` | Long-form design docs, including MACI DP protocol draft (see `docs/AGENTS.md`) |
 | `examples/` | Minimal runnable artifacts (e.g., sample constitution YAML) (see `examples/AGENTS.md`) |
 | `scripts/` | Operational scripts: testnet deploy, citation verification, security reporting (see `scripts/AGENTS.md`) |
@@ -47,7 +37,7 @@ Orchestrator-free constitutional governance runtime for multi-agent systems. Bui
 ### Testing Requirements
 ```bash
 # From inside this submodule
-python -m pytest tests/ --import-mode=importlib -q     # 1019 passed, 2 xfailed
+python -m pytest tests/ --import-mode=importlib -q     # 1603 passed, 1 skipped, 2 xfailed
 python -m ruff check src/                              # 53 known pre-existing errors in latent_dna.py
 python -m ruff format src/
 ```
@@ -64,17 +54,5 @@ WebSocket gossip tests require `pip install -e ".[transport]"`.
 - Precedent quorum: 3/5 super-majority (`min_total_validators=5, min_votes_for_precedent=3`)
 - `EvolutionLog` enforces strict monotonicity + acceleration at write time (declarative, SQLite-backed, append-only)
 - Manifold peer selection is wired in `mesh.py:_select_peers()` (trust-weighted sampling + one exploration slot)
-
-## Dependencies
-
-### External (core)
-- `acgs-lite` — base constitutional action governance
-- `cryptography` — Ed25519 signatures
-- Python 3.11+
-
-### External (optional)
-- `websockets` (extra: `transport`) — gossip protocol
-- `torch`, `transformers` (extra: `research`) — latent DNA steering
-- `bittensor` (extra: `bittensor`) — subnet integration
 
 <!-- MANUAL: Notes added below this line are preserved on regeneration. -->

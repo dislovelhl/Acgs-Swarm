@@ -39,7 +39,6 @@ __all__ = [
     "TransportSecurity",
     "_build_ssl_context",
     "_format_uri_host",
-    "_format_uri_host",
     "_is_loopback_host",
     "_parse_ws_endpoint",
     "_resolve_transport_security",
