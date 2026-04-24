@@ -74,8 +74,8 @@ By the standard Gaussian mechanism, the mechanism is `(ε, δ)`-DP if:
 
 | Privacy budget | δ      | σ (r=1.0) | Notes                        |
 |---------------|--------|-----------|------------------------------|
-| ε = 1.0       | 10⁻⁵   | ~3.84     | Strong privacy, high noise   |
-| ε = 2.0       | 10⁻⁵   | ~1.92     | Balanced                     |
+| ε = 1.0       | 10⁻⁵   | ~9.69     | Strong privacy, high noise   |
+| ε = 2.0       | 10⁻⁵   | ~4.84     | Balanced                     |
 | ε = 4.0       | 10⁻³   | ~0.85     | Practical for large swarms   |
 | ε = 8.0       | 10⁻³   | ~0.43     | Loose but low overhead       |
 

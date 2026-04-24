@@ -1,7 +1,7 @@
 # Runtime Optimization Report
 
 **Date:** 2026-04-24
-**Branch:** `improve/test_coverage`
+**Branch:** `improve/test_coverage` — merged to `main` via PR #20 (2026-04-24T10:07:52Z)
 **Method:** `python -X importtime`, `python -m pytest`, source inspection
 
 ---
