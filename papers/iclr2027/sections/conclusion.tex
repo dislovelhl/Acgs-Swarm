@@ -9,11 +9,10 @@ $n \in \{10, 50\}$ agents, destroying all agent specialization with no recovery 
 Our main contribution is the \textbf{SpectralSphere Manifold with residual injection},
 which provably eliminates BUC.  The method achieves $142\%$ stable variance retention
 ($n{=}50$) and $20\%$ ($n{=}10$) across all tested cycles.  The continuous-time Neural
-ODE formulation achieves $2{,}656\%$ topological capacity relative to the Sinkhorn
-baseline, proving that the manifold supports rich specialization topology.  However, we
-emphasize that topological capacity is necessary but not sufficient for correct routing:
-the trained dynamics must be directed toward useful specialization patterns via task
-performance feedback.
+ODE formulation has source-backed stability and spectral-bound regression coverage in
+both tests and the local reproducibility harness.  We emphasize that ODE stability is
+necessary but not sufficient for correct routing: the trained dynamics must be directed
+toward useful specialization patterns via task performance feedback.
 
 A secondary contribution is the algebraic proof (Lemma~\ref{lem:residual_sensitivity})
 that residual injection reduces $\varepsilon$-DP noise requirements by exactly
@@ -56,5 +55,6 @@ discretizations are a practical concern.
 \paragraph{Reproducibility.}
 All code, configurations, and random seeds are available in the
 \texttt{constitutional\_swarm} package (constitutional hash \texttt{608508a9bd224290}).
-The \texttt{SpectralSphereManifold} class reproduces all reported numbers with
-\texttt{torch.manual\_seed(42)}.
+The \texttt{SpectralSphereManifold} and \texttt{swarm\_ode} regression tests plus
+\texttt{scripts/reproduce\_paper\_claims.py} reproduce the reported local claims.
+Official external SWE-bench results are not claimed in this submission.

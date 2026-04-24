@@ -26,8 +26,8 @@ cryptographic efficiency improvement are synergistic.
 \paragraph{Limitations.}
 (1) The zk-SNARK circuit for Gaussian randomness verification requires a VRF or
 hash-to-curve, adding significant proving overhead — benchmarking is deferred to Phase 3.
-(2) SWE-bench evaluation is pending Phase 3/4 completion; routing quality claims are
-currently theoretical.
+(2) Official SWE-bench evaluation is not claimed here; routing evidence is limited to
+the local synthetic SWE-bench-shaped evaluator.
 (3) Timing side-channels and traffic analysis are out of scope for v1.
 (4) Advanced composition accounting (moments accountant) for multi-round DP is not yet
 integrated.
@@ -53,9 +53,12 @@ integrated.
 
 \paragraph{Reproducibility.}
 All protocol steps are implemented in the \texttt{constitutional\_swarm} package
-(constitutional hash \texttt{608508a9bd224290}).  Correctness tests for CID integrity,
-EEC convergence, and DP calibration pass in the Phase 2 test suite (1018 tests, 2
-expected failures).  Per-metric governance evolution is recorded via the
+(constitutional hash \texttt{608508a9bd224290}).  Phase 2 regression tests cover CID
+integrity, EEC convergence, and DP calibration, and
+\texttt{scripts/reproduce\_paper\_claims.py} reproduces the local gossip, Byzantine
+rejection, synthetic routing, and latency-harness checks.  Official external SWE-bench
+results remain outside the reported claims.  Per-metric governance evolution is recorded
+via the
 \texttt{EvolutionLog} component, which enforces strict monotonicity and strict
 acceleration on tracked metrics at write time, providing a structural audit trail
 complementary to the cryptographic guarantees of \fedsink{}.

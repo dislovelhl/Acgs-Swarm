@@ -62,9 +62,9 @@ $\alpha I$ at each step, acting as a leaky integrator that preserves diagonal st
     eigenvalue variance for all $k \geq 0$.
   \item \textbf{Neural ODE formulation with Lyapunov stability
     (Theorem~\ref{thm:ode_stability}).}  We embed trust dynamics in continuous time as a
-    Neural ODE on $\mathcal{S}_r$.  The ODE achieves $2{,}656\%$ topological capacity
-    relative to Sinkhorn (Section~\ref{sec:experiments_ode}), proving that
-    collapse-free dynamics support diverse specialization topology.
+    Neural ODE on $\mathcal{S}_r$.  Package tests and the local reproducibility harness
+    verify the projected-RK4 stability and spectral-bound invariants
+    (Section~\ref{sec:experiments_ode}).
   \item \textbf{$\varepsilon$-DP compatibility (Lemma~\ref{lem:residual_sensitivity}).}
     Residual injection at strength $\alpha$ reduces the $\ell_2$ sensitivity from $2r$
     to $2(1-\alpha)r$, cutting required DP noise by a factor $(1-\alpha)$.  Stability and

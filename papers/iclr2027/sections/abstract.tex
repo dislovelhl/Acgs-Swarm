@@ -15,16 +15,16 @@ achieves stable $142\%$ variance retention ($n{=}50$) and $20\%$ variance retent
 ($n{=}10$), confirming that specialization persists indefinitely.
 
 We further formulate continuous-time trust evolution as a Neural ODE on the spectral
-sphere manifold. Lyapunov analysis proves global asymptotic stability; the ODE achieves
-$2{,}656\%$ topological capacity relative to Sinkhorn baseline, demonstrating that the
-manifold's topology is rich enough to support diverse specialization patterns — though
-we stress that high topological capacity does not itself guarantee amplification of
-the \emph{correct} specialization, only that collapse is provably absent.
+sphere manifold. Lyapunov analysis proves global asymptotic stability, and the
+implementation includes projected-RK4 regression tests plus a local reproducibility
+harness for bounded continuous dynamics. We therefore report ODE stability as a
+source-backed result and avoid unsupported topological-volume claims.
 
 Finally, we show that residual injection at $\alpha{=}0.1$ reduces $\varepsilon$-DP
 noise requirements by exactly $10\%$ (Lemma~\ref{lem:residual_sensitivity}), proving
 that topological stability and cryptographic privacy are complementary rather than
 competing objectives. All results are reproducible via the
-\texttt{constitutional\_swarm} package (constitutional hash
+\texttt{constitutional\_swarm} package and \texttt{scripts/reproduce\_paper\_claims.py}
+(constitutional hash
 \texttt{608508a9bd224290}).
 \end{abstract}
