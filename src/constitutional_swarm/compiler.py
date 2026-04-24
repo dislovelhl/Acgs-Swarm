@@ -8,7 +8,8 @@ graph (no cycles, no missing deps), and produces a TaskDAG ready for SwarmExecut
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,19 +19,107 @@ from constitutional_swarm.swarm import TaskDAG, TaskNode
 
 
 @dataclass(frozen=True, slots=True)
-class GoalSpec:
-    """Structured specification of a goal to compile into a TaskDAG.
+class GoalStep(Mapping[str, Any]):
+    """Structured goal step with backward-compatible mapping access."""
 
-    Attributes:
-        goal: Human-readable description of the overall goal.
-        domains: List of domain names involved.
-        steps: List of step dicts, each with 'title', 'domain', 'depends_on',
-               and optional 'required_capabilities', 'priority', 'max_budget_tokens'.
-    """
+    title: str
+    domain: str = ""
+    depends_on: tuple[str, ...] = ()
+    description: str = ""
+    required_capabilities: tuple[str, ...] = ()
+    priority: int = 0
+    max_budget_tokens: int = 0
+    extra: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_input(cls, step: GoalStep | Mapping[str, Any]) -> GoalStep:
+        """Normalize a mapping-like step payload into a GoalStep."""
+        if isinstance(step, cls):
+            return step
+        if not isinstance(step, Mapping):
+            raise TypeError(f"Goal step must be a mapping, got {type(step).__name__}")
+
+        known_keys = {
+            "title",
+            "domain",
+            "depends_on",
+            "description",
+            "required_capabilities",
+            "priority",
+            "max_budget_tokens",
+        }
+        return cls(
+            title=str(step.get("title", "")),
+            domain=str(step.get("domain", "")),
+            depends_on=_coerce_str_tuple(step.get("depends_on", ())),
+            description=str(step.get("description", "")),
+            required_capabilities=_coerce_str_tuple(step.get("required_capabilities", ())),
+            priority=int(step.get("priority", 0)),
+            max_budget_tokens=int(step.get("max_budget_tokens", 0)),
+            extra={key: value for key, value in step.items() if key not in known_keys},
+        )
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "title":
+            return self.title
+        if key == "domain":
+            return self.domain
+        if key == "depends_on":
+            return self.depends_on
+        if key == "description":
+            return self.description
+        if key == "required_capabilities":
+            return self.required_capabilities
+        if key == "priority":
+            return self.priority
+        if key == "max_budget_tokens":
+            return self.max_budget_tokens
+        return self.extra[key]
+
+    def __iter__(self) -> Iterator[str]:
+        yield "title"
+        if self.domain:
+            yield "domain"
+        yield "depends_on"
+        if self.description:
+            yield "description"
+        if self.required_capabilities:
+            yield "required_capabilities"
+        if self.priority:
+            yield "priority"
+        if self.max_budget_tokens:
+            yield "max_budget_tokens"
+        yield from self.extra
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+
+def _coerce_str_tuple(values: object) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        return (values,)
+    if not isinstance(values, Iterable):
+        raise TypeError(f"Expected an iterable of strings, got {type(values).__name__}")
+    return tuple(str(value) for value in values)
+
+
+@dataclass(frozen=True, slots=True)
+class GoalSpec:
+    """Structured specification of a goal to compile into a TaskDAG."""
 
     goal: str
     domains: tuple[str, ...] | list[str]
-    steps: tuple[dict[str, Any], ...] | list[dict[str, Any]]
+    steps: tuple[GoalStep | Mapping[str, Any], ...] | list[GoalStep | Mapping[str, Any]]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "domains", tuple(self.domains))
+        object.__setattr__(
+            self,
+            "steps",
+            tuple(GoalStep.from_input(step) for step in self.steps),
+        )
 
 
 def _deterministic_node_id(title: str) -> str:
@@ -99,8 +188,8 @@ class DAGCompiler:
         Raises:
             ValueError: On validation failure (cycles, missing deps, etc.)
         """
-        steps = list(spec.steps)
-        domains = list(spec.domains)
+        steps = spec.steps
+        domains = spec.domains
 
         # Validate domains
         for domain in domains:
@@ -108,7 +197,7 @@ class DAGCompiler:
                 raise ValueError("Domain names must be non-empty strings")
 
         # Validate no duplicate titles
-        titles = [step["title"] for step in steps]
+        titles = [step.title for step in steps]
         seen_titles: set[str] = set()
         for title in titles:
             if title in seen_titles:
@@ -117,25 +206,25 @@ class DAGCompiler:
 
         # Build title -> node_id mapping
         title_to_id: dict[str, str] = {
-            step["title"]: _deterministic_node_id(step["title"]) for step in steps
+            step.title: _deterministic_node_id(step.title) for step in steps
         }
         if len(set(title_to_id.values())) != len(title_to_id):
             raise ValueError("Deterministic node ID collision detected; revise step titles")
 
         # Validate all dependency titles exist
         for step in steps:
-            for dep_title in step.get("depends_on", []):
+            for dep_title in step.depends_on:
                 if dep_title not in title_to_id:
                     raise ValueError(
-                        f"Step {step['title']!r} depends on {dep_title!r}, which does not exist"
+                        f"Step {step.title!r} depends on {dep_title!r}, which does not exist"
                     )
 
         # Validate step domains are in the declared domains list
         for step in steps:
-            step_domain = step.get("domain", "")
+            step_domain = step.domain
             if step_domain and domains and step_domain not in domains:
                 raise ValueError(
-                    f"Step {step['title']!r} has domain {step_domain!r}, "
+                    f"Step {step.title!r} has domain {step_domain!r}, "
                     f"which is not in the declared domains: {domains}"
                 )
 
@@ -143,9 +232,9 @@ class DAGCompiler:
         adjacency: dict[str, list[str]] = {}
         all_node_ids: set[str] = set()
         for step in steps:
-            node_id = title_to_id[step["title"]]
+            node_id = title_to_id[step.title]
             all_node_ids.add(node_id)
-            dep_ids = [title_to_id[dt] for dt in step.get("depends_on", [])]
+            dep_ids = [title_to_id[dt] for dt in step.depends_on]
             adjacency[node_id] = dep_ids
 
         # Detect cycles
@@ -159,18 +248,17 @@ class DAGCompiler:
         # Build TaskDAG
         dag = TaskDAG(goal=spec.goal)
         for step in steps:
-            node_id = title_to_id[step["title"]]
-            dep_ids = tuple(title_to_id[dt] for dt in step.get("depends_on", []))
-            caps = step.get("required_capabilities", [])
+            node_id = title_to_id[step.title]
+            dep_ids = tuple(title_to_id[dt] for dt in step.depends_on)
             node = TaskNode(
                 node_id=node_id,
-                title=step["title"],
-                description=step.get("description", ""),
-                domain=step.get("domain", ""),
-                required_capabilities=tuple(caps) if caps else (),
+                title=step.title,
+                description=step.description,
+                domain=step.domain,
+                required_capabilities=step.required_capabilities,
                 depends_on=dep_ids,
-                priority=step.get("priority", 0),
-                max_budget_tokens=step.get("max_budget_tokens", 0),
+                priority=step.priority,
+                max_budget_tokens=step.max_budget_tokens,
             )
             dag = dag.add_node(node)
 

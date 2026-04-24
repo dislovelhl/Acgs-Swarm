@@ -9,29 +9,32 @@ import warnings
 from dataclasses import dataclass
 
 import pytest
-from constitutional_swarm.mesh import (
+from constitutional_swarm import (
     AssignmentSettledError,
     ConstitutionalMesh,
-    DuplicateVoteError,
-    InsufficientPeersError,
+    DuplicateSettlementError,
     InvalidVoteSignatureError,
+    JSONLSettlementStore,
     MeshProof,
     MeshResult,
     PeerAssignment,
     RemoteVoteRequest,
     SettlementPersistenceError,
-    UnauthorizedVoterError,
-    ValidationVote,
-)
-from constitutional_swarm.settlement_store import (
-    DuplicateSettlementError,
-    JSONLSettlementStore,
     SettlementRecord,
     SQLiteSettlementStore,
+    ValidationVote,
 )
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from acgs_lite import Constitution, ConstitutionalViolationError, Rule
+
+# tests/test_mesh.py must stay stable across the planned mesh package split.
+# A few mesh-specific exception types are not top-level exports yet, so bind
+# them from the already-imported public class rather than importing the module.
+_MESH_GLOBALS = ConstitutionalMesh.request_validation.__globals__
+DuplicateVoteError = _MESH_GLOBALS["DuplicateVoteError"]
+InsufficientPeersError = _MESH_GLOBALS["InsufficientPeersError"]
+UnauthorizedVoterError = _MESH_GLOBALS["UnauthorizedVoterError"]
 
 
 class _FailingSettlementStore:
@@ -290,6 +293,173 @@ class TestRegistrationModeTransitions:
         assert "agent-h" not in mesh._agent_vote_private_keys
         assert mesh.agent_count == 1
 
+    def test_local_signer_reregistered_remote_blocks_local_signing(self) -> None:
+        mesh = ConstitutionalMesh(Constitution.default(), seed=9)
+        mesh.register_local_signer("producer")
+        mesh.register_local_signer("peer-1")
+        mesh.register_local_signer("peer-2")
+        mesh.register_local_signer("peer-3")
+
+        assignment = mesh.request_validation("producer", "safe work", "art-reg-local-remote")
+        assert "peer-1" in assignment.peers
+
+        remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("peer-1", vote_public_key=remote_key.public_key())
+
+        request = mesh.prepare_remote_vote(assignment.assignment_id, "peer-1")
+        assert request.voter_public_key == mesh.get_vote_public_key("peer-1")
+        with pytest.raises(UnauthorizedVoterError, match="signing key"):
+            mesh.sign_vote(assignment.assignment_id, "peer-1", approved=True)
+
+    def test_remote_agent_reregistered_local_can_validate_and_vote(self) -> None:
+        mesh = ConstitutionalMesh(Constitution.default(), seed=10)
+        mesh.register_local_signer("producer")
+        original_remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("peer-1", vote_public_key=original_remote_key.public_key())
+        mesh.register_local_signer("peer-2")
+        mesh.register_local_signer("peer-3")
+
+        assignment = mesh.request_validation("producer", "safe work", "art-reg-remote-local")
+        assert "peer-1" in assignment.peers
+
+        replacement_local_key = Ed25519PrivateKey.generate()
+        mesh.register_local_signer("peer-1", vote_private_key=replacement_local_key)
+
+        vote = mesh.validate_and_vote(assignment.assignment_id, "peer-1")
+
+        assert ConstitutionalMesh.verify_vote_signature(
+            public_key=mesh.get_vote_public_key("peer-1"),
+            assignment_id=assignment.assignment_id,
+            voter_id="peer-1",
+            approved=vote.approved,
+            reason=vote.reason,
+            constitutional_hash=assignment.constitutional_hash,
+            content_hash=assignment.content_hash,
+            signature=vote.signature,
+        )
+
+    def test_registered_remote_vote_rejects_voter_id_mismatch(self) -> None:
+        mesh = ConstitutionalMesh(Constitution.default(), seed=11)
+        mesh.register_local_signer("producer")
+        remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("peer-1", vote_public_key=remote_key.public_key())
+        mesh.register_local_signer("peer-2")
+        mesh.register_local_signer("peer-3")
+
+        assignment = mesh.request_validation("producer", "safe work", "art-reg-voter-mismatch")
+        assert {"peer-1", "peer-2", "peer-3"} == set(assignment.peers)
+
+        forged_signature = remote_key.sign(
+            ConstitutionalMesh.build_vote_payload(
+                assignment_id=assignment.assignment_id,
+                voter_id="peer-2",
+                approved=True,
+                reason="wrong voter",
+                constitutional_hash=assignment.constitutional_hash,
+                content_hash=assignment.content_hash,
+            )
+        ).hex()
+
+        with pytest.raises(InvalidVoteSignatureError, match="peer-1"):
+            mesh.submit_vote(
+                assignment.assignment_id,
+                "peer-1",
+                approved=True,
+                reason="wrong voter",
+                signature=forged_signature,
+            )
+
+    def test_duplicate_local_registration_rotates_signing_key(self) -> None:
+        mesh = ConstitutionalMesh(Constitution.default(), seed=12)
+        mesh.register_local_signer("producer")
+        original_local_key = Ed25519PrivateKey.generate()
+        mesh.register_local_signer("peer-1", vote_private_key=original_local_key)
+        mesh.register_local_signer("peer-2")
+        mesh.register_local_signer("peer-3")
+
+        assignment = mesh.request_validation("producer", "safe work", "art-reg-local-dup")
+        original_signature = original_local_key.sign(
+            ConstitutionalMesh.build_vote_payload(
+                assignment_id=assignment.assignment_id,
+                voter_id="peer-1",
+                approved=True,
+                reason="rotated local",
+                constitutional_hash=assignment.constitutional_hash,
+                content_hash=assignment.content_hash,
+            )
+        ).hex()
+
+        replacement_local_key = Ed25519PrivateKey.generate()
+        mesh.register_local_signer("peer-1", vote_private_key=replacement_local_key)
+
+        with pytest.raises(InvalidVoteSignatureError):
+            mesh.submit_vote(
+                assignment.assignment_id,
+                "peer-1",
+                approved=True,
+                reason="rotated local",
+                signature=original_signature,
+            )
+
+        replacement_signature = mesh.sign_vote(
+            assignment.assignment_id,
+            "peer-1",
+            approved=True,
+            reason="rotated local",
+        )
+        assert ConstitutionalMesh.verify_vote_signature(
+            public_key=mesh.get_vote_public_key("peer-1"),
+            assignment_id=assignment.assignment_id,
+            voter_id="peer-1",
+            approved=True,
+            reason="rotated local",
+            constitutional_hash=assignment.constitutional_hash,
+            content_hash=assignment.content_hash,
+            signature=replacement_signature,
+        )
+
+    def test_duplicate_remote_registration_invalidates_old_signature(self) -> None:
+        mesh = ConstitutionalMesh(Constitution.default(), seed=13)
+        mesh.register_local_signer("producer")
+        original_remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("peer-1", vote_public_key=original_remote_key.public_key())
+        mesh.register_local_signer("peer-2")
+        mesh.register_local_signer("peer-3")
+
+        assignment = mesh.request_validation("producer", "safe work", "art-reg-remote-dup")
+        original_signature = original_remote_key.sign(
+            ConstitutionalMesh.build_vote_payload(
+                assignment_id=assignment.assignment_id,
+                voter_id="peer-1",
+                approved=True,
+                reason="rotated remote",
+                constitutional_hash=assignment.constitutional_hash,
+                content_hash=assignment.content_hash,
+            )
+        ).hex()
+
+        replacement_remote_key = Ed25519PrivateKey.generate()
+        mesh.register_remote_agent("peer-1", vote_public_key=replacement_remote_key.public_key())
+
+        assert not ConstitutionalMesh.verify_vote_signature(
+            public_key=mesh.get_vote_public_key("peer-1"),
+            assignment_id=assignment.assignment_id,
+            voter_id="peer-1",
+            approved=True,
+            reason="rotated remote",
+            constitutional_hash=assignment.constitutional_hash,
+            content_hash=assignment.content_hash,
+            signature=original_signature,
+        )
+        with pytest.raises(InvalidVoteSignatureError):
+            mesh.submit_vote(
+                assignment.assignment_id,
+                "peer-1",
+                approved=True,
+                reason="rotated remote",
+                signature=original_signature,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Peer assignment
@@ -491,7 +661,7 @@ class TestVoting:
 
     def test_register_agent_removed_raises_attribute_error(self) -> None:
         mesh = ConstitutionalMesh(Constitution.default(), seed=7)
-        with pytest.raises(AttributeError, match="register_agent.*removed"):
+        with pytest.raises(AttributeError, match=r"register_agent.*removed"):
             mesh.register_agent("agent-x")
 
     def test_unknown_assignment_raises_key_error(self, mesh: ConstitutionalMesh) -> None:
@@ -1339,10 +1509,11 @@ class TestMeshSettlePersistenceIntegration:
         report = reader.retry_pending_settlements()
         restored = reader.get_result(result.assignment_id)
 
-        assert report["pending"] == 1
-        assert report["reconciled"] == 1
-        assert report["remaining"] == 0
-        assert report["failures"] == 0
+        assert report.attempted == 1
+        assert report.settled == 1
+        assert report.skipped_recovered == 0
+        assert report.failed == 0
+        assert report.errors == []
         assert restored.settled is True
         assert restored.proof is not None
         assert restored.proof.verify() is True
@@ -1404,7 +1575,9 @@ class TestCollectRemoteVotes:
     async def test_collect_remote_votes_missing_route_raises_key_error(self) -> None:
         mesh, producer, remote_peer = _minimal_mesh_with_remote_peer()
         assignment = mesh.request_validation(producer, "safe content", "art-crv-1")
-        assert remote_peer in assignment.peers, "remote-peer must be selected (peers_per_validation=1)"
+        assert remote_peer in assignment.peers, (
+            "remote-peer must be selected (peers_per_validation=1)"
+        )
 
         with pytest.raises(KeyError, match=remote_peer):
             await mesh.collect_remote_votes(
@@ -1426,7 +1599,9 @@ class TestCollectRemoteVotes:
     async def test_collect_remote_votes_wrong_assignment_id_raises_value_error(self) -> None:
         mesh, producer, remote_peer = _minimal_mesh_with_remote_peer()
         assignment = mesh.request_validation(producer, "safe content", "art-crv-2")
-        assert remote_peer in assignment.peers, "remote-peer must be selected (peers_per_validation=1)"
+        assert remote_peer in assignment.peers, (
+            "remote-peer must be selected (peers_per_validation=1)"
+        )
 
         bad_response = _FakeRemoteVoteResponse(
             assignment_id="wrong-assignment-id",

@@ -13,7 +13,7 @@ import sqlite3
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -45,6 +45,8 @@ class SettlementRecord:
     assignment: dict[str, Any]
     result: dict[str, Any]
     constitutional_hash: str = ""
+    schema_version: int = 1
+    is_recovered: bool = False
 
 
 class SettlementStore(Protocol):
@@ -117,11 +119,7 @@ class JSONLSettlementStore:
             for existing in self.load_all():
                 if str(existing.assignment.get("assignment_id", "")) == assignment_id:
                     raise DuplicateSettlementError(f"Settlement {assignment_id} already exists")
-            payload = {
-                "assignment": record.assignment,
-                "result": record.result,
-                "constitutional_hash": record.constitutional_hash,
-            }
+            payload = self._payload_from_record(record)
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
@@ -157,21 +155,16 @@ class JSONLSettlementStore:
                         fh_trunc.truncate()
                     continue
                 raise
-            records.append(
-                SettlementRecord(
-                    assignment=dict(payload.get("assignment", {})),
-                    result=dict(payload.get("result", {})),
-                    constitutional_hash=payload.get("constitutional_hash", ""),
-                )
-            )
+            records.append(self._record_from_payload(payload))
         return records
 
     def mark_pending(self, record: SettlementRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        pending_record = replace(record, is_recovered=False)
         with self._file_lock():
             payloads = self._load_pending_payloads()
-            assignment_id = str(record.assignment["assignment_id"])
-            payloads[assignment_id] = self._payload_from_record(record)
+            assignment_id = str(pending_record.assignment["assignment_id"])
+            payloads[assignment_id] = self._payload_from_record(pending_record)
             self._write_pending_payloads(payloads)
 
     def clear_pending(self, assignment_id: str) -> None:
@@ -218,15 +211,22 @@ class JSONLSettlementStore:
             "assignment": record.assignment,
             "result": record.result,
             "constitutional_hash": record.constitutional_hash,
+            "schema_version": record.schema_version,
+            "is_recovered": record.is_recovered,
         }
 
     @classmethod
     def _record_from_payload(cls, payload: dict[str, Any]) -> SettlementRecord:
-        return SettlementRecord(
-            assignment=dict(payload.get("assignment", {})),
-            result=dict(payload.get("result", {})),
-            constitutional_hash=payload.get("constitutional_hash", ""),
-        )
+        record_kwargs: dict[str, Any] = {
+            "assignment": dict(payload.get("assignment", {})),
+            "result": dict(payload.get("result", {})),
+            "constitutional_hash": payload.get("constitutional_hash", ""),
+        }
+        if "schema_version" in payload:
+            record_kwargs["schema_version"] = int(payload["schema_version"])
+        if "is_recovered" in payload:
+            record_kwargs["is_recovered"] = bool(payload["is_recovered"])
+        return SettlementRecord(**record_kwargs)
 
 
 class SQLiteSettlementStore:
@@ -249,7 +249,9 @@ class SQLiteSettlementStore:
                     assignment_id TEXT PRIMARY KEY,
                     assignment_json TEXT NOT NULL,
                     result_json TEXT NOT NULL,
-                    constitutional_hash TEXT NOT NULL DEFAULT ''
+                    constitutional_hash TEXT NOT NULL DEFAULT '',
+                    schema_version INTEGER NOT NULL DEFAULT 1,
+                    is_recovered INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -259,7 +261,9 @@ class SQLiteSettlementStore:
                     assignment_id TEXT PRIMARY KEY,
                     assignment_json TEXT NOT NULL,
                     result_json TEXT NOT NULL,
-                    constitutional_hash TEXT NOT NULL DEFAULT ''
+                    constitutional_hash TEXT NOT NULL DEFAULT '',
+                    schema_version INTEGER NOT NULL DEFAULT 1,
+                    is_recovered INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -277,6 +281,34 @@ class SQLiteSettlementStore:
                 conn.execute(
                     "ALTER TABLE pending_settlements ADD COLUMN "
                     "constitutional_hash TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute(
+                    "ALTER TABLE mesh_settlements ADD COLUMN "
+                    "schema_version INTEGER NOT NULL DEFAULT 1"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute(
+                    "ALTER TABLE pending_settlements ADD COLUMN "
+                    "schema_version INTEGER NOT NULL DEFAULT 1"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute(
+                    "ALTER TABLE mesh_settlements ADD COLUMN "
+                    "is_recovered INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute(
+                    "ALTER TABLE pending_settlements ADD COLUMN "
+                    "is_recovered INTEGER NOT NULL DEFAULT 0"
                 )
             except sqlite3.OperationalError:
                 pass  # column already exists
@@ -298,14 +330,18 @@ class SQLiteSettlementStore:
                         assignment_id,
                         assignment_json,
                         result_json,
-                        constitutional_hash
-                    ) VALUES (?, ?, ?, ?)
+                        constitutional_hash,
+                        schema_version,
+                        is_recovered
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         assignment_id,
                         json.dumps(record.assignment, separators=(",", ":")),
                         json.dumps(record.result, separators=(",", ":")),
                         record.constitutional_hash,
+                        record.schema_version,
+                        int(record.is_recovered),
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -315,25 +351,11 @@ class SQLiteSettlementStore:
             conn.commit()
 
     def load_all(self) -> list[SettlementRecord]:
-        with sqlite3.connect(self.path) as conn:
-            rows = conn.execute(
-                """
-                SELECT assignment_json, result_json, constitutional_hash
-                FROM mesh_settlements
-                ORDER BY assignment_id
-                """
-            ).fetchall()
-        return [
-            SettlementRecord(
-                assignment=dict(json.loads(assignment_json)),
-                result=dict(json.loads(result_json)),
-                constitutional_hash=constitutional_hash,
-            )
-            for assignment_json, result_json, constitutional_hash in rows
-        ]
+        return self._load_records_from_table("mesh_settlements")
 
     def mark_pending(self, record: SettlementRecord) -> None:
-        assignment_id = str(record.assignment["assignment_id"])
+        pending_record = replace(record, is_recovered=False)
+        assignment_id = str(pending_record.assignment["assignment_id"])
         with sqlite3.connect(self.path) as conn:
             conn.execute(
                 """
@@ -341,14 +363,18 @@ class SQLiteSettlementStore:
                     assignment_id,
                     assignment_json,
                     result_json,
-                    constitutional_hash
-                ) VALUES (?, ?, ?, ?)
+                    constitutional_hash,
+                    schema_version,
+                    is_recovered
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     assignment_id,
-                    json.dumps(record.assignment, separators=(",", ":")),
-                    json.dumps(record.result, separators=(",", ":")),
-                    record.constitutional_hash,
+                    json.dumps(pending_record.assignment, separators=(",", ":")),
+                    json.dumps(pending_record.result, separators=(",", ":")),
+                    pending_record.constitutional_hash,
+                    pending_record.schema_version,
+                    int(pending_record.is_recovered),
                 ),
             )
             conn.commit()
@@ -362,21 +388,61 @@ class SQLiteSettlementStore:
             conn.commit()
 
     def load_pending(self) -> list[SettlementRecord]:
-        with sqlite3.connect(self.path) as conn:
-            rows = conn.execute(
-                """
-                SELECT assignment_json, result_json, constitutional_hash
+        return self._load_records_from_table("pending_settlements")
+
+    def _load_records_from_table(self, table_name: str) -> list[SettlementRecord]:
+        if table_name == "mesh_settlements":
+            select_with_is_recovered = """
+                SELECT assignment_json, result_json, constitutional_hash, schema_version, is_recovered
+                FROM mesh_settlements
+                ORDER BY assignment_id
+            """
+            select_without_is_recovered = """
+                SELECT assignment_json, result_json, constitutional_hash, schema_version, 0
+                FROM mesh_settlements
+                ORDER BY assignment_id
+            """
+            select_without_schema_version = """
+                SELECT assignment_json, result_json, constitutional_hash, 1, 0
+                FROM mesh_settlements
+                ORDER BY assignment_id
+            """
+        elif table_name == "pending_settlements":
+            select_with_is_recovered = """
+                SELECT assignment_json, result_json, constitutional_hash, schema_version, is_recovered
                 FROM pending_settlements
                 ORDER BY assignment_id
-                """
-            ).fetchall()
+            """
+            select_without_is_recovered = """
+                SELECT assignment_json, result_json, constitutional_hash, schema_version, 0
+                FROM pending_settlements
+                ORDER BY assignment_id
+            """
+            select_without_schema_version = """
+                SELECT assignment_json, result_json, constitutional_hash, 1, 0
+                FROM pending_settlements
+                ORDER BY assignment_id
+            """
+        else:  # pragma: no cover - internal invariant guard
+            raise ValueError(f"Unsupported settlement table: {table_name}")
+
+        with sqlite3.connect(self.path) as conn:
+            try:
+                rows = conn.execute(select_with_is_recovered).fetchall()
+            except sqlite3.OperationalError:
+                try:
+                    rows = conn.execute(select_without_is_recovered).fetchall()
+                except sqlite3.OperationalError:
+                    rows = conn.execute(select_without_schema_version).fetchall()
         return [
             SettlementRecord(
                 assignment=dict(json.loads(assignment_json)),
                 result=dict(json.loads(result_json)),
                 constitutional_hash=constitutional_hash,
+                schema_version=int(schema_version),
+                is_recovered=bool(is_recovered),
             )
-            for assignment_json, result_json, constitutional_hash in rows
+            for assignment_json, result_json, constitutional_hash, schema_version, is_recovered in rows
         ]
 
     def pending_count(self) -> int:

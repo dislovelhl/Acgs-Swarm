@@ -3,38 +3,40 @@
 Origin
 ------
 - First audited: security-audit-report.md (HIGH finding)
-- Remediation claim: SYSTEMIC_IMPROVEMENT.md — "non-local WebSocket transport
-  now requires TLS configuration"
+- Remediation claim: SYSTEMIC_IMPROVEMENT.md — non-loopback transport defaults to TLS
 - Status as of this test's existence: REMEDIATED (asserted here)
 
 Contract
 --------
-- `RemoteVoteClient.request_vote()` MUST raise `ValueError` containing "TLS" BEFORE
-  any network IO when `ssl_context is None` and the host is not loopback.
-  See remote_vote_transport.py:122-124 for the gate.
-- Loopback addresses (127.0.0.1, localhost, ::1) MAY proceed without TLS for dev.
-- A non-loopback request WITH a valid `ssl_context` must not be blocked by the gate.
-- The failing HIGH audit finding is now a live regression test: if anyone removes
-  the gate, this test turns red and the security-audit-report.md auto-generator
-  flags the finding as back-open.
+- `RemoteVoteClient(transport_security="auto")` must default non-loopback hosts to
+  TLS and therefore pass a real `ssl.SSLContext` into the websocket connector.
+- Loopback addresses (`127.0.0.1`, `localhost`, `::1`) may still proceed without
+  TLS for dev use and therefore pass `ssl=None`.
+- If anyone changes the auto-derived default back to plaintext for non-loopback
+  hosts, this test turns red and the security audit should be considered open again.
 """
 
 from __future__ import annotations
 
+import json
 import ssl
+from dataclasses import asdict
 
 import pytest
 from constitutional_swarm.mesh import RemoteVoteRequest
-from constitutional_swarm.remote_vote_transport import RemoteVoteClient
+from constitutional_swarm.remote_vote_transport import RemoteVoteClient, RemoteVoteResponse
 
 FINDING_ID = "SEC-001"
 SEVERITY = "HIGH"
 STATUS = "remediated"
 TITLE = "Unauthenticated WebSocket transport"
 
+websockets = pytest.importorskip(
+    "websockets", reason="websockets not installed — skip remote vote transport security tests"
+)
+
 
 def _minimal_request() -> RemoteVoteRequest:
-    """Minimal RemoteVoteRequest that reaches the TLS gate before field validation."""
     return RemoteVoteRequest(
         assignment_id="test-assignment",
         voter_id="test-voter",
@@ -44,97 +46,90 @@ def _minimal_request() -> RemoteVoteRequest:
         content_hash="0" * 64,
         constitutional_hash="0" * 16,
         voter_public_key="",
+        nonce="nonce-security",
+        timestamp=1234.5,
         request_signer_public_key="",
         request_signature="",
     )
 
 
-def _is_tls_gate_error(exc: BaseException) -> bool:
-    """True iff the exception is the TLS gate ValueError, not something else."""
-    return isinstance(exc, ValueError) and "TLS" in str(exc)
+class _FakeClientWebSocket:
+    def __init__(self, recv_value: str) -> None:
+        self._recv_value = recv_value
+
+    async def send(self, _message: str) -> None:
+        return None
+
+    async def recv(self) -> str:
+        return self._recv_value
+
+
+class _FakeConnectContext:
+    def __init__(self, websocket: _FakeClientWebSocket) -> None:
+        self.websocket = websocket
+
+    async def __aenter__(self) -> _FakeClientWebSocket:
+        return self.websocket
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+def _ok_response(request: RemoteVoteRequest) -> str:
+    response = RemoteVoteResponse(
+        assignment_id=request.assignment_id,
+        voter_id=request.voter_id,
+        approved=True,
+        reason="ok",
+        constitutional_hash=request.constitutional_hash,
+        content_hash=request.content_hash,
+        signature="00" * 64,
+    )
+    return json.dumps(asdict(response))
 
 
 @pytest.mark.security
 class TestFindingSEC001:
-    async def test_non_localhost_without_tls_raises(self) -> None:
-        """Sad path: non-loopback + no TLS must be rejected at the gate."""
-        client = RemoteVoteClient()
-        req = _minimal_request()
-        with pytest.raises(ValueError, match=r"TLS"):
-            await client.request_vote(
-                host="peer.example.com",
-                port=8443,
-                request=req,
-                ssl_context=None,
-            )
+    async def test_auto_non_localhost_uses_tls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = RemoteVoteClient(transport_security="auto")
+        request = _minimal_request()
+        captured: dict[str, object] = {}
 
-    async def test_non_localhost_with_tls_does_not_trigger_gate(self) -> None:
-        """Happy path: non-loopback + valid ssl_context must pass the gate.
+        def _connect(uri: str, ssl: object = None) -> _FakeConnectContext:
+            captured["uri"] = uri
+            captured["ssl"] = ssl
+            return _FakeConnectContext(_FakeClientWebSocket(_ok_response(request)))
 
-        Downstream connection will fail (no server), but the TLS gate at
-        remote_vote_transport.py:122-124 must NOT be the failure reason.
-        Guards against a regression that makes the gate unconditional.
-        """
-        client = RemoteVoteClient()
-        req = _minimal_request()
-        ctx = ssl.create_default_context()
-        try:
-            await client.request_vote(
-                host="peer.example.com",
-                port=8443,
-                request=req,
-                ssl_context=ctx,
-                timeout=0.1,
-            )
-        except Exception as exc:
-            if _is_tls_gate_error(exc):
-                pytest.fail(f"TLS gate fired even with ssl_context set: {exc}")
-            # Any other exception (OSError / ImportError / TimeoutError / etc.) is
-            # an expected downstream failure — the gate passed, which is what we want.
+        monkeypatch.setattr(websockets, "connect", _connect)
 
-    # IPv6 loopback `::1` intentionally omitted — websockets.uri.parse_uri rejects
-    # raw IPv6 without bracket syntax (`ws://[::1]:8443`), which is an orthogonal
-    # bug to the TLS gate. The gate itself treats `::1` as loopback (tested in unit
-    # scope elsewhere); this integration test only covers hosts that make it past
-    # the URI parser.
+        await client.request_vote(host="peer.example.com", port=8443, request=request)
+
+        assert captured["uri"] == "wss://peer.example.com:8443"
+        assert isinstance(captured["ssl"], ssl.SSLContext)
+
     @pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
-    async def test_loopback_without_tls_passes_gate(self, host: str) -> None:
-        """Happy path: loopback hosts may proceed without TLS for dev use.
+    async def test_auto_loopback_stays_plaintext(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        host: str,
+    ) -> None:
+        client = RemoteVoteClient(transport_security="auto")
+        request = _minimal_request()
+        captured: dict[str, object] = {}
 
-        Any downstream connection / import failure is fine — we only assert the
-        TLS gate does not fire. An unexpected ValueError propagates so that
-        field-validation drift is surfaced rather than silently swallowed.
-        """
-        client = RemoteVoteClient()
-        req = _minimal_request()
-        try:
-            await client.request_vote(
-                host=host,
-                port=8443,
-                request=req,
-                ssl_context=None,
-                timeout=0.1,
-            )
-        except ValueError as exc:
-            if _is_tls_gate_error(exc):
-                pytest.fail(f"TLS gate incorrectly fired for loopback host {host!r}: {exc}")
-            raise  # non-TLS ValueError — surface it, don't swallow
-        except (OSError, ImportError, TimeoutError):
-            # Expected: no server on loopback, or websockets not installed.
-            pass
+        def _connect(uri: str, ssl: object = None) -> _FakeConnectContext:
+            captured["uri"] = uri
+            captured["ssl"] = ssl
+            return _FakeConnectContext(_FakeClientWebSocket(_ok_response(request)))
 
-    def test_ipv6_loopback_is_whitelisted_in_gate(self) -> None:
-        """Unit-level check that the TLS gate treats `::1` as loopback.
+        monkeypatch.setattr(websockets, "connect", _connect)
 
-        Distinct from `test_loopback_without_tls_passes_gate` because the gate
-        logic fires before websockets' URI parser, so we can verify the
-        is_local check directly by reading the module constant.
-        """
-        import inspect
+        await client.request_vote(host=host, port=8443, request=request)
 
-        from constitutional_swarm.remote_vote_transport import RemoteVoteClient
+        assert captured["uri"] == f"ws://{host}:8443"
+        assert captured["ssl"] is None
 
-        source = inspect.getsource(RemoteVoteClient.request_vote)
-        assert "::1" in source, "IPv6 loopback `::1` must appear in the TLS gate"
-        assert "127.0.0.1" in source, "IPv4 loopback must appear in the TLS gate"
-        assert "localhost" in source, "localhost must appear in the TLS gate"
+    def test_ipv6_loopback_is_kept_local(self) -> None:
+        from constitutional_swarm.remote_vote_transport import _LOOPBACK_HOSTS
+
+        assert "::1" in _LOOPBACK_HOSTS

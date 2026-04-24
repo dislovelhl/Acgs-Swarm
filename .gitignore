@@ -23,6 +23,8 @@ HANDOFF_*.md
 .coverage
 coverage.json
 coverage_benchmark.json
+coverage*.json
 codex-default.*.json
+dist_review/
 logs/
 missions/

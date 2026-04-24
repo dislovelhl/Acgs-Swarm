@@ -16,7 +16,7 @@ Four breakthrough patterns:
 from constitutional_swarm.artifact import Artifact, ArtifactStore
 from constitutional_swarm.bench import BenchmarkResult, SwarmBenchmark
 from constitutional_swarm.capability import Capability, CapabilityRegistry
-from constitutional_swarm.compiler import DAGCompiler, GoalSpec
+from constitutional_swarm.compiler import DAGCompiler, GoalSpec, GoalStep
 from constitutional_swarm.contract import ContractStatus, TaskContract
 from constitutional_swarm.debate_resolver import (
     DebateRecord,
@@ -73,6 +73,9 @@ from constitutional_swarm.mesh import (
     MeshProof,
     MeshResult,
     PeerAssignment,
+    ReconciliationReport,
+    RecoveredAssignmentError,
+    RemoteVoteReplayError,
     RemoteVoteRequest,
     SettlementPersistenceError,
     ValidationVote,
@@ -141,6 +144,8 @@ from constitutional_swarm.violation_subspace import (
     fit_subspace,
 )
 
+# Keep broad top-level imports for compatibility with existing tests and callers,
+# but advertise only the stable 1.0 surface via __all__.
 __all__ = [
     "AgentCredential",
     "AgentDNA",
@@ -184,6 +189,7 @@ __all__ = [
     "FinalVerdict",
     "GapRecord",
     "GoalSpec",
+    "GoalStep",
     "GovernanceManifold",
     "InsufficientQuorumError",
     "InsufficientSamplesError",
@@ -213,8 +219,11 @@ __all__ = [
     "PrivateBallotBox",
     "PrivateTally",
     "QuorumCertificate",
+    "ReconciliationReport",
+    "RecoveredAssignmentError",
     "RegressionRecord",
     "RemoteVoteClient",
+    "RemoteVoteReplayError",
     "RemoteVoteRequest",
     "RemoteVoteResponse",
     "RemoteVoteServer",

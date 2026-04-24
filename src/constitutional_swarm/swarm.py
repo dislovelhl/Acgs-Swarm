@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from constitutional_swarm.artifact import Artifact, ArtifactStore
@@ -22,10 +22,30 @@ from constitutional_swarm.execution import (
 )
 
 NodeStatus = ExecutionStatus
+_UNSET = object()
 
 
 def _neg_priority(node: TaskNode) -> int:
     return -node.priority
+
+
+def _with_status(
+    node: TaskNode,
+    status: ExecutionStatus,
+    *,
+    claimed_by: str | None | object = _UNSET,
+    artifact_id: str | None | object = _UNSET,
+) -> TaskNode:
+    """Clone a TaskNode while updating lifecycle fields."""
+    updates: dict[str, Any] = {
+        "status": status,
+        "metadata": dict(node.metadata),
+    }
+    if claimed_by is not _UNSET:
+        updates["claimed_by"] = claimed_by
+    if artifact_id is not _UNSET:
+        updates["artifact_id"] = artifact_id
+    return replace(node, **updates)
 
 
 @dataclass
@@ -101,18 +121,7 @@ class TaskDAG:
             if node.status != ExecutionStatus.BLOCKED:
                 continue
             if self._dependencies_completed(node):
-                new_nodes[nid] = TaskNode(
-                    node_id=node.node_id,
-                    title=node.title,
-                    description=node.description,
-                    domain=node.domain,
-                    required_capabilities=node.required_capabilities,
-                    depends_on=node.depends_on,
-                    priority=node.priority,
-                    max_budget_tokens=node.max_budget_tokens,
-                    status=ExecutionStatus.READY,
-                    metadata=dict(node.metadata),
-                )
+                new_nodes[nid] = _with_status(node, ExecutionStatus.READY)
         return TaskDAG(dag_id=self.dag_id, goal=self.goal, nodes=new_nodes)
 
     def claim_node(self, node_id: str, agent_id: str) -> TaskDAG:
@@ -123,18 +132,10 @@ class TaskDAG:
         if node.status != ExecutionStatus.READY:
             raise ValueError(f"Node {node_id} is {node.status.value}, not ready")
         new_nodes = dict(self.nodes)
-        new_nodes[node_id] = TaskNode(
-            node_id=node.node_id,
-            title=node.title,
-            description=node.description,
-            domain=node.domain,
-            required_capabilities=node.required_capabilities,
-            depends_on=node.depends_on,
-            priority=node.priority,
-            max_budget_tokens=node.max_budget_tokens,
-            status=ExecutionStatus.CLAIMED,
+        new_nodes[node_id] = _with_status(
+            node,
+            ExecutionStatus.CLAIMED,
             claimed_by=agent_id,
-            metadata=dict(node.metadata),
         )
         return TaskDAG(dag_id=self.dag_id, goal=self.goal, nodes=new_nodes)
 
@@ -146,19 +147,11 @@ class TaskDAG:
         if node.status not in (ExecutionStatus.CLAIMED, ExecutionStatus.RUNNING):
             raise ValueError(f"Node {node_id} is {node.status.value}, not claimed")
         new_nodes = dict(self.nodes)
-        new_nodes[node_id] = TaskNode(
-            node_id=node.node_id,
-            title=node.title,
-            description=node.description,
-            domain=node.domain,
-            required_capabilities=node.required_capabilities,
-            depends_on=node.depends_on,
-            priority=node.priority,
-            max_budget_tokens=node.max_budget_tokens,
-            status=ExecutionStatus.COMPLETED,
+        new_nodes[node_id] = _with_status(
+            node,
+            ExecutionStatus.COMPLETED,
             claimed_by=node.claimed_by,
             artifact_id=artifact_id,
-            metadata=dict(node.metadata),
         )
         return TaskDAG(dag_id=self.dag_id, goal=self.goal, nodes=new_nodes)
 
@@ -254,9 +247,7 @@ class SwarmExecutor:
             pending = 0
             for dep in node.depends_on:
                 if dep not in nodes:
-                    raise KeyError(
-                        f"Node {nid} depends on missing node {dep}"
-                    )
+                    raise KeyError(f"Node {nid} depends on missing node {dep}")
                 self._children.setdefault(dep, []).append(nid)
                 if nodes[dep].status != ExecutionStatus.COMPLETED:
                     pending += 1

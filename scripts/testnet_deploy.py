@@ -20,6 +20,7 @@ Requirements:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 
@@ -31,6 +32,78 @@ def _check_bittensor() -> None:
         print("ERROR: bittensor package not installed.")
         print("  pip install bittensor>=7.0.0")
         sys.exit(1)
+
+
+def cmd_local(args: argparse.Namespace) -> None:
+    """Run a fully local no-network testnet simulation."""
+    if not os.path.exists(args.constitution):
+        print(f"ERROR: Constitution file not found: {args.constitution}")
+        print("  Create a constitution.yaml or use the sample in examples/constitution.yaml")
+        sys.exit(1)
+
+    from constitutional_swarm.mesh import ConstitutionalMesh
+
+    from acgs_lite import Constitution
+
+    agents = tuple(f"local-agent-{idx}" for idx in range(5))
+    cases = tuple(
+        (
+            f"local-case-{idx}",
+            "Approve this local governance case with safety, transparency, "
+            "proportionality, and pluralism documented.",
+        )
+        for idx in range(4)
+    )
+    constitution = Constitution.from_yaml(args.constitution)
+    mesh = ConstitutionalMesh(
+        constitution,
+        peers_per_validation=3,
+        quorum=2,
+        seed=0,
+        use_manifold=True,
+    )
+
+    for agent_id in agents:
+        mesh.register_local_signer(agent_id, domain="general")
+
+    print("Running local Constitutional Swarm testnet simulation...")
+    print("  Mode: local (no Bittensor SDK, wallet, RPC, axon, or external network)")
+    print(f"  Constitution: {args.constitution}")
+    print(f"  Constitution hash: {mesh.constitutional_hash}")
+    print(f"  Agents registered: {len(agents)}")
+
+    accepted = 0
+    rejected = 0
+    for idx, (case_id, content) in enumerate(cases):
+        result = mesh.full_validation(
+            producer_id=agents[idx],
+            content=content,
+            artifact_id=f"{case_id}-artifact",
+        )
+        if result.accepted:
+            accepted += 1
+        else:
+            rejected += 1
+        print(
+            f"  {case_id}: accepted={result.accepted} "
+            f"votes_for={result.votes_for} votes_against={result.votes_against} "
+            f"quorum_met={result.quorum_met}"
+        )
+
+    summary = mesh.summary()
+    manifold = mesh.manifold_summary() or {}
+    final_spectral_bound = float(manifold.get("spectral_bound", 0.0))
+    stable = bool(manifold.get("is_stable", False))
+    print(
+        "MEASUREMENT "
+        f"agents_registered={summary['agents']} "
+        f"validations={summary['total_validations']} "
+        f"votes_cast={summary['total_votes']} "
+        f"accepted={accepted} "
+        f"rejected={rejected} "
+        f"final_spectral_bound={final_spectral_bound:.5f} "
+        f"stable={stable}"
+    )
 
 
 def cmd_register(args: argparse.Namespace) -> None:
@@ -302,7 +375,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Constitutional Governance Subnet - Testnet Deployment",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--constitution",
+        help="Path to constitution YAML for the default local simulation",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Run the default no-network local simulation when no subcommand is given",
+    )
+    subparsers = parser.add_subparsers(dest="command")
 
     # Register
     reg = subparsers.add_parser("register", help="Register subnet on testnet")
@@ -331,7 +413,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "register":
+    if args.command is None:
+        if args.constitution is None:
+            parser.print_help(sys.stderr)
+            sys.exit(2)
+        cmd_local(args)
+    elif args.command == "register":
         cmd_register(args)
     elif args.command == "miner":
         cmd_miner(args)

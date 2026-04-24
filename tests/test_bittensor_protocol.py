@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("bittensor", reason="bittensor not installed — skip protocol tests")
 pytestmark = pytest.mark.bittensor
 
-from constitutional_swarm.bittensor.protocol import (
-    TIER_REQUIREMENTS,
-    TIER_TAO_MULTIPLIER,
+from constitutional_swarm.bittensor import (  # noqa: I001
+    ConstitutionalMiner,
+    ConstitutionalValidator,
+    DeliberationSynapse,
     EscalationType,
+    JudgmentSynapse,
+    MinerAxonServer,
     MinerConfig,
     MinerTier,
     SubnetMetrics,
+    SubnetOwner,
+    TIER_REQUIREMENTS,
+    TIER_TAO_MULTIPLIER,
     ValidatorConfig,
-)
-from constitutional_swarm.bittensor.synapses import (
-    DeliberationSynapse,
-    JudgmentSynapse,
+    ValidatorDendriteClient,
     ValidationSynapse,
 )
 
@@ -216,3 +220,85 @@ class TestValidatorConfig:
         assert config.peers_per_validation == 3
         assert config.quorum == 2
         assert config.use_manifold is True
+
+
+def _write_test_constitution(tmp_path) -> str:
+    path = tmp_path / "bittensor-protocol-constitution.yaml"
+    path.write_text(
+        """
+name: bittensor-protocol-test
+rules:
+  - id: safety-01
+    text: Do not cause physical harm
+    severity: critical
+    hardcoded: true
+    keywords:
+      - harm
+      - danger
+  - id: provenance-01
+    text: Include provenance in governance outputs
+    severity: high
+    hardcoded: false
+    keywords:
+      - missing provenance
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+async def _governance_handler(task: str, context: str, meta: dict) -> tuple[str, str]:
+    del task, context, meta
+    return (
+        "Provide the policy recommendation with provenance attached",
+        "The judgment preserves provenance and stays within the constitution",
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_protocol_bridge_round_trip_preserves_constitution_hash(tmp_path) -> None:
+    constitution_path = _write_test_constitution(tmp_path)
+    owner = SubnetOwner(constitution_path)
+    miner = ConstitutionalMiner(
+        config=MinerConfig(
+            constitution_path=constitution_path,
+            agent_id="miner-bridge",
+            domains=("governance",),
+        ),
+        deliberation_handler=_governance_handler,
+    )
+    client = ValidatorDendriteClient(constitution_path)
+    client.register_local_miner(MinerAxonServer(miner))
+
+    case = owner.package_case(
+        "Need a provenance-preserving governance recommendation",
+        "governance",
+        escalation_type=EscalationType.CONTEXT_SENSITIVITY,
+        impact_score=0.8,
+    )
+    judgments = await client.query_miners(case.synapse, timeout=1.0)
+
+    assert len(judgments) == 1
+    judgment = judgments[0]
+    assert isinstance(judgment, JudgmentSynapse)
+    assert judgment.constitutional_hash == owner.constitution_hash
+    assert judgment.miner_uid == "miner-bridge"
+
+    validator = ConstitutionalValidator(
+        config=ValidatorConfig(
+            constitution_path=constitution_path,
+            peers_per_validation=3,
+            quorum=2,
+            use_manifold=False,
+        )
+    )
+    for miner_uid in ("miner-bridge", "peer-1", "peer-2", "peer-3"):
+        validator.register_miner(miner_uid, domain="governance")
+
+    validation = validator.validate(judgment)
+
+    assert isinstance(validation, ValidationSynapse)
+    assert validation.constitutional_hash == owner.constitution_hash
+    assert validation.accepted is True
+    assert validation.quorum_met is True
