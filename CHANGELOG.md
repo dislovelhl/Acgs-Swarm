@@ -27,6 +27,7 @@ The format is based on Keep a Changelog.
 ### Migration
 - See `MIGRATION.md` for the 0.3 -> 1.0 upgrade guide (transport_security, schema_version, register_agent)
 
+
 ## [0.3.0] - 2026-04-23
 
 ### Breaking Changes
