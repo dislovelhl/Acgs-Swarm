@@ -1,0 +1,9 @@
+{
+  "action": "approve a low-risk deployment after constitutional review",
+  "constitutional_hash": "608508a9bd224290",
+  "risk_level": "unknown",
+  "risk_score": 0.0,
+  "scoring_method": "keyword",
+  "valid": true,
+  "violations": []
+}
