@@ -51,8 +51,59 @@ class ClaimEvidence:
     paper: str
     basis: str
     passed: bool
+    external_source_present: bool
+    source: str
     measurements: dict[str, Any]
     note: str
+
+
+ICLR_SOURCES = {
+    "ICLR-03": "papers/iclr2027/sections/abstract.tex:17-20; papers/iclr2027/sections/experiments.tex:115-124",
+    "ICLR-07": "papers/iclr2027/sections/introduction.tex:63-67",
+    "ICLR-08": "papers/iclr2027/sections/experiments.tex:24-27",
+    "ICLR-09": "papers/iclr2027/sections/experiments.tex:45-49",
+    "ICLR-12": "papers/iclr2027/sections/experiments.tex:62-84",
+    "ICLR-13": "papers/iclr2027/sections/experiments.tex:96-101",
+    "ICLR-14": "papers/iclr2027/sections/experiments.tex:115-124",
+    "ICLR-15": "papers/iclr2027/sections/experiments.tex:134-156",
+    "ICLR-16": "papers/iclr2027/sections/experiments.tex:160-164",
+    "ICLR-17": "papers/iclr2027/sections/experiments.tex:166-170",
+    "ICLR-19": "papers/iclr2027/sections/conclusion.tex:9-13",
+}
+
+NDSS_SOURCES = {
+    "NDSS-09": "papers/ndss2027/sections/protocol.tex:130-136",
+    "NDSS-10": "papers/ndss2027/sections/protocol.tex:145-149",
+    "NDSS-13": "papers/ndss2027/sections/evaluation.tex:18-22",
+    "NDSS-14": "papers/ndss2027/sections/evaluation.tex:26-49",
+    "NDSS-15": "papers/ndss2027/sections/evaluation.tex:46-50",
+    "NDSS-16": "papers/ndss2027/sections/evaluation.tex:52-55",
+    "NDSS-17": "papers/ndss2027/sections/evaluation.tex:59-81",
+    "NDSS-18": "papers/ndss2027/sections/evaluation.tex:77-81",
+    "NDSS-20": "papers/ndss2027/sections/evaluation.tex:83-119",
+    "NDSS-21": "papers/ndss2027/sections/evaluation.tex:121-136",
+    "NDSS-22": "papers/ndss2027/sections/evaluation.tex:140-157",
+    "NDSS-23": "papers/ndss2027/sections/evaluation.tex:160-164",
+    "NDSS-24": "papers/ndss2027/sections/conclusion.tex:54-58",
+}
+
+
+def _iclr_claim(**kwargs: Any) -> ClaimEvidence:
+    claim_id = kwargs["claim_id"]
+    return ClaimEvidence(
+        **kwargs,
+        external_source_present=True,
+        source=ICLR_SOURCES[claim_id],
+    )
+
+
+def _ndss_claim(**kwargs: Any) -> ClaimEvidence:
+    claim_id = kwargs["claim_id"]
+    return ClaimEvidence(
+        **kwargs,
+        external_source_present=True,
+        source=NDSS_SOURCES[claim_id],
+    )
 
 
 def _dp_sigma(*, epsilon: float, alpha: float, r: float = 1.0, delta: float = 1e-5) -> float:
@@ -117,7 +168,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
     alpha_sensitivity = {0.1: 142, 0.5: 38}
 
     return [
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-03",
             paper="ICLR 2027",
             basis="topological_capacity_table",
@@ -125,7 +176,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             measurements={"capacity_pct": capacity_pct, "capacity_multiple": capacity_multiple},
             note="Replays the Neural ODE capacity row used by abstract/conclusion claims.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-07",
             paper="ICLR 2027",
             basis="topological_capacity_table",
@@ -133,7 +184,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             measurements={"capacity_pct": capacity_pct},
             note="Same capacity datum referenced in the introduction contribution list.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-08",
             paper="ICLR 2027",
             basis="experiment_manifest",
@@ -141,7 +192,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             measurements={"swarm_sizes": [10, 50], "seeds": 30},
             note="Pins the stated deterministic experiment manifest.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-09",
             paper="ICLR 2027",
             basis="variance_table_consistency",
@@ -149,7 +200,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             measurements={"non_collapsed_stddev_upper_pct": 3, "rows": variance},
             note="Pins the variance-retention table and its reported stddev bound.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-12",
             paper="ICLR 2027",
             basis="variance_table_consistency",
@@ -162,7 +213,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             },
             note="Checks the no-residual SpectralSphere collapse row.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-13",
             paper="ICLR 2027",
             basis="variance_table_consistency",
@@ -174,7 +225,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             },
             note="Checks smaller-scale retention is lower and practical n=50 exceeds 50%.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-14",
             paper="ICLR 2027",
             basis="topological_capacity_table",
@@ -182,7 +233,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             measurements={"capacity_pct": capacity_pct, "capacity_multiple": capacity_multiple},
             note="Checks the 2656 percent, about 26x capacity statement.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-15",
             paper="ICLR 2027",
             basis="dp_table_consistency",
@@ -199,7 +250,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             },
             note="Pins the published DP table and flags that its absolute sigma scale differs from the stated delta=1e-5 Gaussian formula.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-16",
             paper="ICLR 2027",
             basis="ablation_table",
@@ -207,7 +258,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             measurements={"radius_sensitivity_pct": radius_sensitivity},
             note="Pins radius-sensitivity ablation values.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-17",
             paper="ICLR 2027",
             basis="ablation_table",
@@ -215,7 +266,7 @@ def _iclr_evidence() -> list[ClaimEvidence]:
             measurements={"alpha_sensitivity_pct": alpha_sensitivity},
             note="Pins residual-sensitivity ablation values.",
         ),
-        ClaimEvidence(
+        _iclr_claim(
             claim_id="ICLR-19",
             paper="ICLR 2027",
             basis="combined_table_consistency",
@@ -285,7 +336,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
     svd_n500_seconds = latency["spectral_projection_ms"] * (500 / 50) ** 3 / 1000
 
     return [
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-09",
             paper="NDSS 2027",
             basis="privacy_composition_formula",
@@ -297,7 +348,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             },
             note="Pins the stated approximate composition formula.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-10",
             paper="NDSS 2027",
             basis="spectral_noise_bound",
@@ -311,7 +362,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             },
             note="Checks the expected spectral norm inequality used in the protocol text.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-13",
             paper="NDSS 2027",
             basis="network_experiment_manifest",
@@ -320,7 +371,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             measurements={"N": [10, 50, 100, 500], "degree": 4, "gossip_peers": 3},
             note="Pins the stated network topology and gossip setup.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-14",
             paper="NDSS 2027",
             basis="protocol_correctness_table",
@@ -328,7 +379,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             measurements={"seeds": 20, "protocol_rows": protocol},
             note="Checks protocol-correctness table rows.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-15",
             paper="NDSS 2027",
             basis="protocol_correctness_table",
@@ -340,7 +391,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             },
             note="Checks false-acceptance and N=500 convergence-round statements.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-16",
             paper="NDSS 2027",
             basis="cid_integrity_table",
@@ -348,7 +399,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             measurements={"tampered_tuples_per_seed": 1000, "accepted_tampered_tuples": 0},
             note="Pins CID tamper-injection result.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-17",
             paper="NDSS 2027",
             basis="dp_accuracy_table",
@@ -356,7 +407,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             measurements={"dp_rows": dp_rows},
             note="Checks exact DP accuracy table values and max relative error.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-18",
             paper="NDSS 2027",
             basis="dp_accuracy_table",
@@ -372,22 +423,25 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             },
             note="Checks the DP accuracy and epsilon=2.0 residual reduction claim.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-20",
             paper="NDSS 2027",
             basis="pending_swebench_expectation",
-            passed=True,
+            passed=False,
             measurements={
                 "status": "expected outcome, not completed measurement",
                 "expected_delta_pct": [15, 30],
             },
-            note="Classifies this as an explicitly pending Phase 3/4 expectation.",
+            note=(
+                "PROVISIONAL - pending Phase 3/4 SWE-bench expectation only; "
+                "no completed measurement anchor."
+            ),
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-21",
             paper="NDSS 2027",
             basis="pending_swebench_placeholder_table",
-            passed=True,
+            passed=False,
             measurements={
                 "flat_routing_diversity_pct": 0,
                 "sinkhorn_crdt_routing_diversity": "approximately 0%",
@@ -395,9 +449,12 @@ def _ndss_evidence() -> list[ClaimEvidence]:
                 "fedsink_convergence": "O(log N)",
                 "status": "placeholder table",
             },
-            note="Classifies placeholder table entries without treating TBD success cells as measured.",
+            note=(
+                "PROVISIONAL - placeholder table only; no completed SWE-bench "
+                "measurement anchor."
+            ),
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-22",
             paper="NDSS 2027",
             basis="latency_table",
@@ -406,7 +463,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             measurements={"latency_ms": latency},
             note="Pins protocol latency table values.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-23",
             paper="NDSS 2027",
             basis="latency_scaling_formula",
@@ -418,7 +475,7 @@ def _ndss_evidence() -> list[ClaimEvidence]:
             },
             note="Recomputes overhead and cubic SVD scaling from the latency table.",
         ),
-        ClaimEvidence(
+        _ndss_claim(
             claim_id="NDSS-24",
             paper="NDSS 2027",
             basis="phase2_suite_historical_count",
