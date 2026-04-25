@@ -22,6 +22,111 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
+
+BRAINTRUST_PROJECT = "acgs-swarm"
+
+
+def _configure_braintrust(detail: str) -> object | None:
+    """Enable Braintrust tracing when the runtime API key is present."""
+    api_key = os.environ.get("BRAINTRUST_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    try:
+        import braintrust
+    except ImportError:
+        print("WARNING: Braintrust SDK unavailable; continuing without tracing.", file=sys.stderr)
+        return None
+
+    braintrust.init_logger(project=BRAINTRUST_PROJECT, api_key=api_key, force_login=True)
+    if detail == "deep":
+        braintrust.auto_instrument()
+    return braintrust
+
+
+@contextmanager
+def _braintrust_detail_scope(detail: str):
+    """Control third-party Braintrust instrumentation noise for the command body."""
+    if detail == "deep":
+        yield
+        return
+
+    api_key = os.environ.pop("BRAINTRUST_API_KEY", None)
+    try:
+        yield
+    finally:
+        if api_key is not None:
+            os.environ["BRAINTRUST_API_KEY"] = api_key
+
+
+def _run_with_braintrust_trace(
+    braintrust: object | None,
+    handler: Callable[[argparse.Namespace], None],
+    args: argparse.Namespace,
+) -> None:
+    if braintrust is None:
+        handler(args)
+        return
+
+    args._braintrust = braintrust
+    command = args.command or "local"
+
+    @braintrust.traced(
+        name=f"testnet_deploy.{command}",
+        type="task",
+        metadata={
+            "command": command,
+            "braintrust_project": BRAINTRUST_PROJECT,
+            "braintrust_detail": args.braintrust_detail,
+        },
+        notrace_io=True,
+    )
+    def _run_testnet_command() -> None:
+        with _braintrust_detail_scope(args.braintrust_detail):
+            handler(args)
+
+    _run_testnet_command()
+
+
+def _braintrust_span(
+    braintrust: object | None,
+    name: str,
+    *,
+    metadata: dict[str, object] | None = None,
+    metrics: dict[str, float | int | bool] | None = None,
+) -> object:
+    if braintrust is None:
+        return nullcontext(None)
+
+    event: dict[str, object] = {}
+    if metadata is not None:
+        event["metadata"] = metadata
+    if metrics is not None:
+        event["metrics"] = metrics
+    return braintrust.start_span(name=name, type="task", **event)
+
+
+def _braintrust_log(
+    braintrust: object | None,
+    *,
+    metadata: dict[str, object] | None = None,
+    metrics: dict[str, float | int | bool] | None = None,
+    output: dict[str, object] | None = None,
+) -> None:
+    if braintrust is None:
+        return
+
+    event: dict[str, object] = {}
+    if metadata is not None:
+        event["metadata"] = metadata
+    if metrics is not None:
+        event["metrics"] = metrics
+    if output is not None:
+        event["output"] = output
+    if event:
+        braintrust.current_span().log(**event)
 
 
 def _check_bittensor() -> None:
@@ -36,6 +141,7 @@ def _check_bittensor() -> None:
 
 def cmd_local(args: argparse.Namespace) -> None:
     """Run a fully local no-network testnet simulation."""
+    braintrust = getattr(args, "_braintrust", None)
     if not os.path.exists(args.constitution):
         print(f"ERROR: Constitution file not found: {args.constitution}")
         print("  Create a constitution.yaml or use the sample in examples/constitution.yaml")
@@ -54,17 +160,42 @@ def cmd_local(args: argparse.Namespace) -> None:
         )
         for idx in range(4)
     )
-    constitution = Constitution.from_yaml(args.constitution)
-    mesh = ConstitutionalMesh(
-        constitution,
-        peers_per_validation=3,
-        quorum=2,
-        seed=0,
-        use_manifold=True,
-    )
+    with _braintrust_span(
+        braintrust,
+        "load_constitution",
+        metadata={"mode": "local", "constitution_path": args.constitution},
+    ):
+        constitution = Constitution.from_yaml(args.constitution)
+    with _braintrust_span(
+        braintrust,
+        "build_constitutional_mesh",
+        metadata={
+            "mode": "local",
+            "peers_per_validation": 3,
+            "quorum": 2,
+            "use_manifold": True,
+        },
+    ):
+        mesh = ConstitutionalMesh(
+            constitution,
+            peers_per_validation=3,
+            quorum=2,
+            seed=0,
+            use_manifold=True,
+        )
+        _braintrust_log(
+            braintrust,
+            metadata={"constitutional_hash": mesh.constitutional_hash},
+        )
 
-    for agent_id in agents:
-        mesh.register_local_signer(agent_id, domain="general")
+    with _braintrust_span(
+        braintrust,
+        "register_local_agents",
+        metadata={"mode": "local", "agent_domain": "general"},
+        metrics={"agent_count": len(agents)},
+    ):
+        for agent_id in agents:
+            mesh.register_local_signer(agent_id, domain="general")
 
     print("Running local Constitutional Swarm testnet simulation...")
     print("  Mode: local (no Bittensor SDK, wallet, RPC, axon, or external network)")
@@ -75,11 +206,41 @@ def cmd_local(args: argparse.Namespace) -> None:
     accepted = 0
     rejected = 0
     for idx, (case_id, content) in enumerate(cases):
-        result = mesh.full_validation(
-            producer_id=agents[idx],
-            content=content,
-            artifact_id=f"{case_id}-artifact",
-        )
+        producer_id = agents[idx]
+        with _braintrust_span(
+            braintrust,
+            "validate_governance_case",
+            metadata={
+                "mode": "local",
+                "case_id": case_id,
+                "producer_id": producer_id,
+                "artifact_id": f"{case_id}-artifact",
+                "constitutional_hash": mesh.constitutional_hash,
+            },
+        ):
+            result = mesh.full_validation(
+                producer_id=producer_id,
+                content=content,
+                artifact_id=f"{case_id}-artifact",
+            )
+            _braintrust_log(
+                braintrust,
+                metadata={
+                    "case_id": case_id,
+                    "accepted": result.accepted,
+                    "quorum_met": result.quorum_met,
+                },
+                metrics={
+                    "votes_for": result.votes_for,
+                    "votes_against": result.votes_against,
+                },
+                output={
+                    "accepted": result.accepted,
+                    "votes_for": result.votes_for,
+                    "votes_against": result.votes_against,
+                    "quorum_met": result.quorum_met,
+                },
+            )
         if result.accepted:
             accepted += 1
         else:
@@ -94,6 +255,24 @@ def cmd_local(args: argparse.Namespace) -> None:
     manifold = mesh.manifold_summary() or {}
     final_spectral_bound = float(manifold.get("spectral_bound", 0.0))
     stable = bool(manifold.get("is_stable", False))
+    with _braintrust_span(
+        braintrust,
+        "summarize_local_testnet_run",
+        metadata={
+            "mode": "local",
+            "constitutional_hash": mesh.constitutional_hash,
+            "stable": stable,
+        },
+        metrics={
+            "agents_registered": summary["agents"],
+            "validations": summary["total_validations"],
+            "votes_cast": summary["total_votes"],
+            "accepted": accepted,
+            "rejected": rejected,
+            "final_spectral_bound": final_spectral_bound,
+        },
+    ):
+        pass
     print(
         "MEASUREMENT "
         f"agents_registered={summary['agents']} "
@@ -384,6 +563,15 @@ def main() -> None:
         action="store_true",
         help="Run the default no-network local simulation when no subcommand is given",
     )
+    parser.add_argument(
+        "--braintrust-detail",
+        choices=("summary", "deep"),
+        default="summary",
+        help=(
+            "Braintrust trace detail. 'summary' records high-level governance spans; "
+            "'deep' also enables SDK auto-instrumentation for noisy internal debugging."
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     # Register
@@ -412,18 +600,19 @@ def main() -> None:
     val.add_argument("--epoch-seconds", type=int, default=60)
 
     args = parser.parse_args()
+    braintrust = _configure_braintrust(args.braintrust_detail)
 
     if args.command is None:
         if args.constitution is None:
             parser.print_help(sys.stderr)
             sys.exit(2)
-        cmd_local(args)
+        _run_with_braintrust_trace(braintrust, cmd_local, args)
     elif args.command == "register":
-        cmd_register(args)
+        _run_with_braintrust_trace(braintrust, cmd_register, args)
     elif args.command == "miner":
-        cmd_miner(args)
+        _run_with_braintrust_trace(braintrust, cmd_miner, args)
     elif args.command == "validator":
-        cmd_validator(args)
+        _run_with_braintrust_trace(braintrust, cmd_validator, args)
 
 
 if __name__ == "__main__":
