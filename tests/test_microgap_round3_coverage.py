@@ -13,11 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -33,22 +30,23 @@ class TestPrivacyAccountantRDPMathError:
         from constitutional_swarm.privacy_accountant import _rdp_to_epsilon_balle2020
 
         # delta=0 causes math.log(0) → ValueError → except (ValueError, ZeroDivisionError): continue
-        eps, alpha = _rdp_to_epsilon_balle2020(
+        eps, _ = _rdp_to_epsilon_balle2020(
             rdp_values=[1.0],
             alphas=[2.0],
             delta=0.0,
         )
         # All candidates hit the except branch; best_eps stays inf
         import math
+
         assert math.isinf(eps)
 
     def test_negative_rdp_triggers_value_error_continue(self):
         """Negative RDP value causes log of negative → ValueError → except continues."""
+        # Very large negative r makes delta * a term produce log domain error
+
         from constitutional_swarm.privacy_accountant import _rdp_to_epsilon_balle2020
 
-        # Very large negative r makes delta * a term produce log domain error
-        import math
-        eps, alpha = _rdp_to_epsilon_balle2020(
+        eps, _ = _rdp_to_epsilon_balle2020(
             rdp_values=[float("-inf")],
             alphas=[2.0],
             delta=1e-5,
@@ -65,8 +63,8 @@ class TestSwarmCoordinatorGossipImportError:
 
     def test_run_gossip_raises_import_error_without_transport(self):
         """Mock gossip_protocol import failure → ImportError re-raised with message."""
-        from constitutional_swarm.swe_bench.swarm_coordinator import SwarmCoordinator
         from constitutional_swarm.swe_bench.harness import SWEBenchAgent
+        from constitutional_swarm.swe_bench.swarm_coordinator import SwarmCoordinator
 
         mock_agent = Mock(spec=SWEBenchAgent)
         coordinator = SwarmCoordinator(agents=[mock_agent])
@@ -108,7 +106,9 @@ class TestCodexAgentOSErrorOnRead:
         }
 
         with (
-            patch("constitutional_swarm.swe_bench.codex_agent.subprocess.run", return_value=mock_proc),
+            patch(
+                "constitutional_swarm.swe_bench.codex_agent.subprocess.run", return_value=mock_proc
+            ),
             patch("pathlib.Path.read_text", side_effect=OSError("permission denied")),
             patch("pathlib.Path.unlink"),
         ):
@@ -127,7 +127,7 @@ class TestLocalHarnessPatchFallbackConcat:
 
     def test_apply_patch_patch_command_fails_concatenates_output(self):
         """All git apply variants fail → patch(1) found → patch fails → out concatenated."""
-        from constitutional_swarm.swe_bench.local_harness import LocalSWEBenchHarness, HarnessResult
+        from constitutional_swarm.swe_bench.local_harness import HarnessResult, LocalSWEBenchHarness
 
         harness = LocalSWEBenchHarness()
         result = HarnessResult(instance_id="test-1")
@@ -156,7 +156,7 @@ class TestLocalHarnessPatchFallbackConcat:
 
     def test_apply_patch_patch_command_fails_log_tail_has_both_outputs(self):
         """Verify the combined log tail includes both git apply and patch(1) output."""
-        from constitutional_swarm.swe_bench.local_harness import LocalSWEBenchHarness, HarnessResult
+        from constitutional_swarm.swe_bench.local_harness import HarnessResult, LocalSWEBenchHarness
 
         harness = LocalSWEBenchHarness()
         result = HarnessResult(instance_id="test-2")
@@ -195,11 +195,14 @@ class TestSettlementStoreEmptyLineContinue:
         )
 
         # Write a valid record
-        valid_line = json.dumps({
-            "assignment": record.assignment,
-            "result": record.result,
-            "constitutional_hash": record.constitutional_hash,
-        }, separators=(",", ":"))
+        valid_line = json.dumps(
+            {
+                "assignment": record.assignment,
+                "result": record.result,
+                "constitutional_hash": record.constitutional_hash,
+            },
+            separators=(",", ":"),
+        )
 
         # File has: empty line, valid record, trailing empty line → line 91 hit twice
         store_file.write_text("\n" + valid_line + "\n\n", encoding="utf-8")

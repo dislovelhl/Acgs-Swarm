@@ -315,10 +315,12 @@ class TestMultipleRevealsProtection:
 
     def _make_vote(self, choice=None):
         """Helper: build signed commit + matching reveal for given choice."""
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         from constitutional_swarm.private_vote import (
-            BallotChoice, build_commit,
+            BallotChoice,
+            build_commit,
         )
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
         sk = Ed25519PrivateKey.generate()
         choice = choice or BallotChoice.YEA
         commit, reveal = build_commit(
@@ -333,7 +335,9 @@ class TestMultipleRevealsProtection:
     def test_invalid_first_reveal_falls_back_to_valid(self):
         """An attacker-injected bad reveal must not block the valid reveal."""
         from constitutional_swarm.private_vote import (
-            BallotChoice, RevealRecord, tally,
+            BallotChoice,
+            RevealRecord,
+            tally,
         )
 
         commit, valid_reveal = self._make_vote(BallotChoice.YEA)
@@ -361,7 +365,9 @@ class TestMultipleRevealsProtection:
     def test_only_invalid_reveals_causes_rejection(self):
         """If ALL reveals for a commit are invalid, the commit must be rejected."""
         from constitutional_swarm.private_vote import (
-            BallotChoice, RevealRecord, tally,
+            BallotChoice,
+            RevealRecord,
+            tally,
         )
 
         commit, valid_reveal = self._make_vote(BallotChoice.YEA)
@@ -383,13 +389,18 @@ class TestSubmitCommitV2Validation:
 
     def _box(self):
         from constitutional_swarm.private_vote import PrivateBallotBox
+
         return PrivateBallotBox(epoch=EPOCH, subject=SUBJECT)
 
     def _commit(self, proof_scheme=None, validity_proof=None):
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         from constitutional_swarm.private_vote import (
-            BallotChoice, CommitRecord, build_commit, _V2_VERSION,
+            _V2_VERSION,
+            BallotChoice,
+            CommitRecord,
+            build_commit,
         )
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
         sk = Ed25519PrivateKey.generate()
         commit, _ = build_commit(
             voter_private_key=sk,
@@ -413,6 +424,7 @@ class TestSubmitCommitV2Validation:
 
     def test_v2_proof_scheme_without_validity_proof_rejected(self):
         from constitutional_swarm.private_vote import InvalidCommitError
+
         box = self._box()
         bad = self._commit(proof_scheme="zkp_v1", validity_proof=None)
         with pytest.raises(InvalidCommitError, match="both be set or both absent"):
@@ -420,6 +432,7 @@ class TestSubmitCommitV2Validation:
 
     def test_v2_validity_proof_without_proof_scheme_rejected(self):
         from constitutional_swarm.private_vote import InvalidCommitError
+
         box = self._box()
         bad = self._commit(proof_scheme=None, validity_proof=b"proof_bytes")
         with pytest.raises(InvalidCommitError, match="both be set or both absent"):

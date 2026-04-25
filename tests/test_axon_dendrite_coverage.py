@@ -1,12 +1,13 @@
 """Tests for previously-uncovered branches in axon_server.py and dendrite_client.py."""
+
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from constitutional_swarm.bittensor.synapse_adapter import GovernanceDeliberation
 
-
 # ── axon_server.py missing branches ─────────────────────────────────────────
+
 
 class TestAxonServerMissingBranches:
     @pytest.fixture
@@ -70,18 +71,23 @@ class TestAxonServerMissingBranches:
 
     def test_verify_missing_constitution_hash(self, axon_server):
         """Lines 101-102: verify() with empty constitution_hash."""
-        syn = GovernanceDeliberation(task_id="t", task_dag_json="{}", constitution_hash="", domain="d")
+        syn = GovernanceDeliberation(
+            task_id="t", task_dag_json="{}", constitution_hash="", domain="d"
+        )
         with pytest.raises(ValueError, match="constitution_hash"):
             axon_server.verify(syn)
 
     def test_verify_missing_task_dag_json(self, axon_server):
         """Lines 103-104: verify() with empty task_dag_json."""
-        syn = GovernanceDeliberation(task_id="t", task_dag_json="", constitution_hash="h", domain="d")
+        syn = GovernanceDeliberation(
+            task_id="t", task_dag_json="", constitution_hash="h", domain="d"
+        )
         with pytest.raises(ValueError, match="task_dag_json"):
             axon_server.verify(syn)
 
 
 # ── dendrite_client.py missing branches ──────────────────────────────────────
+
 
 class TestDendriteClientMissingBranches:
     @pytest.fixture

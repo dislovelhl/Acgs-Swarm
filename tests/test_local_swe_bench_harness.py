@@ -208,9 +208,12 @@ def test_harness_apply_falls_back_to_patch1(tmp_path) -> None:
             (["pytest", "test_other"], 0, "== 1 passed in 0.01s =="),
         ]
     )
-    with patch("subprocess.run", side_effect=runner), patch(
-        "constitutional_swarm.swe_bench.local_harness.shutil.which",
-        return_value="/usr/bin/patch",
+    with (
+        patch("subprocess.run", side_effect=runner),
+        patch(
+            "constitutional_swarm.swe_bench.local_harness.shutil.which",
+            return_value="/usr/bin/patch",
+        ),
     ):
         result = harness.evaluate(_INSTANCE, patch=_PATCH)
     assert result.applied is True
@@ -342,9 +345,7 @@ def test_harness_env_isolation_install_failure_is_reported(tmp_path) -> None:
 
 def test_harness_env_isolation_uses_uv_for_python_version(tmp_path) -> None:
     """With python_version set, harness uses `uv python install` + `uv venv --python`."""
-    harness = LocalSWEBenchHarness(
-        work_dir=tmp_path, env_isolation=True, python_version="3.10"
-    )
+    harness = LocalSWEBenchHarness(work_dir=tmp_path, env_isolation=True, python_version="3.10")
     runner = _FakeRunner(
         [
             (["clone", "https://github.com"], 0, ""),
@@ -359,10 +360,13 @@ def test_harness_env_isolation_uses_uv_for_python_version(tmp_path) -> None:
             (["/bin/python", "-m", "pytest", "test_other"], 0, "== 1 passed in 0.01s =="),
         ]
     )
-    with patch(
-        "constitutional_swarm.swe_bench.local_harness.shutil.which",
-        return_value="/usr/bin/uv",
-    ), patch("subprocess.run", side_effect=runner):
+    with (
+        patch(
+            "constitutional_swarm.swe_bench.local_harness.shutil.which",
+            return_value="/usr/bin/uv",
+        ),
+        patch("subprocess.run", side_effect=runner),
+    ):
         result = harness.evaluate(_INSTANCE, patch=_PATCH)
     assert result.applied is True
     assert result.resolved is True
@@ -375,9 +379,7 @@ def test_harness_env_isolation_uses_uv_for_python_version(tmp_path) -> None:
 
 def test_harness_env_isolation_uv_missing_is_reported(tmp_path) -> None:
     """If python_version is requested but uv is not on PATH, surface env-stage failure."""
-    harness = LocalSWEBenchHarness(
-        work_dir=tmp_path, env_isolation=True, python_version="3.10"
-    )
+    harness = LocalSWEBenchHarness(work_dir=tmp_path, env_isolation=True, python_version="3.10")
     runner = _FakeRunner(
         [
             (["clone", "https://github.com"], 0, ""),
@@ -386,10 +388,13 @@ def test_harness_env_isolation_uv_missing_is_reported(tmp_path) -> None:
             (["apply", "--index"], 0, ""),
         ]
     )
-    with patch(
-        "constitutional_swarm.swe_bench.local_harness.shutil.which",
-        return_value=None,
-    ), patch("subprocess.run", side_effect=runner):
+    with (
+        patch(
+            "constitutional_swarm.swe_bench.local_harness.shutil.which",
+            return_value=None,
+        ),
+        patch("subprocess.run", side_effect=runner),
+    ):
         result = harness.evaluate(_INSTANCE, patch=_PATCH)
     assert result.applied is True
     assert result.resolved is False
@@ -442,10 +447,7 @@ def test_parse_django_summary_ok_and_failed() -> None:
     ok = "......\n----------------------------------------------------------------------\nRan 6 tests in 0.123s\n\nOK\n"
     assert _parse_django_summary(ok) == (6, 0)
 
-    mixed = (
-        ".F.E..\n----------\nRan 6 tests in 0.42s\n\n"
-        "FAILED (failures=1, errors=1, skipped=2)\n"
-    )
+    mixed = ".F.E..\n----------\nRan 6 tests in 0.42s\n\nFAILED (failures=1, errors=1, skipped=2)\n"
     # 6 total - (1 failure + 1 error) = 4 passed
     assert _parse_django_summary(mixed) == (4, 2)
 

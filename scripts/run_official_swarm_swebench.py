@@ -96,7 +96,10 @@ def build_per_instance_comparison(
 def disagreement_severity(disagreement: str | None) -> tuple[str, str]:
     if disagreement == "local_unresolved_but_official_resolved":
         return "🔴 HIGH", "high"
-    if disagreement in {"local_resolved_but_official_unresolved", "local_resolved_but_official_error"}:
+    if disagreement in {
+        "local_resolved_but_official_unresolved",
+        "local_resolved_but_official_error",
+    }:
         return "🟠 MEDIUM", "medium"
     return "⚪ NONE", "none"
 
@@ -378,9 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     tmp_dir = Path(tempfile.gettempdir())
     swarm_output = args.swarm_output or (tmp_dir / f"{args.run_id}_swarm.json")
-    predictions_output = args.predictions_output or (
-        tmp_dir / f"{args.run_id}_predictions.jsonl"
-    )
+    predictions_output = args.predictions_output or (tmp_dir / f"{args.run_id}_predictions.jsonl")
     final_report_output = args.final_report_output or (
         tmp_dir / f"{args.run_id}_final_report_bundle.json"
     )

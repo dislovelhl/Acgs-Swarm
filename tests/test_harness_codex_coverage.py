@@ -1,19 +1,15 @@
 """Coverage tests for harness.py and codex_agent.py missing branches."""
+
 from __future__ import annotations
 
-import subprocess
-import tempfile
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from constitutional_swarm.swe_bench.harness import (
     SWEBenchHarness,
     load_swe_bench_lite,
 )
-
 
 # ---------------------------------------------------------------------------
 # harness.py: Strategy 2 — swebench package path (lines 76-81, 84-85)
@@ -22,19 +18,19 @@ from constitutional_swarm.swe_bench.harness import (
 
 def test_load_swe_bench_lite_swebench_package_path(tmp_path):
     """When swebench package is importable, load_swebench_dataset is used (lines 76-81)."""
-    fake_tasks = [
-        {"instance_id": f"task-{i}", "problem_statement": "fix it"}
-        for i in range(5)
-    ]
+    fake_tasks = [{"instance_id": f"task-{i}", "problem_statement": "fix it"} for i in range(5)]
 
     mock_swebench = MagicMock()
     mock_swebench.harness.utils.load_swebench_dataset.return_value = fake_tasks
 
-    with patch.dict("sys.modules", {
-        "swebench": mock_swebench,
-        "swebench.harness": mock_swebench.harness,
-        "swebench.harness.utils": mock_swebench.harness.utils,
-    }):
+    with patch.dict(
+        "sys.modules",
+        {
+            "swebench": mock_swebench,
+            "swebench.harness": mock_swebench.harness,
+            "swebench.harness.utils": mock_swebench.harness.utils,
+        },
+    ):
         # Point data_dir to tmp_path so local JSONL strategy doesn't find a file
         result = load_swe_bench_lite(data_dir=tmp_path, max_tasks=3)
 
@@ -45,7 +41,6 @@ def test_load_swe_bench_lite_swebench_package_path(tmp_path):
 
 def test_load_swe_bench_lite_swebench_exception_path(tmp_path):
     """When swebench import raises non-ImportError, warning is logged (lines 84-85)."""
-    import constitutional_swarm.swe_bench.harness as h
 
     # We simulate the case where swebench IS importable but load_swebench_dataset
     # raises a RuntimeError (not ImportError), triggering the except Exception branch.
@@ -56,6 +51,7 @@ def test_load_swe_bench_lite_swebench_exception_path(tmp_path):
         return original_import(name, *args, **kwargs)
 
     import builtins
+
     original_import = builtins.__import__
 
     # This test verifies the except Exception path is reachable by checking
@@ -68,11 +64,14 @@ def test_load_swe_bench_lite_swebench_exception_path(tmp_path):
     mock_swebench.harness = MagicMock()
     mock_swebench.harness.utils = mock_utils
 
-    with patch.dict("sys.modules", {
-        "swebench": mock_swebench,
-        "swebench.harness": mock_swebench.harness,
-        "swebench.harness.utils": mock_utils,
-    }):
+    with patch.dict(
+        "sys.modules",
+        {
+            "swebench": mock_swebench,
+            "swebench.harness": mock_swebench.harness,
+            "swebench.harness.utils": mock_utils,
+        },
+    ):
         result = load_swe_bench_lite(data_dir=tmp_path)
 
     # Falls back to empty list after exception
@@ -81,9 +80,7 @@ def test_load_swe_bench_lite_swebench_exception_path(tmp_path):
 
 def test_load_swe_bench_lite_max_tasks_with_swebench(tmp_path):
     """max_tasks truncation in strategy 2 (line 79-80)."""
-    fake_tasks = [
-        {"instance_id": f"task-{i}"} for i in range(10)
-    ]
+    fake_tasks = [{"instance_id": f"task-{i}"} for i in range(10)]
 
     mock_utils = MagicMock()
     mock_utils.load_swebench_dataset.return_value = fake_tasks
@@ -92,11 +89,14 @@ def test_load_swe_bench_lite_max_tasks_with_swebench(tmp_path):
     mock_swebench.harness = MagicMock()
     mock_swebench.harness.utils = mock_utils
 
-    with patch.dict("sys.modules", {
-        "swebench": mock_swebench,
-        "swebench.harness": mock_swebench.harness,
-        "swebench.harness.utils": mock_utils,
-    }):
+    with patch.dict(
+        "sys.modules",
+        {
+            "swebench": mock_swebench,
+            "swebench.harness": mock_swebench.harness,
+            "swebench.harness.utils": mock_utils,
+        },
+    ):
         result = load_swe_bench_lite(data_dir=tmp_path, max_tasks=4)
 
     assert isinstance(result, list)
@@ -170,7 +170,7 @@ def test_codex_agent_generate_patch_oserror_on_read():
     agent.extra_args = []
     agent.codex_binary = "/usr/bin/codex"
 
-    task = {
+    _ = {
         "instance_id": "test-3",
         "repo": "a/b",
         "base_commit": "abc",
@@ -181,7 +181,9 @@ def test_codex_agent_generate_patch_oserror_on_read():
 
     mock_proc = MagicMock()
     mock_proc.returncode = 0
-    mock_proc.stdout = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    mock_proc.stdout = (
+        "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
     mock_proc.stderr = ""
 
     mock_path = MagicMock(spec=Path)
@@ -190,10 +192,11 @@ def test_codex_agent_generate_patch_oserror_on_read():
     # unlink should succeed
     mock_path.unlink.return_value = None
 
-    with patch("subprocess.run", return_value=mock_proc), \
-         patch("tempfile.NamedTemporaryFile") as mock_tmp, \
-         patch("pathlib.Path") as mock_path_cls:
-
+    with (
+        patch("subprocess.run", return_value=mock_proc),
+        patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        patch("pathlib.Path") as mock_path_cls,
+    ):
         mock_ctx = MagicMock()
         mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
         mock_ctx.__exit__ = MagicMock(return_value=False)
@@ -301,7 +304,7 @@ def test_codex_agent_generate_patch_oserror_on_unlink():
                 mock_ntf.return_value = mock_ntf_ctx
 
                 try:
-                    patch_text, stats = agent._generate_patch(task)
+                    patch_text, _ = agent._generate_patch(task)
                     # Should not raise even if unlink fails
                     assert isinstance(patch_text, str)
                 except Exception:

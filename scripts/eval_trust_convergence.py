@@ -39,20 +39,14 @@ _REPO_SRC = Path(__file__).resolve().parent.parent / "src"
 if _REPO_SRC.exists() and str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
 
-from constitutional_swarm.spectral_sphere import SpectralSphereManifold  # noqa: E402
+from constitutional_swarm.spectral_sphere import SpectralSphereManifold
 
 
 def _l2_delta(
     a: tuple[tuple[float, ...], ...],
     b: tuple[tuple[float, ...], ...],
 ) -> float:
-    return math.sqrt(
-        sum(
-            (a[i][j] - b[i][j]) ** 2
-            for i in range(len(a))
-            for j in range(len(a))
-        )
-    )
+    return math.sqrt(sum((a[i][j] - b[i][j]) ** 2 for i in range(len(a)) for j in range(len(a))))
 
 
 def _variance(matrix: tuple[tuple[float, ...], ...]) -> float:
@@ -64,7 +58,7 @@ def _variance(matrix: tuple[tuple[float, ...], ...]) -> float:
 
 
 def run(seed: int, agents: int, steps: int, tol: float) -> dict:
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     manifold = SpectralSphereManifold(num_agents=agents)
 
     prev: tuple[tuple[float, ...], ...] | None = None
@@ -124,16 +118,24 @@ def main() -> int:
     p.add_argument("--tol", type=float, default=1e-4)
     args = p.parse_args()
 
-    seeds = [args.seed] if args.seed is not None else [int(s) for s in args.seeds.split(",") if s.strip()]
+    seeds = (
+        [args.seed]
+        if args.seed is not None
+        else [int(s) for s in args.seeds.split(",") if s.strip()]
+    )
     runs = [run(s, args.agents, args.steps, args.tol) for s in seeds]
     mean_score = sum(r["score"] for r in runs) / len(runs)
     all_stable = all(r["is_stable"] for r in runs)
-    print(json.dumps({
-        "pass": bool(all_stable),
-        "score": mean_score,
-        "per_seed": runs,
-        "seeds": seeds,
-    }))
+    print(
+        json.dumps(
+            {
+                "pass": bool(all_stable),
+                "score": mean_score,
+                "per_seed": runs,
+                "seeds": seeds,
+            }
+        )
+    )
     return 0
 
 
