@@ -1,16 +1,14 @@
 """Additional coverage tests for local_harness.py missing branches."""
+
 from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from constitutional_swarm.swe_bench.local_harness import (
-    HarnessResult,
     LocalSWEBenchHarness,
     _as_list,
     _parse_django_summary,
@@ -203,7 +201,7 @@ def test_load_instances_datasets_success():
             # Directly patch the import inside the function
             import constitutional_swarm.swe_bench.local_harness as lh
 
-            original = getattr(lh, "load_dataset", None)
+            _ = getattr(lh, "load_dataset", None)
             try:
                 # Patch the module-level name that gets resolved during import
                 with patch(
@@ -214,7 +212,7 @@ def test_load_instances_datasets_success():
                         else __import__(name, *args, **kwargs)
                     ),
                 ):
-                    result = load_instances(limit=2)
+                    _ = load_instances(limit=2)
             except Exception:
                 pass  # ImportError fallback is fine here
 
@@ -249,7 +247,7 @@ def test_harness_worktree_clone_failure(tmp_path):
     harness = LocalSWEBenchHarness(work_dir=tmp_path)
     runner = _FakeRunner(
         [
-            (["clone", "https://github.com"], 0, ""),   # initial full clone
+            (["clone", "https://github.com"], 0, ""),  # initial full clone
             (["clone", "--no-hardlinks"], 1, "clone error output"),  # worktree clone fails
         ]
     )
@@ -272,8 +270,8 @@ def test_harness_checkout_failure(tmp_path):
             (["clone", "https://github.com"], 0, ""),
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 1, "checkout error"),  # first checkout fails
-            (["fetch", "origin"], 0, ""),                     # fetch for retry
-            (["checkout", "--detach"], 1, "checkout error 2"), # retry also fails
+            (["fetch", "origin"], 0, ""),  # fetch for retry
+            (["checkout", "--detach"], 1, "checkout error 2"),  # retry also fails
         ]
     )
     with patch("subprocess.run", side_effect=runner):
@@ -296,8 +294,8 @@ def test_harness_existing_cache_triggers_fetch(tmp_path):
 
     runner = _FakeRunner(
         [
-            (["fetch", "--tags", "--prune"], 0, ""),      # fetch for existing cache
-            (["clone", "--no-hardlinks"], 0, ""),          # worktree clone
+            (["fetch", "--tags", "--prune"], 0, ""),  # fetch for existing cache
+            (["clone", "--no-hardlinks"], 0, ""),  # worktree clone
             (["checkout", "--detach"], 0, ""),
             (["apply", "--index"], 0, ""),
             (["-m", "pytest"], 0, "====== 1 passed in 0.1s ======"),
@@ -305,7 +303,7 @@ def test_harness_existing_cache_triggers_fetch(tmp_path):
         ]
     )
     with patch("subprocess.run", side_effect=runner):
-        result = harness.evaluate(_INSTANCE, patch=_PATCH)
+        _ = harness.evaluate(_INSTANCE, patch=_PATCH)
     # Verify fetch was called
     calls_joined = [" ".join(c) for c in runner.calls]
     assert any("fetch" in c and "prune" in c for c in calls_joined)
@@ -378,12 +376,11 @@ def test_harness_django_collection_error_counts_all_as_failed(tmp_path):
 
 def test_harness_venv_cleanup_in_finally(tmp_path):
     """venv_path is cleaned up in finally block even when tests succeed."""
-    harness = LocalSWEBenchHarness(
-        work_dir=tmp_path, env_isolation=True, python_version="3.10"
-    )
+    harness = LocalSWEBenchHarness(work_dir=tmp_path, env_isolation=True, python_version="3.10")
 
     # Pre-create the venv_path so the finally block's exists() check passes
     from constitutional_swarm.swe_bench.local_harness import _safe_id
+
     venv_path = harness.env_cache_dir / _safe_id("demo__demo-1")
     venv_path.mkdir(parents=True, exist_ok=True)
 
@@ -408,13 +405,15 @@ def test_harness_venv_cleanup_in_finally(tmp_path):
     def tracking_rmtree(path, **kwargs):
         rmtree_calls.append(str(path))
 
-    with patch(
-        "constitutional_swarm.swe_bench.local_harness.shutil.which",
-        return_value="/usr/bin/uv",
-    ), patch("subprocess.run", side_effect=runner), patch.object(
-        lh.shutil, "rmtree", side_effect=tracking_rmtree
+    with (
+        patch(
+            "constitutional_swarm.swe_bench.local_harness.shutil.which",
+            return_value="/usr/bin/uv",
+        ),
+        patch("subprocess.run", side_effect=runner),
+        patch.object(lh.shutil, "rmtree", side_effect=tracking_rmtree),
     ):
-        result = harness.evaluate(_INSTANCE, patch=_PATCH)
+        _ = harness.evaluate(_INSTANCE, patch=_PATCH)
 
     # venv cleanup should have been called for venv_path
     assert any("demo__demo-1" in p for p in rmtree_calls)
@@ -427,9 +426,7 @@ def test_harness_venv_cleanup_in_finally(tmp_path):
 
 def test_ensure_env_uv_python_install_fails(tmp_path):
     """uv python install failure → result.error set, returns early (lines 446-449)."""
-    harness = LocalSWEBenchHarness(
-        work_dir=tmp_path, env_isolation=True, python_version="3.10"
-    )
+    harness = LocalSWEBenchHarness(work_dir=tmp_path, env_isolation=True, python_version="3.10")
     runner = _FakeRunner(
         [
             (["clone", "https://github.com"], 0, ""),
@@ -439,10 +436,13 @@ def test_ensure_env_uv_python_install_fails(tmp_path):
             (["uv", "python", "install"], 1, "uv install error"),  # fails
         ]
     )
-    with patch(
-        "constitutional_swarm.swe_bench.local_harness.shutil.which",
-        return_value="/usr/bin/uv",
-    ), patch("subprocess.run", side_effect=runner):
+    with (
+        patch(
+            "constitutional_swarm.swe_bench.local_harness.shutil.which",
+            return_value="/usr/bin/uv",
+        ),
+        patch("subprocess.run", side_effect=runner),
+    ):
         result = harness.evaluate(_INSTANCE, patch=_PATCH)
     assert result.error is not None
     assert "uv python install" in result.error
@@ -451,23 +451,24 @@ def test_ensure_env_uv_python_install_fails(tmp_path):
 
 def test_ensure_env_uv_venv_fails(tmp_path):
     """uv venv failure → result.error set (lines 455-458)."""
-    harness = LocalSWEBenchHarness(
-        work_dir=tmp_path, env_isolation=True, python_version="3.10"
-    )
+    harness = LocalSWEBenchHarness(work_dir=tmp_path, env_isolation=True, python_version="3.10")
     runner = _FakeRunner(
         [
             (["clone", "https://github.com"], 0, ""),
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 0, ""),
             (["apply", "--index"], 0, ""),
-            (["uv", "python", "install"], 0, ""),   # install ok
-            (["uv", "venv"], 1, "venv error"),        # venv fails
+            (["uv", "python", "install"], 0, ""),  # install ok
+            (["uv", "venv"], 1, "venv error"),  # venv fails
         ]
     )
-    with patch(
-        "constitutional_swarm.swe_bench.local_harness.shutil.which",
-        return_value="/usr/bin/uv",
-    ), patch("subprocess.run", side_effect=runner):
+    with (
+        patch(
+            "constitutional_swarm.swe_bench.local_harness.shutil.which",
+            return_value="/usr/bin/uv",
+        ),
+        patch("subprocess.run", side_effect=runner),
+    ):
         result = harness.evaluate(_INSTANCE, patch=_PATCH)
     assert result.error is not None
     assert "uv venv" in result.error
@@ -510,8 +511,8 @@ def test_ensure_env_pip_bootstrap_fails(tmp_path):
             (["clone", "--no-hardlinks"], 0, ""),
             (["checkout", "--detach"], 0, ""),
             (["apply", "--index"], 0, ""),
-            (["-m", "venv"], 0, ""),               # venv ok
-            (["pip", "install"], 1, "pip error"),   # pip bootstrap fails
+            (["-m", "venv"], 0, ""),  # venv ok
+            (["pip", "install"], 1, "pip error"),  # pip bootstrap fails
         ]
     )
     with patch("subprocess.run", side_effect=runner):
@@ -528,9 +529,7 @@ def test_ensure_env_pip_bootstrap_fails(tmp_path):
 
 def test_harness_env_isolation_test_python_none_returns_early(tmp_path):
     """When _ensure_env returns test_python=None, evaluate returns early (line 217)."""
-    harness = LocalSWEBenchHarness(
-        work_dir=tmp_path, env_isolation=True, python_version="3.10"
-    )
+    harness = LocalSWEBenchHarness(work_dir=tmp_path, env_isolation=True, python_version="3.10")
     runner = _FakeRunner(
         [
             (["clone", "https://github.com"], 0, ""),
@@ -540,10 +539,13 @@ def test_harness_env_isolation_test_python_none_returns_early(tmp_path):
             (["uv", "python", "install"], 1, "install failed"),  # causes early return
         ]
     )
-    with patch(
-        "constitutional_swarm.swe_bench.local_harness.shutil.which",
-        return_value="/usr/bin/uv",
-    ), patch("subprocess.run", side_effect=runner):
+    with (
+        patch(
+            "constitutional_swarm.swe_bench.local_harness.shutil.which",
+            return_value="/usr/bin/uv",
+        ),
+        patch("subprocess.run", side_effect=runner),
+    ):
         result = harness.evaluate(_INSTANCE, patch=_PATCH)
     # Should return early without running tests
     assert result.error is not None

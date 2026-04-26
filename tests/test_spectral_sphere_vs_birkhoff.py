@@ -15,10 +15,7 @@ CYCLES = 25
 def _seeded_updates(seed: int) -> list[tuple[int, int, float]]:
     rng = random.Random(seed)
     return [
-        (i, j, rng.uniform(0.0, 1.0))
-        for i in range(N_AGENTS)
-        for j in range(N_AGENTS)
-        if i != j
+        (i, j, rng.uniform(0.0, 1.0)) for i in range(N_AGENTS) for j in range(N_AGENTS) if i != j
     ]
 
 
@@ -56,8 +53,7 @@ def _numeric_rank(matrix: tuple[tuple[float, ...], ...], *, tol: float = 1e-5) -
             if abs(factor) <= tol:
                 continue
             rows[row_idx] = [
-                value - factor * rows[rank][idx]
-                for idx, value in enumerate(rows[row_idx])
+                value - factor * rows[rank][idx] for idx, value in enumerate(rows[row_idx])
             ]
         rank += 1
         if rank == height:

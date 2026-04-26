@@ -1,10 +1,12 @@
 """Tests for edge cases in privacy_accountant.py — overflow safety, validation, introspection."""
+
 import math
-import pytest
 from unittest.mock import patch
 
+import pytest
 
 # ── _rdp_subsampled_gaussian branches ───────────────────────────────────────
+
 
 class TestRdpSubsampledGaussianBranches:
     def test_alpha_lte_1_returns_zero(self):
@@ -16,7 +18,7 @@ class TestRdpSubsampledGaussianBranches:
 
     def test_sample_rate_gte_1_delegates_to_gaussian(self):
         """Line 80-81: sample_rate >= 1.0 delegates to _rdp_gaussian."""
-        from constitutional_swarm.privacy_accountant import _rdp_subsampled_gaussian, _rdp_gaussian
+        from constitutional_swarm.privacy_accountant import _rdp_gaussian, _rdp_subsampled_gaussian
 
         result = _rdp_subsampled_gaussian(alpha=3.0, noise_multiplier=2.0, sample_rate=1.0)
         assert result == pytest.approx(_rdp_gaussian(3.0, 2.0))
@@ -62,23 +64,25 @@ class TestRdpSubsampledGaussianBranches:
 
 # ── _rdp_to_epsilon_balle2020 error guards ───────────────────────────────────
 
+
 class TestRdpToEpsilonBalle2020:
     def test_all_alphas_skipped_returns_inf(self):
         """Lines 121-126: all alphas <= 1.01 → best_eps stays inf."""
         from constitutional_swarm.privacy_accountant import _rdp_to_epsilon_balle2020
 
-        eps, alpha = _rdp_to_epsilon_balle2020([0.1], [1.005], delta=1e-5)
+        eps, _ = _rdp_to_epsilon_balle2020([0.1], [1.005], delta=1e-5)
         assert eps == math.inf
 
     def test_normal_path_returns_finite(self):
         """Sanity: normal alpha > 1.01 path returns finite epsilon."""
         from constitutional_swarm.privacy_accountant import _rdp_to_epsilon_balle2020
 
-        eps, alpha = _rdp_to_epsilon_balle2020([0.5, 1.0], [2.0, 3.0], delta=1e-5)
+        eps, _ = _rdp_to_epsilon_balle2020([0.5, 1.0], [2.0, 3.0], delta=1e-5)
         assert math.isfinite(eps)
 
 
 # ── PrivacyAccountant __post_init__ validation ───────────────────────────────
+
 
 class TestPrivacyAccountantValidation:
     def test_epsilon_zero_raises(self):
@@ -118,6 +122,7 @@ class TestPrivacyAccountantValidation:
 
 
 # ── PrivacyAccountant spend() validation ─────────────────────────────────────
+
 
 class TestPrivacyAccountantSpendValidation:
     def test_spend_zero_sensitivity_raises(self):
@@ -171,6 +176,7 @@ class TestPrivacyAccountantSpendValidation:
 
 # ── PrivacyAccountant introspection ──────────────────────────────────────────
 
+
 class TestPrivacyAccountantIntrospection:
     def test_budget_fraction_used_after_spends(self):
         """Lines 281-282: budget_fraction_used returns (0, 1] after spending."""
@@ -197,8 +203,13 @@ class TestPrivacyAccountantIntrospection:
         pa = PrivacyAccountant(epsilon=10.0, delta=1e-5)
         summary = pa.summary()
         for key in [
-            "epsilon_total", "epsilon_spent", "epsilon_remaining", "delta",
-            "num_mechanism_invocations", "budget_fraction_used", "exhausted",
+            "epsilon_total",
+            "epsilon_spent",
+            "epsilon_remaining",
+            "delta",
+            "num_mechanism_invocations",
+            "budget_fraction_used",
+            "exhausted",
         ]:
             assert key in summary
 
@@ -235,7 +246,7 @@ class TestRdpOverflowBranchNonNegative:
 
     def test_returns_at_most_eps_base(self):
         """Privacy amplification can only reduce RDP, never increase it."""
-        from constitutional_swarm.privacy_accountant import _rdp_subsampled_gaussian, _rdp_gaussian
+        from constitutional_swarm.privacy_accountant import _rdp_gaussian, _rdp_subsampled_gaussian
 
         nm, alpha = 0.01, 20.0
         eps_base = _rdp_gaussian(alpha, nm)
@@ -249,6 +260,7 @@ class TestComputeRdpTotalThreadSafety:
     def test_rdp_total_consistent_under_concurrent_spend(self):
         """Concurrent spend + total computation should not raise."""
         import threading
+
         from constitutional_swarm.privacy_accountant import PrivacyAccountant
 
         pa = PrivacyAccountant(epsilon=1000.0, delta=1e-5)
@@ -258,7 +270,7 @@ class TestComputeRdpTotalThreadSafety:
             for _ in range(50):
                 try:
                     pa.spend(sensitivity=1.0, sigma=10.0)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     errors.append(exc)
 
         threads = [threading.Thread(target=spender) for _ in range(4)]

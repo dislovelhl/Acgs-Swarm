@@ -47,9 +47,7 @@ def test_successful_pytest_run_exits_zero(
     assert payload["sub_scores"]["tests_exit_code"] == 0
 
 
-def test_pytest_error_exits_two(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
-) -> None:
+def test_pytest_error_exits_two(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
     coverage_path = tmp_path / "coverage.json"
     coverage_path.write_text(
         json.dumps(
@@ -80,9 +78,7 @@ def test_pytest_error_exits_two(
     assert payload["sub_scores"]["tests_exit_code"] == 2
 
 
-def test_pytest_failures_exit_one(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
-) -> None:
+def test_pytest_failures_exit_one(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
     coverage_path = tmp_path / "coverage.json"
     coverage_path.write_text(
         json.dumps(

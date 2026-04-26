@@ -38,9 +38,9 @@ class TestDeterministicNodeId:
     """Test deterministic ID generation."""
 
     def test_same_title_same_id(self) -> None:
-        assert compiler_module._deterministic_node_id("hello") == compiler_module._deterministic_node_id(
+        assert compiler_module._deterministic_node_id(
             "hello"
-        )
+        ) == compiler_module._deterministic_node_id("hello")
 
     def test_different_titles_different_ids(self) -> None:
         assert compiler_module._deterministic_node_id(

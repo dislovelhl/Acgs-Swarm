@@ -320,12 +320,13 @@ class TestNStepsValidation:
 
     def test_n_steps_zero_raises(self):
         import pytest
+
         try:
             import torch
         except ImportError:
             pytest.skip("torch not installed")
-        from constitutional_swarm.swarm_ode import integrate
         import torch
+        from constitutional_swarm.swarm_ode import integrate
 
         H0 = torch.eye(3, dtype=torch.float64)
 
@@ -337,12 +338,13 @@ class TestNStepsValidation:
 
     def test_n_steps_negative_raises(self):
         import pytest
+
         try:
             import torch
         except ImportError:
             pytest.skip("torch not installed")
-        from constitutional_swarm.swarm_ode import integrate
         import torch
+        from constitutional_swarm.swarm_ode import integrate
 
         H0 = torch.eye(3, dtype=torch.float64)
 
@@ -358,7 +360,11 @@ class TestDrandPrivateSeed:
 
     def test_different_private_seed_gives_different_samples(self):
         """Two DrandClient calls with different private seeds must produce different noise."""
-        from constitutional_swarm.swarm_ode import DrandClient, DrandBeaconEntry, DiscreteGaussianSampler
+        from constitutional_swarm.swarm_ode import (
+            DiscreteGaussianSampler,
+            DrandBeaconEntry,
+            DrandClient,
+        )
 
         entry = DrandBeaconEntry(
             round_number=1,
@@ -380,7 +386,11 @@ class TestDrandPrivateSeed:
 
     def test_no_private_seed_is_public_randomness(self):
         """Without private_seed, two calls with the same entry give the same samples."""
-        from constitutional_swarm.swarm_ode import DrandClient, DrandBeaconEntry, DiscreteGaussianSampler
+        from constitutional_swarm.swarm_ode import (
+            DiscreteGaussianSampler,
+            DrandBeaconEntry,
+            DrandClient,
+        )
 
         entry = DrandBeaconEntry(
             round_number=1,

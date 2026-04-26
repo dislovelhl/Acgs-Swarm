@@ -54,7 +54,7 @@ def main() -> None:
         *deselect_args,
     ]
 
-    result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=False, text=True)
+    result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=False, text=True)  # noqa: S603
 
     if not COVERAGE_OUT.exists():
         print(

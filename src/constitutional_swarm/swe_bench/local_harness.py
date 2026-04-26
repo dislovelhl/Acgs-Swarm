@@ -356,17 +356,13 @@ class LocalSWEBenchHarness:
         runner = _detect_test_runner(worktree)
         result.metadata["test_runner"] = runner
         if fail_to_pass:
-            passed, failed, log = self._run_suite(
-                worktree, fail_to_pass, python_bin, runner
-            )
+            passed, failed, log = self._run_suite(worktree, fail_to_pass, python_bin, runner)
             result.fail_to_pass_passed = passed
             result.fail_to_pass_failed = failed
             if failed > 0:
                 result.log_tail = log[-2000:]
         if pass_to_pass:
-            passed, failed, log = self._run_suite(
-                worktree, pass_to_pass, python_bin, runner
-            )
+            passed, failed, log = self._run_suite(worktree, pass_to_pass, python_bin, runner)
             result.pass_to_pass_passed = passed
             result.pass_to_pass_failed = failed
             if failed > 0 and not result.log_tail:
@@ -403,9 +399,7 @@ class LocalSWEBenchHarness:
             failed = len(test_ids)
         return passed, failed, out
 
-    def _pytest(
-        self, worktree: Path, test_ids: list[str], python_bin: str
-    ) -> tuple[int, int, str]:
+    def _pytest(self, worktree: Path, test_ids: list[str], python_bin: str) -> tuple[int, int, str]:
         cmd = [
             python_bin,
             "-m",
@@ -448,9 +442,7 @@ class LocalSWEBenchHarness:
             shutil.rmtree(venv_path, ignore_errors=True)
         if python_version:
             if not shutil.which("uv"):
-                result.error = (
-                    f"uv not on PATH but python_version={python_version} requested"
-                )
+                result.error = f"uv not on PATH but python_version={python_version} requested"
                 result.metadata["env_stage"] = "uv-missing"
                 return None, None
             rc, out = _run(

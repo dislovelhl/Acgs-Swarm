@@ -247,10 +247,12 @@ class TestSpectralNormGuaranteeAfterProjection:
 
     def test_projected_norm_within_radius(self):
         """After projection, actual spectral norm must be ≤ r + epsilon."""
-        from constitutional_swarm.spectral_sphere import (
-            spectral_norm_power_iter, spectral_sphere_project,
-        )
         import random
+
+        from constitutional_swarm.spectral_sphere import (
+            spectral_norm_power_iter,
+            spectral_sphere_project,
+        )
 
         rng = random.Random(7)
         # Build a 5x5 matrix with large singular values
@@ -267,8 +269,9 @@ class TestSpectralNormGuaranteeAfterProjection:
 
     def test_projection_idempotent(self):
         """Projecting an already-projected matrix should be a no-op."""
-        from constitutional_swarm.spectral_sphere import spectral_sphere_project
         import random
+
+        from constitutional_swarm.spectral_sphere import spectral_sphere_project
 
         rng = random.Random(13)
         n = 4
@@ -284,22 +287,26 @@ class TestUpdateTrustValidation:
 
     def _make_manifold(self, n=3):
         from constitutional_swarm.spectral_sphere import SpectralSphereManifold
+
         return SpectralSphereManifold(num_agents=n)
 
     def test_nan_delta_rejected(self):
-        import math, pytest
+        import pytest
+
         m = self._make_manifold()
         with pytest.raises(ValueError, match="finite"):
             m.update_trust(0, 1, float("nan"))
 
     def test_inf_delta_rejected(self):
         import pytest
+
         m = self._make_manifold()
         with pytest.raises(ValueError, match="finite"):
             m.update_trust(0, 1, float("inf"))
 
     def test_out_of_range_index_rejected(self):
         import pytest
+
         m = self._make_manifold(n=3)
         with pytest.raises(IndexError):
             m.update_trust(0, 5, 1.0)
