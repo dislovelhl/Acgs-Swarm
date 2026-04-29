@@ -13,7 +13,12 @@ authors = [{name = "ACGS Team", email = "hello@acgs.dev"}]
 # acgs-lite >=2.8.1 required: top-level exports of constitution lifecycle
 # symbols (CaseManager, SpotCheckAuditor, TrustScoreManager, ValidatorSelector,
 # and related). Shipped in acgs-lite v2.8.1 via PRs #9 and #10.
-dependencies = ["acgs-lite>=2.8.1", "cryptography>=44.0.2", "numpy>=1.24"]
+dependencies = [
+  "acgs-lite>=2.8.1",
+  "braintrust==0.16.0",
+  "cryptography>=44.0.2",
+  "numpy>=1.24",
+]
 
 [project.urls]
 Homepage = "https://acgs.ai"

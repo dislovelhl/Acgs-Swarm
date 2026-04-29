@@ -1,0 +1,51 @@
+{
+  "canonical_bytes_hex": "636f6e737469747574696f6e616c2d737761726d2f736574746c656d656e742d7265636f72642f76310a7b22646f6d61696e223a22736574746c656d656e742d7265636f7264222c227061796c6f6164223a7b2261737369676e6d656e74223a7b2261727469666163745f6964223a2261727469666163742d706f6c6963792d303031222c2261737369676e6d656e745f6964223a2261737369676e2d727573743031222c22636f6e737469747574696f6e616c5f68617368223a2236303835303861396264323234323930222c22636f6e74656e745f68617368223a223631656565653262373736396364656337623830363862303331323535333835222c2269735f7265636f7665726564223a747275652c227065657273223a5b2276616c696461746f722d62657461225d2c2270726f64756365725f6964223a2270726f64756365722d616c706861222c2274696d657374616d70223a22313731333435363738392e313235227d2c22636f6e737469747574696f6e616c5f68617368223a2236303835303861396264323234323930222c2269735f7265636f7665726564223a747275652c22726573756c74223a7b226163636570746564223a747275652c2261737369676e6d656e745f6964223a2261737369676e2d727573743031222c22636f6e737469747574696f6e616c5f68617368223a2236303835303861396264323234323930222c2270656e64696e675f766f746573223a302c2270726f6f66223a7b226163636570746564223a747275652c2261737369676e6d656e745f6964223a2261737369676e2d727573743031222c22636f6e737469747574696f6e616c5f68617368223a2236303835303861396264323234323930222c22636f6e74656e745f68617368223a223631656565653262373736396364656337623830363862303331323535333835222c22726f6f745f68617368223a223465356565326163383163626365636364383635393363643637613233656233222c2274696d657374616d70223a22313731333435363739312e35222c22766f74655f686173686573223a5b226332303533616233376439376662613539333632636633613638346138333666225d7d2c2271756f72756d5f6d6574223a747275652c22736574746c6564223a747275652c22736574746c65645f6174223a22313731333435363739322e3735222c22766f7465735f616761696e7374223a302c22766f7465735f666f72223a317d2c22736368656d615f76657273696f6e223a317d2c2276657273696f6e223a317d",
+  "jsonl_line": "{\"assignment\":{\"artifact_id\":\"artifact-policy-001\",\"assignment_id\":\"assign-rust01\",\"constitutional_hash\":\"608508a9bd224290\",\"content_hash\":\"61eeee2b7769cdec7b8068b031255385\",\"is_recovered\":true,\"peers\":[\"validator-beta\"],\"producer_id\":\"producer-alpha\",\"timestamp\":1713456789.125},\"result\":{\"accepted\":true,\"assignment_id\":\"assign-rust01\",\"constitutional_hash\":\"608508a9bd224290\",\"pending_votes\":0,\"proof\":{\"assignment_id\":\"assign-rust01\",\"content_hash\":\"61eeee2b7769cdec7b8068b031255385\",\"constitutional_hash\":\"608508a9bd224290\",\"vote_hashes\":[\"c2053ab37d97fba59362cf3a684a836f\"],\"root_hash\":\"4e5ee2ac81cbceccd86593cd67a23eb3\",\"accepted\":true,\"timestamp\":1713456791.5},\"quorum_met\":true,\"settled\":true,\"settled_at\":1713456792.75,\"votes_against\":0,\"votes_for\":1},\"constitutional_hash\":\"608508a9bd224290\",\"schema_version\":1,\"is_recovered\":true}",
+  "record": {
+    "assignment": {
+      "artifact_id": "artifact-policy-001",
+      "assignment_id": "assign-rust01",
+      "constitutional_hash": "608508a9bd224290",
+      "content_hash": "61eeee2b7769cdec7b8068b031255385",
+      "is_recovered": true,
+      "peers": [
+        "validator-beta"
+      ],
+      "producer_id": "producer-alpha",
+      "timestamp": 1713456789.125
+    },
+    "constitutional_hash": "608508a9bd224290",
+    "is_recovered": true,
+    "result": {
+      "accepted": true,
+      "assignment_id": "assign-rust01",
+      "constitutional_hash": "608508a9bd224290",
+      "pending_votes": 0,
+      "proof": {
+        "accepted": true,
+        "assignment_id": "assign-rust01",
+        "constitutional_hash": "608508a9bd224290",
+        "content_hash": "61eeee2b7769cdec7b8068b031255385",
+        "root_hash": "4e5ee2ac81cbceccd86593cd67a23eb3",
+        "timestamp": 1713456791.5,
+        "vote_hashes": [
+          "c2053ab37d97fba59362cf3a684a836f"
+        ]
+      },
+      "quorum_met": true,
+      "settled": true,
+      "settled_at": 1713456792.75,
+      "votes_against": 0,
+      "votes_for": 1
+    },
+    "schema_version": 1
+  },
+  "sqlite_row": [
+    "assign-rust01",
+    "{\"artifact_id\":\"artifact-policy-001\",\"assignment_id\":\"assign-rust01\",\"constitutional_hash\":\"608508a9bd224290\",\"content_hash\":\"61eeee2b7769cdec7b8068b031255385\",\"is_recovered\":true,\"peers\":[\"validator-beta\"],\"producer_id\":\"producer-alpha\",\"timestamp\":1713456789.125}",
+    "{\"accepted\":true,\"assignment_id\":\"assign-rust01\",\"constitutional_hash\":\"608508a9bd224290\",\"pending_votes\":0,\"proof\":{\"assignment_id\":\"assign-rust01\",\"content_hash\":\"61eeee2b7769cdec7b8068b031255385\",\"constitutional_hash\":\"608508a9bd224290\",\"vote_hashes\":[\"c2053ab37d97fba59362cf3a684a836f\"],\"root_hash\":\"4e5ee2ac81cbceccd86593cd67a23eb3\",\"accepted\":true,\"timestamp\":1713456791.5},\"quorum_met\":true,\"settled\":true,\"settled_at\":1713456792.75,\"votes_against\":0,\"votes_for\":1}",
+    "608508a9bd224290",
+    1,
+    1
+  ]
+}

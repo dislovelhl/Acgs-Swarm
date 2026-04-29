@@ -14,6 +14,16 @@ build/
 .worktrees/
 papers/*/main.pdf
 
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Agent / orchestrator state (autogen, do not commit)
+.agents/skills/braintrust/
+.bt/config.json
+.bt/skills/
+
 # Session-generated artifacts — not distribution content
 *-report.md
 SYSTEMIC_IMPROVEMENT.md

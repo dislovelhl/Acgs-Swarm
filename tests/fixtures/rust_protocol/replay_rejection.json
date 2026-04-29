@@ -1,0 +1,7 @@
+{
+  "error_type": "RemoteVoteReplayError",
+  "message": "Remote vote request nonce 'nonce-rust-protocol-001' was already used inside the replay window",
+  "nonce_cache": {
+    "nonce-rust-protocol-001": 1713456789.125
+  }
+}
