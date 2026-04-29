@@ -372,9 +372,7 @@ class TestBasisOrientation:
         steered = sub.steer(unsafe_pt, gamma=1.0)
         # After gamma=1 steering, the violation component should be zeroed
         coord_after = sub.coordinates(steered)
-        assert coord_after[0] <= 0.05, (
-            f"Steered coordinate should be ≈0; got {coord_after[0]:.4f}"
-        )
+        assert coord_after[0] <= 0.05, f"Steered coordinate should be ≈0; got {coord_after[0]:.4f}"
 
 
 class TestProjectComponentDecomposition:
@@ -388,9 +386,7 @@ class TestProjectComponentDecomposition:
         v = np.array([1.0, 0.0, 0.0, 0.0])
         sub = ViolationSubspace(basis=v.reshape(1, -1), mean=np.zeros(4))
         h = np.array([2.0, 3.0, 4.0, 5.0])
-        np.testing.assert_allclose(
-            sub.project_component(h) + sub.orthogonal_component(h), h
-        )
+        np.testing.assert_allclose(sub.project_component(h) + sub.orthogonal_component(h), h)
 
     def test_decomposition_identity_nonzero_mean(self):
         """With non-zero mean, project + orthogonal == h."""
@@ -402,6 +398,7 @@ class TestProjectComponentDecomposition:
         sub = ViolationSubspace(basis=v.reshape(1, -1), mean=mean)
         h = np.array([2.0, 3.0, 4.0, 5.0])
         np.testing.assert_allclose(
-            sub.project_component(h) + sub.orthogonal_component(h), h,
+            sub.project_component(h) + sub.orthogonal_component(h),
+            h,
             err_msg="project_component + orthogonal_component must equal h for any mean",
         )

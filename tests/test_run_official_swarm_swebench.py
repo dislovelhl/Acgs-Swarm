@@ -6,11 +6,7 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "scripts"
-    / "run_official_swarm_swebench.py"
-)
+_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "run_official_swarm_swebench.py"
 _SPEC = importlib.util.spec_from_file_location("run_official_swarm_swebench", _SCRIPT_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)

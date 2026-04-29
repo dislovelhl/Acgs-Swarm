@@ -58,10 +58,7 @@ async def test_merkle_crdt_seeded_interleaved_convergence_fuzz() -> None:
     assert all(cid_set == cid_sets[0] for cid_set in cid_sets)
     assert cid_sets[0] == frozenset(expected_union)
 
-    ordered_payloads = [
-        [node.payload for node in peer.topological_order()]
-        for peer in peers
-    ]
+    ordered_payloads = [[node.payload for node in peer.topological_order()] for peer in peers]
     assert ordered_payloads[0] == ordered_payloads[1] == ordered_payloads[2]
     assert peers[0].summary()["total_nodes"] == len(expected_union)
     assert len(expected_union) >= 50

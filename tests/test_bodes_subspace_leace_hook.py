@@ -13,8 +13,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from constitutional_swarm.latent_dna import _BODESSubspaceHook  # noqa: E402
-from constitutional_swarm.violation_subspace import ViolationSubspace  # noqa: E402
+from constitutional_swarm.latent_dna import _BODESSubspaceHook
+from constitutional_swarm.violation_subspace import ViolationSubspace
 
 
 def _identity_leace(dim: int) -> ViolationSubspace:

@@ -77,9 +77,7 @@ def test_crash_after_phase1_preserves_retry_state_and_replays_phase2(
     cached_batch, cached_tx_id = logger._retry_state
     assert cached_batch.entry_count == 3
     assert arweave.transaction_count == 1
-    assert submitter.calls == [
-        (cached_batch.batch_root, CONST_HASH, cached_batch.entry_count)
-    ]
+    assert submitter.calls == [(cached_batch.batch_root, CONST_HASH, cached_batch.entry_count)]
 
     monkeypatch.setattr(submitter, "submit", original_submit)
     receipt = logger.flush()
