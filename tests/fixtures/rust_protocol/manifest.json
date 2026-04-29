@@ -1,0 +1,15 @@
+{
+  "artifacts": {
+    "content_hashes.json": "0a103f5ee85db70313138ec91d516d983561a4314d070919cdb86c4169076e21",
+    "mesh_proof.json": "3eeac2c9e7e09ecc673c4b589c4886282367999178f8485ddd8a98c76a20c047",
+    "remote_vote_request.json": "dde44c362bfaeeb454a0d8674f60273f052589584739e53fc2296761f7d3bb08",
+    "replay_rejection.json": "99b19e021230aefc03b35797a19c42cf3ac41f2829237c535dabf9a00e036ca3",
+    "settlement_record.json": "a1a2054e4e1c34c98e5dbd27a90af1d3551933a5a06ba009d09c23862e17bc95",
+    "spectral_sphere_snapshot.json": "45b339a93ebb502b457d14f9e1496a234493f04cfdf6e76786bb660b5815f6ad",
+    "validation_result.json": "72caadf92c67d2bf8f5e10d1d84136f22ac2129aa3f0578734cb5f619fb137b1",
+    "vote_payload.json": "7a9a25d0e85e7c7e37cce6e9dc2d5d1eee3c12ccf0bd57df5a08eae029bb9b0a"
+  },
+  "description": "Deterministic protocol fixtures for Rust-core parity gates.",
+  "hash_algorithm": "sha256",
+  "protocol_version": 1
+}
