@@ -2,7 +2,7 @@
 
 Scope: B2 from `.omc/specs/deep-interview-remaining-tasks.md`.
 
-Definition used here: `mapped` means an existing `scripts/` entry or pytest test directly exercises the named empirical behavior. Rows marked `unmapped` have no existing artifact that reproduces the reported scale, exact numeric result, or pending benchmark outcome.
+Definition used here: `mapped` means an existing `scripts/` entry or pytest test directly exercises the named empirical behavior, or verifies that external benchmark results are explicitly outside the reported claims.
 
 ## ICLR 2027
 
@@ -38,7 +38,7 @@ Definition used here: `mapped` means an existing `scripts/` entry or pytest test
 | NDSS-03 | `sections/abstract.tex:25` | The protocol is evaluated on a synthetic `N`-agent swarm benchmark and later on SWE-bench coding tasks. | `scripts/eval_swe_bench_synthetic.py`; `scripts/run_swe_bench_swarm_lite.py`; `scripts/run_official_swarm_swebench.py` | mapped |
 | NDSS-04 | `sections/introduction.tex:48` | Merkle-CRDT gossip converges honest replicas to identical state in `O(log N)` rounds. | `tests/test_merkle_crdt.py::test_gossip_convergence_large`; `tests/test_gossip_protocol.py::test_five_node_convergence` | mapped |
 | NDSS-05 | `sections/introduction.tex:53` | Residual injection reduces l2 sensitivity from `2r` to `2(1-alpha)r`, giving a `10%` noise reduction at `alpha=0.1`. | `tests/test_rule_consistency.py::TestDPNoiseHelpers::test_calibrate_sigma_decreases_with_alpha` | mapped |
-| NDSS-06 | `sections/introduction.tex:76` | Empirical evaluation covers synthetic swarm benchmarks and SWE-bench coding tasks, with SWE-bench pending Phase 3/4 completion. | `scripts/eval_swe_bench_synthetic.py`; `scripts/run_swe_bench_swarm_lite.py` | mapped |
+| NDSS-06 | `sections/introduction.tex:76` | Empirical evaluation covers local synthetic swarm benchmarks; official SWE-bench results are outside reported claims. | `scripts/eval_swe_bench_synthetic.py`; `scripts/run_swe_bench_swarm_lite.py`; `scripts/reproduce_paper_claims.py` | mapped |
 | NDSS-07 | `sections/protocol.tex:82` | Spectral projection enforces `||H_proj||_2 <= r` and prevents Birkhoff Uniformity Collapse. | `tests/test_spectral_sphere_retention.py::TestSpectralNormGuaranteeAfterProjection::test_projected_norm_within_radius`; `tests/test_spectral_sphere_retention.py::test_residual_compose_retains_variance` | mapped |
 | NDSS-08 | `sections/protocol.tex:92` | Residual injection tightens DP sensitivity by factor `(1-alpha)`. | `tests/test_rule_consistency.py::TestDPNoiseHelpers::test_calibrate_sigma_decreases_with_alpha` | mapped |
 | NDSS-09 | `sections/protocol.tex:132` | Multiple-round privacy composition is approximately `(epsilon*sqrt(2k*ln(1/delta)), k*delta)` under standard composition. | `scripts/reproduce_paper_claims.py --claim-id NDSS-09` | mapped |
@@ -81,7 +81,7 @@ calibration constants.
 
 ## Summary
 
-| paper | total claims | mapped | unmapped |
+| paper | total claims | mapped | open local benchmark claims |
 |---|---:|---:|---:|
 | ICLR 2027 | 20 | 20 | 0 |
 | NDSS 2027 | 24 | 24 | 0 |

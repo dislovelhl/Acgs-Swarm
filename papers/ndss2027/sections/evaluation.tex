@@ -4,7 +4,8 @@
 We evaluate \fedsink{} on three dimensions:
 \textbf{(E1)} Protocol correctness and convergence under Byzantine faults.
 \textbf{(E2)} DP noise accuracy and sensitivity tightening.
-\textbf{(E3)} Swarm task performance on SWE-bench coding tasks (pending Phase 3/4).
+\textbf{(E3)} local synthetic SWE-bench-shaped routing behavior.  Official SWE-bench
+results are not claimed in this paper.
 
 \subsection{Setup}
 
@@ -16,43 +17,38 @@ Spectral projection uses \texttt{torch.linalg.svd}; Gaussian noise uses
 Groth16 circuit benchmarking is a Phase 3 deliverable).
 
 \paragraph{Network topology.}
-We evaluate over random 4-regular graphs with $N \in \{10, 50, 100, 500\}$ agents.
-Byzantine agents are selected uniformly at random; their behavior is worst-case
-(maximize rejection rate).  Gossip uses a push-pull protocol with 3 random peers per
-round.
+The local reproducibility harness evaluates Merkle-CRDT gossip convergence with
+deterministic pseudo-random peer selection and configurable agent counts, artifact
+rates, and gossip fanout.  It also runs a deterministic Byzantine tamper-injection
+check that attempts to merge invalid content-addressed nodes into an honest replica.
 
 \subsection{Protocol Correctness (E1)}
 
 \begin{table}[t]
   \centering
   \footnotesize
-  \caption{Protocol correctness under Byzantine faults.
-    All entries are over 20 random seeds.
-    ``Convergence rounds'' is the number of gossip rounds to EEC.}
+  \caption{Protocol correctness benchmark plan under Byzantine faults.
+    Local reproducibility artifacts are listed in docs/internal/claims\_map.md.}
   \label{tab:protocol_correctness}
   \renewcommand{\arraystretch}{1.1}
-  \begin{tabular}{ccccc}
+  \begin{tabular}{@{}p{0.10\linewidth}p{0.12\linewidth}p{0.23\linewidth}p{0.21\linewidth}p{0.09\linewidth}@{}}
     \toprule
-    $N$ & Byzantine $f$ & Accept. rate & Conv. rounds & EEC \\
+    $N$ & $f$ & Accept. & Rounds & EEC \\
     \midrule
-    10  & 3 ($30\%$) & 100\% & $3.2 \pm 0.4$ & Yes \\
-    50  & 16 ($32\%$) & 100\% & $4.1 \pm 0.6$ & Yes \\
-    100 & 33 ($33\%$) & 100\% & $5.3 \pm 0.8$ & Yes \\
-    500 & 166 ($33\%$) & 100\% & $8.7 \pm 1.2$ & Yes \\
+    20 & $<N/3$ & tampered CIDs rejected & converged by final merge & Yes \\
+    config. & $<N/3$ & JSON & JSON & JSON \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Table~\ref{tab:protocol_correctness} reports correctness results.  Across all tested
-configurations, all Byzantine-injected tuples are rejected (0 false acceptances), and
-EEC is achieved in $O(\log N)$ rounds, consistent with Theorem~\ref{thm:eec}.  At
-$N=500$, convergence takes $8.7 \pm 1.2$ rounds, matching the $\log_2(500) \approx 9$
-prediction.
+Table~\ref{tab:protocol_correctness} records the local benchmark contract rather than
+machine-specific timing values.  Existing regression tests and
+\texttt{scripts/reproduce\_paper\_claims.py} cover honest-replica convergence and
+Byzantine exclusion.
 
 \paragraph{CID integrity verification.}
-We inject $1{,}000$ tampered tuples per seed (modified $\tilde{H}$, original $\MCid$).
-Zero tampered tuples pass verification across all runs, confirming
-Theorem~\ref{thm:cid_integrity}.
+Current Merkle-CRDT tests reject tampered tuples by content hash, and the local harness
+reports attempted versus accepted tampered nodes as JSON.
 
 \subsection{Differential Privacy Accuracy (E2)}
 
@@ -66,31 +62,32 @@ Theorem~\ref{thm:cid_integrity}.
     \toprule
     $\varepsilon$ & $\sigma_{\mathrm{theory}}$ & $\sigma_{\mathrm{emp}}$ & Rel.\ error & DP verified \\
     \midrule
-    1.0 & 3.456 & 3.461 & $0.14\%$ & Yes \\
-    2.0 & 1.728 & 1.730 & $0.12\%$ & Yes \\
-    4.0 & 0.864 & 0.865 & $0.12\%$ & Yes \\
-    8.0 & 0.432 & 0.433 & $0.23\%$ & Yes \\
+    1.0 & 8.721 & formula check & exact & Yes \\
+    2.0 & 4.360 & formula check & exact & Yes \\
+    4.0 & 2.180 & formula check & exact & Yes \\
+    8.0 & 1.090 & formula check & exact & Yes \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Table~\ref{tab:dp_accuracy} confirms that empirical noise levels match the theoretical
-calibration of equation~\eqref{eq:sigma} to within $0.23\%$ relative error.  The $10\%$
-noise reduction from $\alpha{=}0.1$ residual injection (Lemma~\ref{lem:sensitivity}) is
-verified: at $\varepsilon{=}2.0$, baseline $\sigma = 1.92$ vs.\ residual-injection
-$\sigma = 1.73$, a reduction of $9.9\% \approx 10\%$.
+Table~\ref{tab:dp_accuracy} confirms that implementation calibration matches
+equation~\eqref{eq:sigma}.  The $10\%$ noise reduction from $\alpha{=}0.1$ residual
+injection (Lemma~\ref{lem:sensitivity}) is verified: at $\varepsilon{=}2.0$, baseline
+$\sigma = 4.84$ vs.\ residual-injection
+$\sigma = 4.36$, a reduction of $10\%$.
 
-\subsection{SWE-bench Coding Task Evaluation (E3)}
+\subsection{SWE-bench-Shaped Routing Evaluation (E3)}
 \label{sec:evaluation_sweb}
 
-\textbf{Note: Phase 3/4 results pending.}  This section will report results from the
-following experimental protocol upon completion.
+\textbf{Official SWE-bench results are not claimed.}  This section reports only the
+local synthetic evaluator that exercises the same routing surface without Docker,
+network access, or external benchmark images.
 
 \paragraph{Experimental setup.}
-$N$ agents are deployed on SWE-bench \cite{swebench2024} coding tasks (Python repository
-bug-fix tasks).  Agents are specialized by language (Python core, testing, docs) and
-trust-weighted via \fedsink{}.  Each governance round broadcasts a trust update;
-task routing is determined by the aggregated $\tilde{H}$ matrix at the Merkle-CRDT head.
+$N$ agents are deployed on SWE-bench-shaped coding tasks with deterministic hidden
+domain competencies.  Agents are specialized by domain and trust-weighted via the
+SpectralSphere matrix.  Task routing is determined by the projected trust matrix,
+matching the routing interface used by the package SWE-bench scaffold.
 
 \paragraph{Baselines.}
 \begin{itemize}
@@ -111,26 +108,24 @@ write time: a regression or deceleration in task success rate is rejected struct
 before being persisted, turning the audit log into a safety contract rather than a
 post-hoc record.
 
-\paragraph{Expected outcomes.}
-Based on the variance retention results of \cite{mcfs_iclr2027}, we expect Sinkhorn-CRDT
-to converge to uniform routing (all agents used equally, losing specialization benefit)
-within 10 rounds, while \fedsink{} maintains stable specialized routing.  We expect
-\fedsink{} to exceed Sinkhorn-CRDT task success by $15$--$30\%$ on specialized tasks
-requiring domain expertise.
+\paragraph{Local outcome.}
+The local evaluator reports per-seed resolve rates for trust-weighted routing versus a
+round-robin baseline and emits a mean lift score.  The JSON payload sets
+\texttt{official\_swe\_bench\_claimed=false} so synthetic routing evidence cannot be
+mistaken for official benchmark performance.
 
 \begin{table}[b]
   \centering
   \footnotesize
-  \caption{SWE-bench evaluation placeholder. To be filled upon Phase 3/4 completion.}
+  \caption{Local SWE-bench-shaped evaluator contract. Official SWE-bench remains
+    outside the reported results.}
   \label{tab:sweb_results}
   \begin{tabular}{p{0.30\linewidth}p{0.13\linewidth}p{0.22\linewidth}p{0.14\linewidth}}
     \toprule
     Method & Success & Routing div. & Conv. \\
     \midrule
-    Flat routing           & TBD & 0\% & N/A \\
-    Centralized trust      & TBD & TBD & N/A \\
-    Sinkhorn-CRDT          & TBD & $\approx 0\%$ (BUC) & TBD \\
-    \fedsink{} (ours)      & TBD & $>100\%$ & $O(\log N)$ \\
+    Round-robin routing    & JSON & N/A & N/A \\
+    \fedsink{} synthetic   & JSON & JSON & local \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -139,26 +134,27 @@ requiring domain expertise.
 
 \begin{table}[t]
   \centering
-  \caption{Protocol step latency per agent per round ($n{=}50$, CPU).}
+  \caption{Protocol step latency harness per agent per round ($n{=}50$, CPU).
+    Values are emitted as machine-specific JSON rather than fixed paper constants.}
   \label{tab:latency}
-  \begin{tabular}{lc}
+  \footnotesize
+  \begin{tabular}{p{0.55\linewidth}p{0.28\linewidth}}
     \toprule
     Step & Latency (ms) \\
     \midrule
-    Spectral projection (SVD, $n{=}50$) & $1.2 \pm 0.1$ \\
-    Residual injection & $< 0.1$ \\
-    DP noise sampling  & $0.3 \pm 0.05$ \\
-    CID computation (SHA3-256) & $< 0.1$ \\
+    Spectral projection (power iteration, $n{=}50$) & JSON ns/op \\
+    Residual injection & JSON ns/op \\
+    DP calibration  & formula check \\
+    CID append & JSON ns/op \\
     zk-SNARK proof (simulated) & TBD (Phase 3) \\
-    CRDT merge + gossip & $0.8 \pm 0.2$ \\
+    CRDT merge + gossip & JSON convergence \\
     \midrule
-    Total (excl.\ zk-SNARK) & $\approx 2.5$ ms \\
+    Total (excl.\ zk-SNARK) & not fixed across CPUs \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-The dominant cost (excluding the zk-SNARK, which requires full circuit benchmarking in
-Phase 3) is the SVD at $1.2$ ms for $n{=}50$.  For a swarm executing $10$-second tasks,
-the governance overhead is $0.025\%$ — negligible.  At $n{=}500$, SVD scales as
-$O(n^3)$ to approximately $1.2$ s, which warrants efficient approximations (randomized
-SVD, Lanczos) as a future optimization.
+The dominant expected cost (excluding the zk-SNARK, which requires full circuit
+benchmarking in Phase 3) is the SVD, which scales as $O(n^3)$.  Latency microbenchmarks
+are reproducible through the script, but we do not report CPU-specific millisecond
+constants or task-overhead percentages as portable claims.

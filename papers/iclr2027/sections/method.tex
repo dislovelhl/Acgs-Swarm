@@ -136,15 +136,13 @@ constraint penalty and $\alpha(I - H)$ is the continuous-time residual injection
   $-\alpha \langle H - H^*, H - H^* \rangle_F = -\alpha \|H - H^*\|_F^2 = -2\alpha V$.
 \end{proof}
 
-\paragraph{Topological capacity.}
-The Neural ODE achieves dramatically higher topological capacity than Sinkhorn.  We
-measure capacity as the volume (Lebesgue measure) of the reachable set in matrix space
-after 10 cycles, normalized by the Sinkhorn baseline volume.  The result of $2{,}656\%$
-(Table~\ref{tab:variance_results}) confirms that the manifold topology is rich enough
-to accommodate diverse specialization patterns.  \emph{Importantly}, high topological
-capacity proves only that collapse is absent — not that the ODE amplifies the correct
-specialization.  Routing quality depends on the trained $f_\theta$ and is left to future
-work, as discussed in Section~\ref{sec:conclusion}.
+\paragraph{ODE stability benchmark.}
+The local reproducibility harness reports the Neural ODE's variance retention and
+maximum observed spectral norm under projected RK4 integration.  We intentionally do not
+claim a Lebesgue-volume topological-capacity result: high topological volume would prove
+only that collapse is absent, not that the ODE amplifies the correct specialization.
+Routing quality depends on the trained $f_\theta$ and is left to future work, as
+discussed in Section~\ref{sec:conclusion}.
 
 \subsection{Differential Privacy via Residual Sensitivity}
 

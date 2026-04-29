@@ -138,7 +138,7 @@ class GovernanceManifold:
 
         **For production swarms use** :class:`constitutional_swarm.spectral_sphere.SpectralSphereManifold`
         instead.  It replaces the Birkhoff constraint with a spectral-sphere projection
-        that preserves variance (empirically: 2,656% retention vs. ~0% here).
+        that preserves variance in the source-backed regression tests.
 
     Properties of M^gov:
       1. Bounded influence: ||P_M(H)||_2 ≤ 1

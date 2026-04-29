@@ -144,6 +144,6 @@ are unaffected:
 \end{equation}
 The noise term acts as Langevin dynamics: at high $\sigma$ (tight privacy), the swarm
 explores the trust manifold stochastically; at low $\sigma$ (loose privacy), it converges
-deterministically.  For $\sigma \leq r/\sqrt{n}$, the expected spectral norm of the noise
-satisfies $\mathbb{E}[\spnorm{Z}] \approx \sigma\sqrt{n} \leq r$, so the perturbation
-remains within the spectral ball.
+deterministically.  For matrix Gaussian noise, the leading spectral-norm scale is
+$2\sigma\sqrt{n}$; the conservative regime $\sigma \leq r/(2\sqrt{n})$ keeps the expected
+perturbation within the same scale as the spectral constraint.
