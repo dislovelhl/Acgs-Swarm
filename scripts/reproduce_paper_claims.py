@@ -4,13 +4,7 @@
 The harness intentionally stays local and deterministic: it exercises source
 modules and lightweight synthetic evaluators, then emits one JSON object with
 claim-oriented metrics.  It does not run official SWE-bench or networked gossip.
-"""Reproduce or classify the paper claims that are not covered by module tests.
-
-This harness is intentionally local and deterministic. It covers the table-level
-and formula-level claims in the ICLR/NDSS drafts that are not direct unit-test
-targets elsewhere in the repository.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -22,6 +16,7 @@ import random
 import statistics
 import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -469,7 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def run_reproducibility_cli(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     payload = run_reproducibility_suite(args)
@@ -478,10 +473,6 @@ def main(argv: list[str] | None = None) -> int:
         args.output.write_text(encoded + "\n", encoding="utf-8")
     print(encoded)
     return 0 if payload["pass"] else 1
-import json
-import math
-from dataclasses import asdict, dataclass
-from typing import Any
 
 ICLR_UNMAPPED_IDS = {
     "ICLR-03",
@@ -988,11 +979,11 @@ def summary(evidence: list[ClaimEvidence]) -> dict[str, Any]:
     }
 
 
-def main() -> int:
+def run_claim_registry_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--claim-id", help="Only emit one claim's evidence")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     evidence = collect_evidence()
     if args.claim_id:
@@ -1013,6 +1004,41 @@ def main() -> int:
         print()
         print(json.dumps(payload["summary"], indent=2, sort_keys=True))
     return 1 if payload["summary"]["failed"] else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Dispatch the two local reproducibility modes kept in this script.
+
+    The PR added both a benchmark-oriented CLI and a remaining-claims registry
+    CLI.  Keep them explicit so direct script execution and import-based tests
+    exercise the intended mode instead of one `main()` silently shadowing the
+    other.
+    """
+    raw_args = sys.argv[1:] if argv is None else argv
+    benchmark_flags = {
+        "--seeds",
+        "--sizes",
+        "--cycles",
+        "--ablation-n",
+        "--ablation-cycles",
+        "--ablation-radii",
+        "--ablation-alphas",
+        "--ode-n",
+        "--ode-steps",
+        "--gossip-agents",
+        "--gossip-rounds",
+        "--gossip-artifacts",
+        "--gossip-partners",
+        "--swe-agents",
+        "--swe-tasks",
+        "--swe-warmup",
+        "--microbench-iterations",
+        "--microbench-n",
+        "--output",
+    }
+    if any(arg in benchmark_flags for arg in raw_args):
+        return run_reproducibility_cli(raw_args)
+    return run_claim_registry_cli(raw_args)
 
 
 if __name__ == "__main__":

@@ -174,8 +174,6 @@ def test_claim_map_has_no_unmapped_or_xfail_rows() -> None:
     assert "| unmapped |" not in claim_map
     assert "| mapped-xfail |" not in claim_map
     assert "Reproducibility Gaps" not in claim_map
-from __future__ import annotations
-
 import subprocess
 import sys
 
