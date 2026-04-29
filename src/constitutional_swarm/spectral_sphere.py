@@ -254,17 +254,16 @@ class SpectralSphereManifold:
             prev_mat = self._smoothed.matrix
             new_mat = new_proj.matrix
             blended = tuple(
-                tuple(
-                    alpha * prev_mat[i][j] + (1.0 - alpha) * new_mat[i][j]
-                    for j in range(n)
-                )
+                tuple(alpha * prev_mat[i][j] + (1.0 - alpha) * new_mat[i][j] for j in range(n))
                 for i in range(n)
             )
             # Convex blend of two in-sphere matrices is in-sphere by norm sub-additivity:
             #   ‖αA + (1-α)B‖₂ ≤ α‖A‖₂ + (1-α)‖B‖₂ ≤ r.
             # We reuse the tighter of the two parent sigma estimates as an upper bound
             # instead of re-running power iteration (O(n²·k) saved per project() call).
-            sigma_bound = alpha * self._smoothed.spectral_norm + (1.0 - alpha) * new_proj.spectral_norm
+            sigma_bound = (
+                alpha * self._smoothed.spectral_norm + (1.0 - alpha) * new_proj.spectral_norm
+            )
             new_proj = SpectralProjectionResult(
                 matrix=blended,
                 spectral_norm=sigma_bound,

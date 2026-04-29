@@ -36,6 +36,7 @@ from constitutional_swarm.federated_bridge import (
     CredentialStatus,
     FederatedConstitutionBridge,
 )
+
 try:
     from constitutional_swarm.swarm_ode import DiscreteGaussianSampler
 

@@ -137,6 +137,7 @@ def _verify_one(c: Citation, timeout: float) -> Citation:
     if not c.url.startswith(_ALLOWED_URL_PREFIXES):
         c.error = f"URL scheme not in allowlist: {c.url}"
         return c
+
     # Some publishers (Springer, ACM) return 403/404 for HEAD but respond to
     # GET — try HEAD first for speed, fall back to GET on 4xx before declaring
     # the citation unresolvable.
@@ -157,7 +158,7 @@ def _verify_one(c: Citation, timeout: float) -> Citation:
             return e.code, ok, None if ok else f"HTTP {e.code}"
         except urllib.error.URLError as e:
             return None, False, f"URLError: {type(e.reason).__name__}"
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return None, False, type(e).__name__
 
     c.status, c.ok, c.error = _try("HEAD")
