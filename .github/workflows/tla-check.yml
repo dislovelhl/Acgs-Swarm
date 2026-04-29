@@ -41,7 +41,7 @@ jobs:
 
       - name: Cache tla2tools.jar
         id: cache-tla
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: tla2tools.jar
           key: tla2tools-v1.8.0
