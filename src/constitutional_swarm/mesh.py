@@ -42,6 +42,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from acgs_lite import Constitution
 from constitutional_swarm.dna import AgentDNA
 from constitutional_swarm.manifold import GovernanceManifold
+from constitutional_swarm.mesh_types import (
+    MeshProof,
+    MeshResult,
+    PeerAssignment,
+    RemoteVoteRequest,
+    ValidationVote,
+)
 from constitutional_swarm.settlement_store import (
     JSONLSettlementStore,
     SettlementRecord,
@@ -88,108 +95,6 @@ class SettlementPersistenceError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Data structures (all frozen — immutable by design)
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class PeerAssignment:
-    """A validation assignment linking a producer's output to peer validators."""
-
-    assignment_id: str
-    producer_id: str
-    artifact_id: str
-    content: str
-    content_hash: str
-    peers: tuple[str, ...]
-    constitutional_hash: str
-    timestamp: float
-
-
-@dataclass(frozen=True, slots=True)
-class ValidationVote:
-    """A peer's Ed25519-signed vote on a producer's output."""
-
-    assignment_id: str
-    voter_id: str
-    approved: bool
-    reason: str
-    signature: str
-    constitutional_hash: str
-    content_hash: str
-    timestamp: float
-
-    @property
-    def vote_hash(self) -> str:
-        """Deterministic hash of this vote for proof chain."""
-        payload = (
-            f"{self.assignment_id}:{self.voter_id}:{self.approved}"
-            f":{self.reason}:{self.signature}:{self.constitutional_hash}:{self.content_hash}"
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()[:32]
-
-
-@dataclass(frozen=True, slots=True)
-class RemoteVoteRequest:
-    """Signable vote request for a public-key-only remote peer."""
-
-    assignment_id: str
-    voter_id: str
-    producer_id: str
-    artifact_id: str
-    content: str
-    content_hash: str
-    constitutional_hash: str
-    voter_public_key: str
-    request_signer_public_key: str
-    request_signature: str
-
-
-@dataclass(frozen=True, slots=True)
-class MeshProof:
-    """Cryptographic proof of peer validation.
-
-    A Merkle-style proof linking the producer's output, each peer's vote,
-    and the constitutional hash into a single verifiable root.
-    Anyone can independently verify this proof.
-    """
-
-    assignment_id: str
-    content_hash: str
-    constitutional_hash: str
-    vote_hashes: tuple[str, ...]
-    root_hash: str
-    accepted: bool
-    timestamp: float
-
-    def verify(self) -> bool:
-        """Independently verify the proof chain.
-
-        Recomputes the Merkle root from vote hashes and checks
-        it matches the stored root.
-        """
-        recomputed = _compute_merkle_root(
-            self.assignment_id,
-            self.content_hash,
-            self.constitutional_hash,
-            self.vote_hashes,
-            self.accepted,
-        )
-        return recomputed == self.root_hash
-
-
-@dataclass(frozen=True, slots=True)
-class MeshResult:
-    """Result of a peer validation with cryptographic proof."""
-
-    assignment_id: str
-    accepted: bool
-    votes_for: int
-    votes_against: int
-    quorum_met: bool
-    pending_votes: int
-    constitutional_hash: str
-    proof: MeshProof | None
-    settled: bool = False
-    settled_at: float | None = None
 
 
 # ---------------------------------------------------------------------------
