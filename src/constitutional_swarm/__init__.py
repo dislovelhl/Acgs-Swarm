@@ -13,6 +13,12 @@ Four breakthrough patterns:
      (inspired by mHC, arXiv:2512.24880)
 """
 
+from constitutional_swarm.agency_bridge import (
+    AgencyAgentDef,
+    AgencyAgentRegistry,
+    GovernedAgencyAgent,
+    load_agency_agents,
+)
 from constitutional_swarm.artifact import Artifact, ArtifactStore
 from constitutional_swarm.bench import BenchmarkResult, SwarmBenchmark
 from constitutional_swarm.capability import Capability, CapabilityRegistry
@@ -114,9 +120,11 @@ from constitutional_swarm.remote_vote_transport import (
     RemoteVoteServer,
 )
 from constitutional_swarm.settlement_store import (
+    SUPPORTED_SETTLEMENT_SCHEMA_VERSIONS,
     DuplicateSettlementError,
     JSONLSettlementStore,
     SettlementRecord,
+    SettlementSchemaVersionError,
     SettlementStore,
     SQLiteSettlementStore,
 )
@@ -147,6 +155,9 @@ from constitutional_swarm.violation_subspace import (
 # Keep broad top-level imports for compatibility with existing tests and callers,
 # but advertise only the stable 1.0 surface via __all__.
 __all__ = [
+    "SUPPORTED_SETTLEMENT_SCHEMA_VERSIONS",
+    "AgencyAgentDef",
+    "AgencyAgentRegistry",
     "AgentCredential",
     "AgentDNA",
     "AmendmentProposal",
@@ -191,6 +202,7 @@ __all__ = [
     "GoalSpec",
     "GoalStep",
     "GovernanceManifold",
+    "GovernedAgencyAgent",
     "InsufficientQuorumError",
     "InsufficientSamplesError",
     "InvalidCertificateError",
@@ -232,6 +244,7 @@ __all__ = [
     "SQLiteSettlementStore",
     "SettlementPersistenceError",
     "SettlementRecord",
+    "SettlementSchemaVersionError",
     "SettlementStore",
     "SignedVote",
     "SpectralProjectionResult",
@@ -261,6 +274,7 @@ __all__ = [
     "evaluate_drift",
     "fit_leace",
     "fit_subspace",
+    "load_agency_agents",
     "sinkhorn_knopp",
     "spectral_sphere_project",
     "tally",
