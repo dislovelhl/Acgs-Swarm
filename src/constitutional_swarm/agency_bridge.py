@@ -16,6 +16,7 @@ Typical usage::
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,8 @@ try:
     import yaml  # PyYAML — available transitively via acgs-lite
 except ImportError:
     yaml = None  # type: ignore[assignment]
+
+log = logging.getLogger(__name__)
 
 from acgs_lite import Constitution, MACIRole, Rule
 from constitutional_swarm.capability import Capability, CapabilityRegistry
@@ -38,20 +41,28 @@ def _slugify(name: str) -> str:
     return _SLUG_RE.sub("-", name.lower()).strip("-")
 
 
-def _parse_frontmatter(text: str) -> dict[str, Any]:
+def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """Return (frontmatter_dict, body_text) for a Markdown file.
+
+    body_text is everything after the closing ``---`` delimiter.
+    """
     m = _FRONTMATTER_RE.match(text)
     if not m:
-        return {}
+        return {}, text
     raw = m.group(1)
+    body = text[m.end() :]
     if yaml is not None:
-        return yaml.safe_load(raw) or {}
+        try:
+            return yaml.safe_load(raw) or {}, body
+        except yaml.YAMLError:
+            log.debug("PyYAML failed to parse frontmatter; falling back to naive parser")
     # Fallback: naive key: value parser (no nested structures needed)
     result: dict[str, Any] = {}
     for line in raw.splitlines():
         if ":" in line:
             k, _, v = line.partition(":")
             result[k.strip()] = v.strip()
-    return result
+    return result, body
 
 
 def _default_constitution() -> Constitution:
@@ -75,6 +86,7 @@ class AgencyAgentDef:
     name: str
     description: str
     domain: str
+    body: str = ""
     emoji: str = ""
     vibe: str = ""
     color: str = ""
@@ -101,10 +113,10 @@ class GovernedAgencyAgent:
         return self.dna.agent_id
 
 
-def _make_dna(defn: AgencyAgentDef, constitution: Constitution) -> AgentDNA:
+def _make_dna(defn: AgencyAgentDef, constitution: Constitution, agent_id: str) -> AgentDNA:
     return AgentDNA(
         constitution=constitution,
-        agent_id=_slugify(defn.name),
+        agent_id=agent_id,
         maci_role=MACIRole.EXECUTOR,
         strict=True,
         validate_output=True,
@@ -152,21 +164,37 @@ def load_agency_agents(
     md_files: list[Path] = [root] if root.is_file() else sorted(root.rglob("*.md"))
 
     agents: list[GovernedAgencyAgent] = []
+    seen_ids: dict[str, str] = {}  # slug -> first domain that claimed it
     for md_path in md_files:
         try:
             text = md_path.read_text(encoding="utf-8")
         except OSError:
+            log.debug("agency_bridge: could not read %s, skipping", md_path)
             continue
-        fm = _parse_frontmatter(text)
+        fm, body = _parse_frontmatter(text)
         name = fm.get("name", "")
         description = fm.get("description", "")
         if not name or not description:
+            log.debug("agency_bridge: skipping %s (no name/description in frontmatter)", md_path)
             continue
         domain = md_path.parent.name if not root.is_file() else "general"
+        slug = _slugify(name)
+        if slug in seen_ids:
+            # Prefix with domain to resolve collision (e.g. "engineering-analyst")
+            log.debug(
+                "agency_bridge: slug '%s' collision between domain '%s' and '%s'; "
+                "prefixing with domain",
+                slug,
+                seen_ids[slug],
+                domain,
+            )
+            slug = f"{domain}-{slug}"
+        seen_ids[slug] = domain
         defn = AgencyAgentDef(
             name=name,
             description=description,
             domain=domain,
+            body=body,
             emoji=fm.get("emoji", ""),
             vibe=fm.get("vibe", ""),
             color=fm.get("color", ""),
@@ -175,7 +203,7 @@ def load_agency_agents(
         agents.append(
             GovernedAgencyAgent(
                 definition=defn,
-                dna=_make_dna(defn, const),
+                dna=_make_dna(defn, const, slug),
                 capability=_make_capability(defn),
             )
         )

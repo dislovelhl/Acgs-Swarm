@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from constitutional_swarm.agency_bridge import (
+    AgencyAgentDef,
     AgencyAgentRegistry,
     load_agency_agents,
 )
@@ -211,3 +212,72 @@ def test_top_level_import() -> None:
     assert AgencyAgentRegistry is not None
     assert GovernedAgencyAgent is not None
     assert load_agency_agents is not None
+
+
+# ---------------------------------------------------------------------------
+# Body capture (Gemini finding #1)
+# ---------------------------------------------------------------------------
+
+
+def test_body_captured(agent_dir: Path) -> None:
+    agents = load_agency_agents(agent_dir)
+    te = next(a for a in agents if a.definition.name == "Test Engineer")
+    assert "Test Engineer Agent" in te.definition.body
+    assert "automated testing" in te.definition.body
+
+
+def test_body_field_exists_on_dataclass() -> None:
+    defn = AgencyAgentDef(name="X", description="Y", domain="test", body="hello")
+    assert defn.body == "hello"
+
+
+# ---------------------------------------------------------------------------
+# ID collision detection (Gemini finding #2)
+# ---------------------------------------------------------------------------
+
+
+def test_id_collision_prefixed_with_domain(tmp_path: Path) -> None:
+    analyst_md = textwrap.dedent(
+        """\
+        ---
+        name: Analyst
+        description: Expert analyst specializing in data analysis and reporting.
+        ---
+        # Analyst
+        """
+    )
+    (tmp_path / "engineering").mkdir()
+    (tmp_path / "finance").mkdir()
+    (tmp_path / "engineering" / "analyst.md").write_text(analyst_md)
+    (tmp_path / "finance" / "analyst.md").write_text(analyst_md)
+
+    agents = load_agency_agents(tmp_path)
+    assert len(agents) == 2
+    ids = {a.agent_id for a in agents}
+    # One keeps "analyst", the other gets prefixed with its domain
+    assert "analyst" in ids
+    assert any("-analyst" in aid for aid in ids)
+
+
+# ---------------------------------------------------------------------------
+# YAML defensive parsing (Codex finding #3)
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_colon_in_value(tmp_path: Path) -> None:
+    md = tmp_path / "colon-agent.md"
+    md.write_text(
+        textwrap.dedent(
+            """\
+            ---
+            name: Colon Agent
+            description: "Expert: specializing in multi-domain: analysis and reporting."
+            ---
+            # Colon Agent
+            """
+        )
+    )
+    agents = load_agency_agents(md)
+    assert len(agents) == 1
+    assert agents[0].definition.name == "Colon Agent"
+    assert "analysis" in agents[0].definition.description
