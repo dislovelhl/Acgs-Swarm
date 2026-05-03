@@ -1,0 +1,12 @@
+schema_version: 1
+name: governed-handoff-example
+policy:
+  unknown_decisions: fail_closed
+  protected_paths:
+    - ".acgs/**"
+    - "protected/**"
+    - "secrets/**"
+  secret_command_patterns:
+    - '\b(cat|less|more|head|tail|sed|awk|grep|rg)\b.*(\.env|secret|credential|id_rsa|token)'
+    - '\b(printenv|env)\b'
+    - '\b(git\s+config\s+--get|gh\s+auth\s+token)\b'
