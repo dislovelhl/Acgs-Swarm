@@ -407,6 +407,17 @@ Everything else remains importable, but 1.0 documents it as advanced surface. Ne
 
 Compatibility re-exports may still work for some advanced symbols, but the 1.0 documentation contract is: top-level for the five stable names above, explicit submodules for advanced usage.
 
+### Governed Coding-Agent Handoff CLI
+
+The optional handoff surface runs local coding-agent task directives through fail-closed policy gates and writes chain-hashed audit evidence under the caller repo's `.acgs/evidence/` directory.
+
+```bash
+cd examples/governed-handoff
+acgs-swarm run --task task.md
+acgs-swarm verify --bundle .acgs/evidence/example-governed-handoff.bundle.json
+acgs-swarm pack --task example-governed-handoff
+```
+
 ## Advanced: Bittensor subnet integration
 
 Run constitutional governance miners and validators on a Bittensor subnet. This is a decentralized validator network layer, not part of the stable core.

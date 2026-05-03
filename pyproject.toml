@@ -37,6 +37,9 @@ research = ["torch>=2.0", "transformers>=4.40"]
 # deprecated alias — use research instead
 latent = ["constitutional-swarm[research]"]
 
+[project.scripts]
+acgs-swarm = "constitutional_swarm.governed_handoff:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["constitutional_swarm*"]

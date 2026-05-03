@@ -1,0 +1,13 @@
+schema_version: 1
+name: governed-handoff-local
+roles:
+  proposer:
+    adapter: mock
+  executor:
+    adapter: mock
+  validator:
+    adapter: mock
+  observer:
+    adapter: mock
+adapters:
+  mock: {}
