@@ -15,7 +15,7 @@ authors = [{name = "ACGS Team", email = "hello@acgs.dev"}]
 # and related). Shipped in acgs-lite v2.8.1 via PRs #9 and #10.
 dependencies = [
   "acgs-lite>=2.8.1",
-  "braintrust==0.16.0",
+  "braintrust==0.18.0",
   "cryptography>=44.0.2",
   "numpy>=1.24",
 ]
