@@ -1,0 +1,1205 @@
+{
+  "content_address_algorithm": "SHA-256",
+  "intentionally_unreachable_store_only_codes": [
+    "CROSS_ATTEMPT_REPLAY",
+    "INVALID_PREDECESSOR",
+    "PREDECESSOR_REPLACED",
+    "RESULT_NOT_STAGED",
+    "STAGED_RESULT_CONFLICT",
+    "QUARANTINED",
+    "NONCE_REPLAY",
+    "COMMIT_ID_EQUIVOCATION",
+    "AUTHORITY_FROM_STAGING_DENIED",
+    "AUTHORITY_FROM_RECOVERY_DENIED",
+    "AUTHORITY_FROM_OUTBOX_DENIED",
+    "LEGACY_STATUS_NOT_AUTHORITATIVE",
+    "STORE_UNAVAILABLE",
+    "TRANSACTION_ABORTED",
+    "SERIALIZATION_RETRY_EXHAUSTED",
+    "OUTBOX_DELIVERY_PENDING"
+  ],
+  "protocol_version": "APCC-1.0-draft",
+  "provenance_policy": "Every vector names its byte origin and is evaluated by both independent implementations.",
+  "vectors": [
+    {
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "expected_code": "OK",
+      "mode": "historical",
+      "name": "valid-historical",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/2fa6ed3e4338bbaa84a101c3b5c75632b560141b5051c43f61d957660348fe22.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "OK",
+      "mode": "current",
+      "name": "valid-current",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/27e2dd960640e6696d6a63a358e01270393f69e262cd2870cc62a613a000fa53.json",
+      "expected_code": "INVALID_COMMIT_SEAL",
+      "mode": "historical",
+      "name": "tampered-commit-seal",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/1db7294054050fd7d9845aa58756fd173473cec4147e652e54f2e30f4b74b4c3.json",
+      "expected_code": "UNKNOWN_FIELD",
+      "mode": "historical",
+      "name": "unknown-envelope-field",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/a12356729f3168780867fe53e67fa36ce7b2c650f1dea7436546b627586ea25b.json",
+      "expected_code": "CASE_MISMATCHED_FIELD",
+      "mode": "historical",
+      "name": "case-mismatched-envelope-field",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/d479665a0c1b67baa9d841492564321ed72384b9d66cd416e70c58c81233ed07.json",
+      "expected_code": "MISSING_FIELD",
+      "mode": "historical",
+      "name": "missing-envelope-field",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/e19844bd32feee6daca90a09e543a0f863e1ddcb151b604ab3ed2678988ec85d.json",
+      "expected_code": "DUPLICATE_FIELD",
+      "mode": "historical",
+      "name": "duplicate-envelope-field",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/8acf17318afdcfe11bfa6e39c12ea88009c710859d6005046b50c0e27efacab6.json",
+      "expected_code": "MALFORMED_JSON",
+      "mode": "historical",
+      "name": "malformed-json",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/c88c934dc1bc79d6f05b2d0669a68cbf60f9ac8be9f7c82e82b4b14f70184dd1.json",
+      "expected_code": "TRAILING_BYTES",
+      "mode": "historical",
+      "name": "trailing-byte",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fbc819539eb340c7232121a60f7f002c78322bb8718403e11cee15557357ef6b.json",
+      "expected_code": "NONCANONICAL_ENCODING",
+      "mode": "historical",
+      "name": "noncanonical-whitespace",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/cbf3870032fc57a98d936822adafd5204df8d43446a17a01d40fdeacebd72f2e.json",
+      "expected_code": "INVALID_UNICODE",
+      "mode": "historical",
+      "name": "invalid-unicode",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/023ee2f88fcc591b21c32e87d4bbd6f5c109aba6f50cf5d030cb5de52e5a30cf.json",
+      "expected_code": "INVALID_BASE64URL",
+      "mode": "historical",
+      "name": "invalid-base64url",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/7ca29f2cf75590dbaa9652d92691ba726c38d9a29ccf2348272358d079fc36a2.json",
+      "expected_code": "WRONG_JSON_TYPE",
+      "mode": "historical",
+      "name": "wrong-json-type",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/f2e62f18db8ff930a18cffbb24ed442ccf6634f26e8eb23e773f0412e0458726.json",
+      "expected_code": "DEPTH_LIMIT_EXCEEDED",
+      "mode": "historical",
+      "name": "depth-limit",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/ac7799aa4335eeb9d61a1fac8e5dbd24b3ce6522b952a3aad5a8f4fbe6021e06.json",
+      "expected_code": "SIZE_LIMIT_EXCEEDED",
+      "mode": "historical",
+      "name": "size-limit",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/b6c7e68e88cb1b8d92484ea93de5dc46dcf494d7ca9d0658d96d7566db3d16b5.json",
+      "expected_code": "TRAILING_BYTES",
+      "mode": "historical",
+      "name": "top-level-malformed-true-delimiter",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/e83efb8af75db82144eab65794b8cc2bcbc5e1246b0cf43fb423e74acd8fd307.json",
+      "expected_code": "MALFORMED_JSON",
+      "mode": "historical",
+      "name": "nested-malformed-true-delimiter",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/e30cd2894ca40822a9c0190cb21d1812a207cff63a1a91f619b08d1e7a133b5d.json",
+      "expected_code": "TRAILING_BYTES",
+      "mode": "historical",
+      "name": "top-level-malformed-false-delimiter",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/08e210c0fe4b5796dfb3f02febbe20b14ef949b4bcc395e283e528f6a30388a0.json",
+      "expected_code": "MALFORMED_JSON",
+      "mode": "historical",
+      "name": "nested-malformed-false-delimiter",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/4373a7b954283b7f3ff66fed910e71dbe9a272abf053082a9bbc0a8b6284b60e.json",
+      "expected_code": "TRAILING_BYTES",
+      "mode": "historical",
+      "name": "top-level-malformed-null-delimiter",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/205403c45c3b6ba6d916d28697a58408c3a68111400a092e8651ecc6f0d82378.json",
+      "expected_code": "MALFORMED_JSON",
+      "mode": "historical",
+      "name": "nested-malformed-null-delimiter",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/a048e640908046be06e00eab37742b5d5ff80964af58cfd22f7cb2de4dfe375f.json",
+      "expected_code": "WRONG_JSON_TYPE",
+      "mode": "historical",
+      "name": "top-level-malformed-number-delimiter",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/77467ed3fbcfe3b419c9443ef8262d2a9a99e7a414c9c85cbfe5cbf87dfda9ec.json",
+      "expected_code": "WRONG_JSON_TYPE",
+      "mode": "historical",
+      "name": "nested-malformed-number-delimiter",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b.json",
+      "expected_code": "WRONG_JSON_TYPE",
+      "mode": "historical",
+      "name": "restricted-scalar-true",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa.json",
+      "expected_code": "WRONG_JSON_TYPE",
+      "mode": "historical",
+      "name": "restricted-scalar-false",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b.json",
+      "expected_code": "WRONG_JSON_TYPE",
+      "mode": "historical",
+      "name": "restricted-scalar-null",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b.json",
+      "expected_code": "WRONG_JSON_TYPE",
+      "mode": "historical",
+      "name": "restricted-scalar-number",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/1027473115bf5c5210b519fc29b3f935fe829eb289d45fe5496b5ce52d090759.json",
+      "expected_code": "UNKNOWN_PROTOCOL_VERSION",
+      "mode": "historical",
+      "name": "unknown-protocol-version",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/c5bbb28357efefa2b979d57d854716d01d879bb266a96c3526147e38130b50e9.json",
+      "expected_code": "UNSUPPORTED_CERTIFICATE_TYPE",
+      "mode": "historical",
+      "name": "unsupported-certificate-type",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/c3d7ef9b81be881d9700134837b159f67936454faf5ee96b732965c79483a210.json",
+      "expected_code": "UNSUPPORTED_ENCODING",
+      "mode": "historical",
+      "name": "unsupported-encoding",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/d71b5df762d87995441c48453451b99515b755050d1f2b32b9d8da3ceb83b288.json",
+      "expected_code": "UNSUPPORTED_DIGEST_ALGORITHM",
+      "mode": "historical",
+      "name": "unsupported-digest-algorithm",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/82891a205edf553c6faeacca2bb0aa04dcfe4cc7681b6da3ac8bec3eef283ed2.json",
+      "expected_code": "UNSUPPORTED_SIGNATURE_ALGORITHM",
+      "mode": "historical",
+      "name": "unsupported-signature-algorithm",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/f12b3e6f063b7f4c41b60f5c422b04730ddb5249c5e52870a53afdd9553647d1.json",
+      "expected_code": "UNSUPPORTED_STATEMENT_TYPE",
+      "mode": "historical",
+      "name": "unsupported-statement-type",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/1be43e70d703991897f74d2624ca205c1142d191272712abcb8d1aaa23f17ee0.json",
+      "expected_code": "INVALID_DECIMAL_STRING",
+      "mode": "historical",
+      "name": "invalid-decimal-string",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/7019253467f91461cf32e1014f9e0d92d6c869dbc6d39e7493e2be76d6341d1d.json",
+      "expected_code": "INVALID_DECIMAL_STRING",
+      "mode": "historical",
+      "name": "noncanonical-generation",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/00b70315240408dc5b0caed47c989eb146389589a27aad2eb6d457cb9081811b.json",
+      "expected_code": "ILLEGAL_NODE_STATE",
+      "mode": "historical",
+      "name": "illegal-node-state",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/a9f94f6335cb4fd65695aea66c57f2a616dc8833da96eaa2193515f33e8b1714.json",
+      "expected_code": "NODE_VERSION_CONFLICT",
+      "mode": "historical",
+      "name": "node-version-conflict",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/ab4fce500832d6f4cb0605d132afbeafbcbb1a0cae29953fd648218ff9baef69.json",
+      "expected_code": "DUPLICATE_SET_MEMBER",
+      "mode": "historical",
+      "name": "duplicate-predecessor",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/f30aa2a789d5890081c05fe4b5aa3e7097e2981b3471468ea8facec1672f0a02.json",
+      "expected_code": "STATEMENT_DIGEST_MISMATCH",
+      "mode": "historical",
+      "name": "statement-digest-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/18bd95fcf710f5eb816fc1def54a44e29a344dc1fdb04e62a1bec7292f80f67f.json",
+      "expected_code": "PROPOSAL_DIGEST_MISMATCH",
+      "mode": "historical",
+      "name": "proposal-digest-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/0465f9b0e2f2b1567f6320672eb3ceb7025e74b5265c5184acb64d5cc245bf9e.json",
+      "expected_code": "INVALID_PRODUCER_SIGNATURE",
+      "mode": "historical",
+      "name": "invalid-producer-signature",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/3a2bbeffd444e62ededc3709d6c346a9fd48a152652bea622ba5e0d8d4cb2456.json",
+      "expected_code": "INVALID_POLICY_SIGNATURE",
+      "mode": "historical",
+      "name": "invalid-policy-signature",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/7f11227c23f9ecda2f2285e01fd8fd8f9834a25463dc2551e7048d2478bd6391.json",
+      "expected_code": "INVALID_AUTHORITY_SIGNATURE",
+      "mode": "historical",
+      "name": "invalid-authority-signature",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "expected_code": "UNKNOWN_KEY",
+      "mode": "historical",
+      "name": "unknown-producer-key",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/22ab65d7990e9114b0cee13f5254a658902d5dbda58d855cec04380121bd5d18.json"
+    },
+    {
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "expected_code": "UNKNOWN_KEY",
+      "mode": "historical",
+      "name": "producer-scope-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/f1b7237376fe2b58c08392fc852587ed42c3838069dc723e1731ccd2f23fb758.json"
+    },
+    {
+      "certificate": "objects/526c17592fba5c69b77640c640b9ed3661534a6ebc2d1ff58a48fffc4f0fa1ea.json",
+      "expected_code": "KEY_ID_MISMATCH",
+      "mode": "historical",
+      "name": "signature-key-id-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/a7566bc57950846f006bd5d43eaa465523a54989f66d5da7f151268ad086cdb4.json",
+      "expected_code": "SUBJECT_MISMATCH",
+      "mode": "historical",
+      "name": "producer-agent-subject-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/018951f1930a822a995dc68c480bfe04460b22fe4d7da4bc7141bcdc4afc7d57.json",
+      "expected_code": "SUBJECT_MISMATCH",
+      "mode": "historical",
+      "name": "authority-agent-subject-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/6fddd83d863e0abc69413a2ed3e79c88d6c10caca066fa2d8fca4a1829c344c6.json",
+      "expected_code": "SUBJECT_MISMATCH",
+      "mode": "historical",
+      "name": "policy-deny-subject-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/118e6281d3c2238444b8c1e1ec1357e7b0656977350f065332cd4271aa1fb207.json",
+      "expected_code": "SUBJECT_MISMATCH",
+      "mode": "historical",
+      "name": "decision-commit-subject-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/50f3ff5763126677bc6f5e220529af82847600bb26a186bbd9d7b5f7534fc6be.json",
+      "expected_code": "ACTOR_AUTHORITY_MISMATCH",
+      "mode": "historical",
+      "name": "actor-authority-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/ce9330d3997324a805248dadb98f198564e458bd81a3a10d1cb08e7399a424f2.json",
+      "expected_code": "INPUT_DIGEST_MISMATCH",
+      "mode": "historical",
+      "name": "input-digest-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/329854c366981277f10ea4a33ddb2f7021d650c5af93a5d20e4b636a65c74fa8.json",
+      "expected_code": "OUTPUT_DIGEST_MISMATCH",
+      "mode": "historical",
+      "name": "output-digest-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/77fbe1f9f81501f9622fc2209ae4f9bce4ebc85fe9187acaeae0f6c794b2e308.json",
+      "expected_code": "ATTEMPT_MISMATCH",
+      "mode": "historical",
+      "name": "attempt-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/3c6b74afb32929adbc2b05421b01d3dc4ec3fc1d420360d0b82e453cfd23c2de.json",
+      "expected_code": "CROSS_WORKFLOW_REPLAY",
+      "mode": "historical",
+      "name": "cross-workflow-replay",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/2e5ad51f9e0edb2acfd642e073ebb798480435c5b43ac42a8a8f9ce8f97b6f7f.json",
+      "expected_code": "CROSS_NODE_REPLAY",
+      "mode": "historical",
+      "name": "cross-node-replay",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/c3d32c84a2488c23d1515cad0a914e914a69fcccc557994b279875ebf67852fc.json",
+      "expected_code": "STALE_POLICY_EPOCH",
+      "mode": "historical",
+      "name": "stale-policy-epoch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/5db4559c72a2319112a01a837665cefa7488ed9fe7abb9085c23c100e0bf2ffb.json",
+      "expected_code": "STALE_AUTHORITY_EPOCH",
+      "mode": "historical",
+      "name": "stale-authority-epoch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/787a3faba620990f838a17f08cd272b79897472d0548e8afcc94d9bf8f43684d.json",
+      "expected_code": "STALE_WORKFLOW_EPOCH",
+      "mode": "historical",
+      "name": "stale-workflow-epoch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/632e3b4dd0b29fccd9771ab8e51cc87cc33fc3640374ef1b4c35b0de3e7359c6.json",
+      "expected_code": "ACTOR_REVOKED",
+      "mode": "historical",
+      "name": "actor-revoked",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/ccf7f3841a8d9f18ec9c40a2b355b26a62b25fb1ff22fe469a7982c0aa17c8b8.json",
+      "expected_code": "WORKFLOW_REVOKED",
+      "mode": "historical",
+      "name": "workflow-revoked",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/24b499937e4c1a29b42193053048aa4fb53115e70a60b41f6623a86c54331eeb.json",
+      "expected_code": "PREDECESSOR_ROOT_MISMATCH",
+      "mode": "historical",
+      "name": "predecessor-root-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/53df9a82ced5f4f237f612a98b384eb8c6e74497451ac8fa92337a6c096b55f3.json",
+      "expected_code": "CROSS_WORKFLOW_PREDECESSOR",
+      "mode": "historical",
+      "name": "cross-workflow-predecessor",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/d0caf8ad6ba7d854f0351f3886943a61533d914cc5bd413811304be31a436a8e.json",
+      "expected_code": "ATTESTATION_NOT_YET_VALID",
+      "mode": "historical",
+      "name": "producer-attestation-not-yet-valid",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/67ca60a21a47cf83a67a261013ff429d72a3494559eb0ec6acd12209e8dcd72b.json",
+      "expected_code": "ATTESTATION_EXPIRED",
+      "mode": "historical",
+      "name": "producer-attestation-expired",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/a13dc6b3a30354bf6da94966e4161ff5c9624675912077f84d55a1360ba06026.json",
+      "expected_code": "ATTESTATION_NOT_YET_VALID",
+      "mode": "historical",
+      "name": "policy-attestation-not-yet-valid",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/e3a527b39e284ddfc5ce5da709d1f34202a682253dd63b3e64ac2f275b134aee.json",
+      "expected_code": "ATTESTATION_EXPIRED",
+      "mode": "historical",
+      "name": "policy-attestation-expired",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/5252a27239460b497c35f511bc45501b06fac0a47ef0ddaca02439923162a6b0.json",
+      "expected_code": "ATTESTATION_NOT_YET_VALID",
+      "mode": "historical",
+      "name": "authority-attestation-not-yet-valid",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/d3335966f3dbb99bef956d93b2f408b7ea06a553c25ca961f4f83b2767018564.json",
+      "expected_code": "ATTESTATION_EXPIRED",
+      "mode": "historical",
+      "name": "authority-attestation-expired",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_REQUIRED",
+      "mode": "current",
+      "name": "authority-status-required",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/1746046db38b372e674a67e245b29d93388f446afe2885015013f0225d54fe8c.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_INVALID_SIGNATURE",
+      "mode": "current",
+      "name": "tampered-status-signature",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/2fa6ed3e4338bbaa84a101c3b5c75632b560141b5051c43f61d957660348fe22.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AQIDBAUGBwgJCgsMDQ4PEA"
+      },
+      "expected_code": "AUTHORITY_STATUS_NONCE_MISMATCH",
+      "mode": "current",
+      "name": "nonce-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/108b2a27a0fef972e908eec21cde69f88478ac37eb88fc5fea87b914d5a615e5.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_CERTIFICATE_MISMATCH",
+      "mode": "current",
+      "name": "status-store-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/24a7e8611ad9e1149ab9e47f01fe1f98152f7004edb1f092bc6df4b70e174d5d.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_CERTIFICATE_MISMATCH",
+      "mode": "current",
+      "name": "status-certificate-digest-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/54e831e346adb537f32d93947319ff633bd292235a643a20cd12ba381ab0490b.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_CERTIFICATE_MISMATCH",
+      "mode": "current",
+      "name": "status-certificate-sequence-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/186311fa1f485571752c4745a488ec69e5174913ad8ad6822d62e3e91e22cfc8.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "ACTOR_REVOKED",
+      "mode": "current",
+      "name": "status-actor-revoked",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/548b06d042a9135f82f93126ba108c676c84b194b8edf537c74d0fcc33f0bd40.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "WORKFLOW_REVOKED",
+      "mode": "current",
+      "name": "status-workflow-revoked",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/b39c0c8244f98082a594889aa9900b5a0399c034667630f43cedc182f6c2e206.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "ATTESTATION_NOT_YET_VALID",
+      "mode": "current",
+      "name": "status-not-yet-valid",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/73844bb87ce6ead05b010eb084417f296910ac0f369382179a7fa35b42de329e.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_EXPIRED",
+      "mode": "current",
+      "name": "status-expired",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/2fa6ed3e4338bbaa84a101c3b5c75632b560141b5051c43f61d957660348fe22.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "500",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_EXPIRED",
+      "mode": "current",
+      "name": "status-staleness-expired",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/2fa6ed3e4338bbaa84a101c3b5c75632b560141b5051c43f61d957660348fe22.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "43",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_ROLLBACK",
+      "mode": "current",
+      "name": "trust-log-rollback",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/2fa6ed3e4338bbaa84a101c3b5c75632b560141b5051c43f61d957660348fe22.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "LfLgaFgeULyTavA767V25FDip4gxIZpsWSKKV4sBkqM",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_ROLLBACK",
+      "mode": "current",
+      "name": "same-sequence-different-head",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/ee3b0973c35b0ec41ee410a0d1ed19999c50391d5a2ae623765e7122b71c4477.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_REVOKED",
+      "mode": "current",
+      "name": "status-revoked",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/fd4b713da0dae65891d6745d64417bd79c669a7ba025d1e3f2ec976667472f3d.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_REVOKED",
+      "mode": "current",
+      "name": "status-unknown-literal",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/e42965517ebbaea9fd9c48dc00b4616a7bd27f4339558805361de4b07da4bb04.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_SUPERSEDED",
+      "mode": "current",
+      "name": "status-superseded",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/758d9fcdfb9157da1e0aeddaa9a47f116a65c070202b1aa6361a22bf5e03a291.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "5000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "AUTHORITY_STATUS_SUPERSEDED",
+      "mode": "current",
+      "name": "status-unknown-superseded-literal",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "authority_status": "objects/2fa6ed3e4338bbaa84a101c3b5c75632b560141b5051c43f61d957660348fe22.json",
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "current_inputs": {
+        "highest_trust_log_head": "ck46KSCzIoy83UyHtqabRGnGYrZFX94-j3UKDMDAG2M",
+        "highest_trust_log_sequence": "42",
+        "maximum_staleness_ms": "05000",
+        "now_ms": "1760000001000",
+        "request_nonce": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expected_code": "INVALID_DECIMAL_STRING",
+      "mode": "current",
+      "name": "noncanonical-staleness",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    }
+  ],
+  "verifier_reachable_failure_codes": [
+    "ACTOR_AUTHORITY_MISMATCH",
+    "ACTOR_REVOKED",
+    "ATTEMPT_MISMATCH",
+    "ATTESTATION_EXPIRED",
+    "ATTESTATION_NOT_YET_VALID",
+    "AUTHORITY_STATUS_CERTIFICATE_MISMATCH",
+    "AUTHORITY_STATUS_EXPIRED",
+    "AUTHORITY_STATUS_INVALID_SIGNATURE",
+    "AUTHORITY_STATUS_NONCE_MISMATCH",
+    "AUTHORITY_STATUS_REQUIRED",
+    "AUTHORITY_STATUS_REVOKED",
+    "AUTHORITY_STATUS_ROLLBACK",
+    "AUTHORITY_STATUS_SUPERSEDED",
+    "CASE_MISMATCHED_FIELD",
+    "CROSS_NODE_REPLAY",
+    "CROSS_WORKFLOW_PREDECESSOR",
+    "CROSS_WORKFLOW_REPLAY",
+    "DEPTH_LIMIT_EXCEEDED",
+    "DUPLICATE_FIELD",
+    "DUPLICATE_SET_MEMBER",
+    "ILLEGAL_NODE_STATE",
+    "INPUT_DIGEST_MISMATCH",
+    "INVALID_AUTHORITY_SIGNATURE",
+    "INVALID_BASE64URL",
+    "INVALID_COMMIT_SEAL",
+    "INVALID_DECIMAL_STRING",
+    "INVALID_POLICY_SIGNATURE",
+    "INVALID_PRODUCER_SIGNATURE",
+    "INVALID_UNICODE",
+    "KEY_ID_MISMATCH",
+    "MALFORMED_JSON",
+    "MISSING_FIELD",
+    "NODE_VERSION_CONFLICT",
+    "NONCANONICAL_ENCODING",
+    "OUTPUT_DIGEST_MISMATCH",
+    "PREDECESSOR_ROOT_MISMATCH",
+    "PROPOSAL_DIGEST_MISMATCH",
+    "SIZE_LIMIT_EXCEEDED",
+    "STALE_AUTHORITY_EPOCH",
+    "STALE_POLICY_EPOCH",
+    "STALE_WORKFLOW_EPOCH",
+    "STATEMENT_DIGEST_MISMATCH",
+    "SUBJECT_MISMATCH",
+    "TRAILING_BYTES",
+    "UNKNOWN_FIELD",
+    "UNKNOWN_KEY",
+    "UNKNOWN_PROTOCOL_VERSION",
+    "UNSUPPORTED_CERTIFICATE_TYPE",
+    "UNSUPPORTED_DIGEST_ALGORITHM",
+    "UNSUPPORTED_ENCODING",
+    "UNSUPPORTED_SIGNATURE_ALGORITHM",
+    "UNSUPPORTED_STATEMENT_TYPE",
+    "WORKFLOW_REVOKED",
+    "WRONG_JSON_TYPE"
+  ]
+}
