@@ -447,10 +447,10 @@ def _decode(
     raw: bytes, schema: object, max_bytes: int = MAX_PAYLOAD_BYTES
 ) -> dict[str, Any]:
     value = _object(_parse(raw, max_bytes))
-    _schema(value, schema)
-    _scalars(value)
     if _canonical(value) != raw:
         raise CodecError(FailureCode.NONCANONICAL_ENCODING)
+    _schema(value, schema)
+    _scalars(value)
     return value
 
 

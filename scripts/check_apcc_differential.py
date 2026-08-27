@@ -16,12 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from constitutional_swarm.apcc.verifier import (  # noqa: E402
+    CausalClosureLimits,
     ScopedTrust,
     TrustBinding,
     TrustRole,
     verify_current,
+    verify_causal_closure,
     verify_historical,
 )
+
+
+class _Resolver:
+    def __init__(self, values: dict[str, bytes]) -> None:
+        self.values = values
+
+    def resolve_predecessor(self, certificate_digest: str) -> bytes | None:
+        return self.values.get(certificate_digest)
 
 
 def _arguments() -> argparse.Namespace:
@@ -75,6 +85,18 @@ def _python_code(fixtures: Path, vector: dict[str, Any]) -> str:
     trust = _trust(_artifact(fixtures, vector["trust"]))
     if vector["mode"] == "historical":
         result = verify_historical(envelope, trust=trust)
+    elif vector["mode"] == "causal":
+        values = {
+            digest: _artifact(fixtures, reference)
+            for digest, reference in vector.get("predecessors", {}).items()
+        }
+        limits = vector.get("causal_limits", {})
+        result = verify_causal_closure(
+            envelope,
+            trust=trust,
+            resolver=_Resolver(values),
+            limits=CausalClosureLimits(**limits),
+        )
     else:
         inputs = vector["current_inputs"]
         result = verify_current(
@@ -91,7 +113,10 @@ def _python_code(fixtures: Path, vector: dict[str, Any]) -> str:
             highest_trust_log_head=inputs["highest_trust_log_head"],
             maximum_staleness_ms=inputs["maximum_staleness_ms"],
         )
-    return "OK" if result.ok else result.code.value
+    if result.ok:
+        return "OK"
+    assert result.code is not None
+    return result.code.value
 
 
 def _go_code(binary: Path, fixtures: Path, vector: dict[str, Any]) -> str:
@@ -103,6 +128,13 @@ def _go_code(binary: Path, fixtures: Path, vector: dict[str, Any]) -> str:
         "--trust",
         str(fixtures / vector["trust"]),
     ]
+    if vector["mode"] == "causal":
+        for digest, reference in vector.get("predecessors", {}).items():
+            command.extend(["--predecessor", f"{digest}={fixtures / reference}"])
+        limits = vector.get("causal_limits", {})
+        for name in ("max_depth", "max_certificates", "max_total_bytes"):
+            if name in limits:
+                command.extend([f"--{name.replace('_', '-')}", str(limits[name])])
     if vector["mode"] == "current":
         inputs = vector["current_inputs"]
         command.extend(

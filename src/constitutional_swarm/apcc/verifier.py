@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Protocol
 
 from .codec import (
     CodecError,
@@ -26,7 +26,13 @@ from .crypto import (
     sha256_digest,
     verify_detached,
 )
-from .model import AuthorityStatus, CommitCertificate, FailureCode, Signature
+from .model import (
+    AuthorityStatus,
+    CommitCertificate,
+    FailureCode,
+    PredecessorRef,
+    Signature,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +42,21 @@ class VerificationResult:
     ok: bool
     code: FailureCode | None = None
     certificate: CommitCertificate | None = None
+
+
+class PredecessorResolver(Protocol):
+    """Resolve exact detached certificate-envelope bytes by payload digest."""
+
+    def resolve_predecessor(self, certificate_digest: str) -> bytes | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CausalClosureLimits:
+    """Resource bounds for one digest-pinned causal-closure verification."""
+
+    max_depth: int = 64
+    max_certificates: int = 4096
+    max_total_bytes: int = 64 * 1024 * 1024
 
 
 class TrustRole(StrEnum):
@@ -137,10 +158,13 @@ def _key(
         return None, FailureCode.UNSUPPORTED_SIGNATURE_ALGORITHM
     if signature.key_id != body_key_id:
         return None, FailureCode.KEY_ID_MISMATCH
-    binding = trust.resolve(role, scope)
-    if binding is None or binding.key_id != body_key_id:
+    try:
+        binding = trust.resolve(role, scope)
+        if binding is None or binding.key_id != body_key_id:
+            return None, FailureCode.UNKNOWN_KEY
+        return binding.public_key, None
+    except Exception:
         return None, FailureCode.UNKNOWN_KEY
-    return binding.public_key, None
 
 
 def _verify_signature(
@@ -407,6 +431,128 @@ def verify_historical(envelope: bytes, *, trust: ScopedTrust) -> VerificationRes
     return VerificationResult(True, certificate=certificate)
 
 
+def _predecessor_identity(
+    certificate: CommitCertificate, certificate_digest: str
+) -> tuple[str, str, str, str, str, str]:
+    return (
+        certificate.subject.workflow_id,
+        certificate.subject.node_id,
+        certificate.bindings.committed_node_version,
+        certificate.decision.commit_id,
+        certificate_digest,
+        certificate.subject.output_digest,
+    )
+
+
+def _reference_identity(
+    reference: PredecessorRef,
+) -> tuple[str, str, str, str, str, str]:
+    return (
+        reference.workflow_id,
+        reference.node_id,
+        reference.committed_node_version,
+        reference.commit_id,
+        reference.certificate_digest,
+        reference.output_digest,
+    )
+
+
+def verify_causal_closure(
+    envelope: bytes,
+    *,
+    trust: ScopedTrust,
+    resolver: PredecessorResolver,
+    limits: CausalClosureLimits = CausalClosureLimits(),
+) -> VerificationResult:
+    """Verify historical integrity plus every digest-pinned predecessor edge.
+
+    The root counts as depth zero and as one certificate. Shared ancestors are
+    verified and charged once; every incoming six-field reference is compared.
+    """
+    root = verify_historical(envelope, trust=trust)
+    if not root.ok:
+        return root
+    if resolver is None:
+        return _failure(FailureCode.INVALID_PREDECESSOR)
+    try:
+        max_depth = limits.max_depth
+        max_certificates = limits.max_certificates
+        max_total_bytes = limits.max_total_bytes
+        invalid_limits = (
+            type(max_depth) is not int
+            or type(max_certificates) is not int
+            or type(max_total_bytes) is not int
+            or max_depth < 0
+            or max_certificates < 1
+            or max_total_bytes < 1
+        )
+    except Exception:
+        invalid_limits = True
+    if invalid_limits:
+        return _failure(FailureCode.SIZE_LIMIT_EXCEEDED)
+    if len(envelope) > limits.max_total_bytes:
+        return _failure(FailureCode.SIZE_LIMIT_EXCEEDED)
+    assert root.certificate is not None
+    try:
+        root_digest = decode_envelope(envelope).payload_sha256
+    except CodecError as exc:
+        return _failure(exc.code)
+    cache: dict[str, CommitCertificate] = {root_digest: root.certificate}
+    active: set[str] = {root_digest}
+    complete: set[str] = set()
+    total_bytes = len(envelope)
+
+    def visit(certificate: CommitCertificate, depth: int) -> FailureCode | None:
+        nonlocal total_bytes
+        for reference in certificate.bindings.predecessors:
+            digest = reference.certificate_digest
+            if depth + 1 > limits.max_depth:
+                return FailureCode.DEPTH_LIMIT_EXCEEDED
+            if digest in active:
+                return FailureCode.INVALID_PREDECESSOR
+            resolved = cache.get(digest)
+            if resolved is None:
+                if len(cache) >= limits.max_certificates:
+                    return FailureCode.SIZE_LIMIT_EXCEEDED
+                try:
+                    predecessor_envelope = resolver.resolve_predecessor(digest)
+                    if predecessor_envelope is None:
+                        return FailureCode.INVALID_PREDECESSOR
+                    predecessor_bytes = bytes(predecessor_envelope)
+                except Exception:
+                    return FailureCode.INVALID_PREDECESSOR
+                if total_bytes + len(predecessor_bytes) > limits.max_total_bytes:
+                    return FailureCode.SIZE_LIMIT_EXCEEDED
+                historical = verify_historical(predecessor_bytes, trust=trust)
+                if not historical.ok or historical.certificate is None:
+                    return FailureCode.INVALID_PREDECESSOR
+                try:
+                    detached = decode_envelope(predecessor_bytes)
+                except CodecError:
+                    return FailureCode.INVALID_PREDECESSOR
+                if detached.payload_sha256 != digest:
+                    return FailureCode.INVALID_PREDECESSOR
+                resolved = historical.certificate
+                cache[digest] = resolved
+                total_bytes += len(predecessor_bytes)
+            if _predecessor_identity(resolved, digest) != _reference_identity(
+                reference
+            ):
+                return FailureCode.INVALID_PREDECESSOR
+            if digest in complete:
+                continue
+            active.add(digest)
+            error = visit(resolved, depth + 1)
+            active.remove(digest)
+            if error is not None:
+                return error
+            complete.add(digest)
+        return None
+
+    error = visit(root.certificate, 0)
+    return _failure(error) if error is not None else root
+
+
 def _status_literals(
     status: AuthorityStatus, certificate: CommitCertificate
 ) -> FailureCode | None:
@@ -469,6 +615,8 @@ def verify_current(
         status = normalize_authority_status(authority_status)
     except CodecError as exc:
         return _failure(exc.code)
+    except Exception:
+        return _failure(FailureCode.NONCANONICAL_ENCODING)
     literal_error = _status_literals(status, certificate)
     if literal_error is not None:
         return _failure(literal_error)
@@ -525,11 +673,14 @@ def verify_current(
 
 
 __all__ = [
+    "CausalClosureLimits",
     "FailureCode",
+    "PredecessorResolver",
     "ScopedTrust",
     "TrustBinding",
     "TrustRole",
     "VerificationResult",
     "verify_current",
+    "verify_causal_closure",
     "verify_historical",
 ]

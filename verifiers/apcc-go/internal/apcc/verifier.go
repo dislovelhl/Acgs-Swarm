@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"sort"
 
 	"github.com/acgs/apcc-go-verifier/internal/cj1"
@@ -24,7 +25,30 @@ type Result struct {
 	Certificate       cj1.Object
 }
 
+type PredecessorResolver interface {
+	ResolvePredecessor(certificateDigest string) ([]byte, bool, error)
+}
+
+type CausalClosureLimits struct {
+	MaxDepth        int
+	MaxCertificates int
+	MaxTotalBytes   int
+}
+
+func DefaultCausalClosureLimits() CausalClosureLimits {
+	return CausalClosureLimits{MaxDepth: 64, MaxCertificates: 4096, MaxTotalBytes: 64 * 1024 * 1024}
+}
+
 func failure(code string) Result { return Result{Code: code} }
+
+func resolvePredecessor(resolver PredecessorResolver, digest string) (envelope []byte, found bool, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			envelope, found, err = nil, false, errors.New("predecessor resolver panic")
+		}
+	}()
+	return resolver.ResolvePredecessor(digest)
+}
 
 type decodedCertificate struct {
 	root    cj1.Object
@@ -58,6 +82,92 @@ func VerifyHistorical(envelope []byte, trust *Trust) Result {
 		return failure(code)
 	}
 	return Result{OK: true, Code: "OK", CertificateDigest: certificate.digest, Certificate: certificate.root}
+}
+
+func VerifyCausalClosure(envelope []byte, trust *Trust, resolver PredecessorResolver, limits CausalClosureLimits) Result {
+	root := VerifyHistorical(envelope, trust)
+	if !root.OK {
+		return root
+	}
+	if resolver == nil {
+		return failure("INVALID_PREDECESSOR")
+	}
+	if limits.MaxDepth < 0 || limits.MaxCertificates < 1 || limits.MaxTotalBytes < 1 {
+		return failure("SIZE_LIMIT_EXCEEDED")
+	}
+	if len(envelope) > limits.MaxTotalBytes {
+		return failure("SIZE_LIMIT_EXCEEDED")
+	}
+	cache := map[string]cj1.Object{root.CertificateDigest: root.Certificate}
+	active := map[string]bool{root.CertificateDigest: true}
+	complete := map[string]bool{}
+	totalBytes := len(envelope)
+	var visit func(cj1.Object, int) string
+	visit = func(certificate cj1.Object, depth int) string {
+		predecessors, _ := array(child(certificate, "bindings")["predecessors"])
+		for _, value := range predecessors {
+			reference, _ := object(value)
+			claimedDigest := text(reference, "certificate_digest")
+			if depth+1 > limits.MaxDepth {
+				return "DEPTH_LIMIT_EXCEEDED"
+			}
+			if active[claimedDigest] {
+				return "INVALID_PREDECESSOR"
+			}
+			resolved, found := cache[claimedDigest]
+			if !found {
+				if len(cache) >= limits.MaxCertificates {
+					return "SIZE_LIMIT_EXCEEDED"
+				}
+				predecessorEnvelope, ok, resolveErr := resolvePredecessor(resolver, claimedDigest)
+				if resolveErr != nil || !ok {
+					return "INVALID_PREDECESSOR"
+				}
+				if totalBytes+len(predecessorEnvelope) > limits.MaxTotalBytes {
+					return "SIZE_LIMIT_EXCEEDED"
+				}
+				historical := VerifyHistorical(predecessorEnvelope, trust)
+				if !historical.OK {
+					return "INVALID_PREDECESSOR"
+				}
+				if historical.CertificateDigest != claimedDigest {
+					return "INVALID_PREDECESSOR"
+				}
+				resolved = historical.Certificate
+				cache[claimedDigest] = resolved
+				totalBytes += len(predecessorEnvelope)
+			}
+			if !predecessorReferenceMatches(reference, resolved, claimedDigest) {
+				return "INVALID_PREDECESSOR"
+			}
+			if complete[claimedDigest] {
+				continue
+			}
+			active[claimedDigest] = true
+			if code := visit(resolved, depth+1); code != "" {
+				return code
+			}
+			delete(active, claimedDigest)
+			complete[claimedDigest] = true
+		}
+		return ""
+	}
+	if code := visit(root.Certificate, 0); code != "" {
+		return failure(code)
+	}
+	return root
+}
+
+func predecessorReferenceMatches(reference, certificate cj1.Object, certificateDigest string) bool {
+	subject := child(certificate, "subject")
+	bindings := child(certificate, "bindings")
+	decision := child(certificate, "decision")
+	return text(reference, "workflow_id") == text(subject, "workflow_id") &&
+		text(reference, "node_id") == text(subject, "node_id") &&
+		text(reference, "committed_node_version") == text(bindings, "committed_node_version") &&
+		text(reference, "commit_id") == text(decision, "commit_id") &&
+		text(reference, "certificate_digest") == certificateDigest &&
+		text(reference, "output_digest") == text(subject, "output_digest")
 }
 
 func decodeEnvelope(raw []byte) (decodedCertificate, string) {

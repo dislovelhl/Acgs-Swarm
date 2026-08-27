@@ -2,7 +2,6 @@
   "content_address_algorithm": "SHA-256",
   "intentionally_unreachable_store_only_codes": [
     "CROSS_ATTEMPT_REPLAY",
-    "INVALID_PREDECESSOR",
     "PREDECESSOR_REPLACED",
     "RESULT_NOT_STAGED",
     "STAGED_RESULT_CONFLICT",
@@ -45,6 +44,325 @@
       "expected_code": "OK",
       "mode": "current",
       "name": "valid-current",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "OK",
+      "mode": "causal",
+      "name": "valid-causal-chain",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/8a22d681b496b46c4298215081244b7769cb17573e5a1e0c0cec5ab9ea561d5d.json",
+      "expected_code": "OK",
+      "mode": "causal",
+      "name": "valid-causal-two-edge-chain",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json",
+        "QvC2D0JbaQLGFgoOFgTQDCQOsHSD7IwYgFIJ386RASc": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-missing-predecessor",
+      "predecessors": {},
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-found-malformed-envelope",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-found-invalid-commit-seal",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/071eaa4e748f864966d45ff09af43c1fc74517b9f6dbfdc0271130cb74bfc9aa.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-found-wrong-protocol-version",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/194321f57892731587b2f55ce35ef4c0dcabfb83a2d60131da18b4fe2168e052.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-digest-tamper",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-cycle-alias",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "causal_limits": {
+        "max_certificates": 4096,
+        "max_depth": 0,
+        "max_total_bytes": 67108864
+      },
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "DEPTH_LIMIT_EXCEEDED",
+      "mode": "causal",
+      "name": "causal-depth-limit",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "causal_limits": {
+        "max_certificates": 1,
+        "max_depth": 64,
+        "max_total_bytes": 67108864
+      },
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "SIZE_LIMIT_EXCEEDED",
+      "mode": "causal",
+      "name": "causal-count-limit",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "causal_limits": {
+        "max_certificates": 4096,
+        "max_depth": 64,
+        "max_total_bytes": 5250
+      },
+      "certificate": "objects/fa0ce7db6d253abc879aecdd404bcd98600102bd6c6421f527219c3d67017df0.json",
+      "expected_code": "SIZE_LIMIT_EXCEEDED",
+      "mode": "causal",
+      "name": "causal-total-byte-limit",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "causal_limits": {
+        "max_certificates": 1,
+        "max_depth": -1,
+        "max_total_bytes": 1
+      },
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "expected_code": "SIZE_LIMIT_EXCEEDED",
+      "mode": "causal",
+      "name": "causal-invalid-negative-depth",
+      "predecessors": {},
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "causal_limits": {
+        "max_certificates": 0,
+        "max_depth": 1,
+        "max_total_bytes": 1
+      },
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "expected_code": "SIZE_LIMIT_EXCEEDED",
+      "mode": "causal",
+      "name": "causal-invalid-zero-certificates",
+      "predecessors": {},
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "causal_limits": {
+        "max_certificates": 1,
+        "max_depth": 1,
+        "max_total_bytes": 0
+      },
+      "certificate": "objects/76976ac644b933a5974d86da6f450babc46b558f52aabd8ebad7e5e38040476c.json",
+      "expected_code": "SIZE_LIMIT_EXCEEDED",
+      "mode": "causal",
+      "name": "causal-invalid-zero-bytes",
+      "predecessors": {},
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/79c1a7608033bd6f0eca82c2c4cd054dbfcb7df13889f31098577a1603ec8dee.json",
+      "expected_code": "CROSS_WORKFLOW_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-edge-mismatch-workflow-id",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/c7c1b58dd51817b8203bef5b57e86c24b48bc5947c986cc18899b52244716270.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-edge-mismatch-node-id",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/57b4b8b36f25f6bdffc6bf0136281ea9c36594b4d15868070bdfdb7bc44a929c.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-edge-mismatch-committed-node-version",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/7f63c668c19fb421add5e7a763c8093a41f211a3882e3d5dd47ade40efd11b1e.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-edge-mismatch-commit-id",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/c0499fc72572e4a64f32768035d98ecc4cc717ef2b3b2cd9c40132dfaa09b1a8.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-edge-mismatch-certificate-digest",
+      "predecessors": {
+        "hSE2_AgD1O0smgTQz-OwHCxWfOPBa7JrXqtw8gIpdW4": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/3dda4d71a706a0f63da768af56bf01891d8132858acfb1e9e21d411d0ab98aeb.json",
+      "expected_code": "INVALID_PREDECESSOR",
+      "mode": "causal",
+      "name": "causal-edge-mismatch-output-digest",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json"
+      },
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/c6356719e04d0dbe67445bbe2f979d3b8a7e60ba1cb527a78b52aee77137a1b3.json",
+      "expected_code": "OK",
+      "mode": "causal",
+      "name": "valid-causal-shared-ancestor",
+      "predecessors": {
+        "364tmJzocjduRVH-HKv457kw_XkmPFHmpdi7CFs6Oio": "objects/d2879a29ac5e277124e55d5c13a512cfaa1c6e0c4aac1df233a67b52652827c4.json",
+        "VCBs5R4v4ZOJxvFsLHb7fJsbfjxiORo75ez9NZykda4": "objects/09e9e68e0db6c57a984d8d006dcb85291da7276abb4501550def393f95885eed.json",
+        "keGTT6LUpzivjLhXAKwbJ0rxEwpyDZWqRyFrudVX8rI": "objects/6b9c56d4c984a3306dec93c9febd154469539e9fc934032cfc0f90b3efbd3506.json"
+      },
       "provenance": [
         "python-independent-constructor",
         "go-independent-verifier"
@@ -136,6 +454,42 @@
       "name": "noncanonical-whitespace",
       "provenance": [
         "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/db80b74e3253735dd4f54c7f5fcfd3cd011bc7bb39dd6069d1ca3141f702bcc6.json",
+      "expected_code": "NONCANONICAL_ENCODING",
+      "mode": "historical",
+      "name": "compound-unknown-escaped-solidus",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/d9e3874ba86255ae984d27608c65cb00b4ac34a50552d8a6d525706a9b418c92.json",
+      "expected_code": "NONCANONICAL_ENCODING",
+      "mode": "historical",
+      "name": "compound-unknown-escaped-line-separator",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/0a45874c3d24cbeacbdcc3caa3f5287c562872bffc99a1229400bc79d403bfe0.json",
+      "expected_code": "NONCANONICAL_ENCODING",
+      "mode": "historical",
+      "name": "compound-case-mismatch-whitespace",
+      "provenance": [
+        "hand-authored-anchor",
+        "python-independent-verifier",
         "go-independent-verifier"
       ],
       "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
@@ -552,6 +906,105 @@
       "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
     },
     {
+      "certificate": "objects/a1c056581aa640e43700ea6c41989cee10d2a1b69bbff4aee304819a8d2125d5.json",
+      "expected_code": "CROSS_WORKFLOW_REPLAY",
+      "mode": "historical",
+      "name": "producer-statement-workflow-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/537c5eeafedb8ca9b35d40dddd563cee044cbdfe2f29e6cf40b6adedbb8b5a45.json",
+      "expected_code": "CROSS_NODE_REPLAY",
+      "mode": "historical",
+      "name": "producer-statement-node-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/650c7584e57f23f74fce920af71c9a2420b3a84d1586a60b7477231063831998.json",
+      "expected_code": "ATTEMPT_MISMATCH",
+      "mode": "historical",
+      "name": "producer-statement-attempt-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/c4ed9877824c0f5e6d1ce684310b1277f7f886370804fabe525c90a6972899dc.json",
+      "expected_code": "CROSS_WORKFLOW_REPLAY",
+      "mode": "historical",
+      "name": "policy-statement-workflow-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/d9b8444ce331637d37b4cd242809be628af6b2f2e5ba9c943ef365ef38aa4af6.json",
+      "expected_code": "CROSS_NODE_REPLAY",
+      "mode": "historical",
+      "name": "policy-statement-node-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/1a45584d3b0c4a2ef1d5cb1a440e436ee5eb6c43920a8b221e3f639e32fdb00a.json",
+      "expected_code": "ATTEMPT_MISMATCH",
+      "mode": "historical",
+      "name": "policy-statement-attempt-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/9fa131ad2e8f424791b293e7b7c0bb73cd62c4f97e6a8fbacf48d4bc5382eb37.json",
+      "expected_code": "CROSS_WORKFLOW_REPLAY",
+      "mode": "historical",
+      "name": "authority-statement-workflow-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/d66ed07a84b461376dce4fc697bc559b94d7bffa872cba3de7a1a09997165eae.json",
+      "expected_code": "CROSS_NODE_REPLAY",
+      "mode": "historical",
+      "name": "authority-statement-node-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/4f17f9e0c4a26c42638a27cfbdae921abd82311310c84ef51a6c2dc934be389c.json",
+      "expected_code": "ATTEMPT_MISMATCH",
+      "mode": "historical",
+      "name": "authority-statement-attempt-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
       "certificate": "objects/a7566bc57950846f006bd5d43eaa465523a54989f66d5da7f151268ad086cdb4.json",
       "expected_code": "SUBJECT_MISMATCH",
       "mode": "historical",
@@ -574,6 +1027,17 @@
       "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
     },
     {
+      "certificate": "objects/b0cb5454958bd0356d635980fc68578edb5d3c0f2af898973c6120796164162e.json",
+      "expected_code": "KEY_ID_MISMATCH",
+      "mode": "historical",
+      "name": "authority-producer-key-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
       "certificate": "objects/6fddd83d863e0abc69413a2ed3e79c88d6c10caca066fa2d8fca4a1829c344c6.json",
       "expected_code": "SUBJECT_MISMATCH",
       "mode": "historical",
@@ -589,6 +1053,17 @@
       "expected_code": "SUBJECT_MISMATCH",
       "mode": "historical",
       "name": "decision-commit-subject-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/d7370c2135b9639a3b42e13a9c69a81d0b7d2271eec098ff65eed42a2834ad48.json",
+      "expected_code": "SUBJECT_MISMATCH",
+      "mode": "historical",
+      "name": "decision-nonce-subject-mismatch",
       "provenance": [
         "python-independent-constructor",
         "go-independent-verifier"
@@ -673,10 +1148,43 @@
       "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
     },
     {
+      "certificate": "objects/03199a2b80d2a1994977925cbfcd1dff567cc68f823d522de790228702386705.json",
+      "expected_code": "STALE_POLICY_EPOCH",
+      "mode": "historical",
+      "name": "stale-policy-id",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/f143e38b1bc228894e0a98e4357e3543fabb5f31b00e5a752accdbfda995e52e.json",
+      "expected_code": "STALE_POLICY_EPOCH",
+      "mode": "historical",
+      "name": "stale-policy-version",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
       "certificate": "objects/5db4559c72a2319112a01a837665cefa7488ed9fe7abb9085c23c100e0bf2ffb.json",
       "expected_code": "STALE_AUTHORITY_EPOCH",
       "mode": "historical",
       "name": "stale-authority-epoch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/8b675d1965d711e5d7760487d59ea85b2c581381538e8bbdab8ed1b26f325ef0.json",
+      "expected_code": "STALE_AUTHORITY_EPOCH",
+      "mode": "historical",
+      "name": "stale-authority-root",
       "provenance": [
         "python-independent-constructor",
         "go-independent-verifier"
@@ -721,6 +1229,17 @@
       "expected_code": "PREDECESSOR_ROOT_MISMATCH",
       "mode": "historical",
       "name": "predecessor-root-mismatch",
+      "provenance": [
+        "python-independent-constructor",
+        "go-independent-verifier"
+      ],
+      "trust": "objects/aa9ec1b517e3b6aa61dee1db53ca34aac506449cccd65be33c2d7fe5fc608003.json"
+    },
+    {
+      "certificate": "objects/5f1124655309b18084629fbcc16c32cd8c6ad0c4895c06702a539a036d39ed35.json",
+      "expected_code": "NODE_VERSION_CONFLICT",
+      "mode": "historical",
+      "name": "producer-expected-node-version-mismatch",
       "provenance": [
         "python-independent-constructor",
         "go-independent-verifier"
@@ -1174,6 +1693,7 @@
     "INVALID_COMMIT_SEAL",
     "INVALID_DECIMAL_STRING",
     "INVALID_POLICY_SIGNATURE",
+    "INVALID_PREDECESSOR",
     "INVALID_PRODUCER_SIGNATURE",
     "INVALID_UNICODE",
     "KEY_ID_MISMATCH",

@@ -82,6 +82,24 @@ def test_cj1_rejects_malleable_types_and_keys(raw: bytes, code: str) -> None:
     assert raised.value.code.name == code
 
 
+@pytest.mark.parametrize(
+    ("raw", "code"),
+    (
+        (b'{"unexpected":"\\/"}', "NONCANONICAL_ENCODING"),
+        (b'{"unexpected":"\\u2028"}', "NONCANONICAL_ENCODING"),
+        (b'{"Envelope_type": "x"}', "NONCANONICAL_ENCODING"),
+        (b'{"unexpected":"x"}', "UNKNOWN_FIELD"),
+        (b'{"Envelope_type":"x"}', "CASE_MISMATCHED_FIELD"),
+    ),
+)
+def test_cj1_canonical_precedence_is_frozen_before_typed_schema(
+    raw: bytes, code: str
+) -> None:
+    with pytest.raises(CodecError) as raised:
+        decode_envelope(raw)
+    assert raised.value.code.name == code
+
+
 def test_cj1_rejects_noncanonical_encoding_and_bad_fixed_width_values() -> None:
     canonical = encode_certificate(_certificate())
     digest = valid_vector().payload["subject"]["input_digest"].encode()

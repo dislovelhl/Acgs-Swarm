@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/acgs/apcc-go-verifier/internal/apcc"
 )
@@ -20,12 +21,27 @@ type output struct {
 	ProtocolVersion   string `json:"protocol_version"`
 }
 
+type predecessorFlags []string
+
+func (values *predecessorFlags) String() string { return strings.Join(*values, ",") }
+func (values *predecessorFlags) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
+type fileResolver map[string][]byte
+
+func (resolver fileResolver) ResolvePredecessor(digest string) ([]byte, bool, error) {
+	value, ok := resolver[digest]
+	return value, ok, nil
+}
+
 func Main(arguments []string, stdout, stderr io.Writer) int {
 	if len(arguments) == 0 {
 		return emit(stdout, "", "", false, "CLI_ERROR", 2)
 	}
 	mode := arguments[0]
-	if mode != "historical" && mode != "current" {
+	if mode != "historical" && mode != "causal" && mode != "current" {
 		return emit(stdout, mode, "", false, "CLI_ERROR", 2)
 	}
 	flags := flag.NewFlagSet(mode, flag.ContinueOnError)
@@ -38,6 +54,11 @@ func Main(arguments []string, stdout, stderr io.Writer) int {
 	highestSequence := flags.String("highest-trust-log-sequence", "", "consumer high-water sequence")
 	highestHead := flags.String("highest-trust-log-head", "", "consumer high-water head")
 	maximumStaleness := flags.String("maximum-staleness-ms", "", "mandatory consumer staleness bound")
+	maxDepth := flags.Int("max-depth", 64, "maximum predecessor-edge depth")
+	maxCertificates := flags.Int("max-certificates", 4096, "maximum distinct certificates including root")
+	maxTotalBytes := flags.Int("max-total-bytes", 64*1024*1024, "maximum aggregate exact envelope bytes")
+	var predecessorArguments predecessorFlags
+	flags.Var(&predecessorArguments, "predecessor", "digest=path predecessor envelope (repeatable)")
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 0 || *certificatePath == "" || *trustPath == "" {
 		return emit(stdout, mode, "", false, "CLI_ERROR", 2)
 	}
@@ -56,6 +77,20 @@ func Main(arguments []string, stdout, stderr io.Writer) int {
 	var result apcc.Result
 	if mode == "historical" {
 		result = apcc.VerifyHistorical(certificate, trust)
+	} else if mode == "causal" {
+		resolver := fileResolver{}
+		for _, argument := range predecessorArguments {
+			digest, path, found := strings.Cut(argument, "=")
+			if !found || digest == "" || path == "" {
+				return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+			}
+			value, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+			}
+			resolver[digest] = value
+		}
+		result = apcc.VerifyCausalClosure(certificate, trust, resolver, apcc.CausalClosureLimits{MaxDepth: *maxDepth, MaxCertificates: *maxCertificates, MaxTotalBytes: *maxTotalBytes})
 	} else {
 		if *requestNonce == "" || *nowMS == "" || *highestSequence == "" || *highestHead == "" || *maximumStaleness == "" {
 			return emit(stdout, mode, "", false, "CLI_ERROR", 2)

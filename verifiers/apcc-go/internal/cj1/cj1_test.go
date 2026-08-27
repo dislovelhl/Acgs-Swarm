@@ -28,6 +28,8 @@ func TestParseRejectsMalleabilityAndResourceAbuse(t *testing.T) {
 		{"lone surrogate", []byte(`{"a":"\ud800"}`), "INVALID_UNICODE"},
 		{"decomposed NFC", []byte("{\"a\":\"e\u0301\"}"), "INVALID_UNICODE"},
 		{"noncanonical whitespace", []byte(`{"a": "x"}`), "NONCANONICAL_ENCODING"},
+		{"noncanonical escaped solidus", []byte(`{"a":"\/"}`), "NONCANONICAL_ENCODING"},
+		{"noncanonical escaped line separator", []byte(`{"a":"\u2028"}`), "NONCANONICAL_ENCODING"},
 		{"non-ASCII key", []byte(`{"é":"x"}`), "UNKNOWN_FIELD"},
 		{"depth", append(bytes.Repeat([]byte{'['}, 9), bytes.Repeat([]byte{']'}, 9)...), "DEPTH_LIMIT_EXCEEDED"},
 	}

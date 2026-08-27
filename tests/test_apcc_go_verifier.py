@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -17,7 +18,12 @@ from tests.test_apcc_verifier import (  # noqa: E402
     SEEDS,
     _b64u,
     _canonical,
+    _child_for_parents,
+    _digest,
+    _leaf_for_parent,
+    _parent_vector,
     _signature,
+    _with_reference_change,
     valid_vector,
 )
 
@@ -50,6 +56,14 @@ def _write_fixtures() -> None:
                 ),
             }
         )
+
+    def invalid_commit_seal(envelope: bytes) -> bytes:
+        outer = json.loads(envelope)
+        signature = outer["seal"]["signature_b64u"]
+        outer["seal"]["signature_b64u"] = (
+            "A" if signature[0] != "A" else "B"
+        ) + signature[1:]
+        return _canonical(outer)
 
     vector = valid_vector()
     trust_value = {
@@ -124,6 +138,28 @@ def _write_fixtures() -> None:
         }
         if raw_status is not None:
             result["authority_status"] = put(raw_status)
+        return result
+
+    def causal(
+        name: str,
+        raw: bytes,
+        code: str,
+        predecessors: dict[str, bytes],
+        limits: dict[str, int] | None = None,
+    ) -> dict[str, object]:
+        result: dict[str, object] = {
+            "name": name,
+            "mode": "causal",
+            "certificate": put(raw),
+            "trust": trust_ref,
+            "predecessors": {
+                digest: put(value) for digest, value in predecessors.items()
+            },
+            "expected_code": code,
+            "provenance": generated_provenance,
+        }
+        if limits is not None:
+            result["causal_limits"] = limits
         return result
 
     def resign_all(payload: dict[str, object]) -> None:
@@ -206,6 +242,166 @@ def _write_fixtures() -> None:
         historical("valid-historical", vector.envelope, "OK"),
         current("valid-current", status, "OK"),
     ]
+    parent = _parent_vector()
+    leaf = _leaf_for_parent(parent)
+    parent_digest = _b64u(hashlib.sha256(_canonical(parent.payload)).digest())
+    wrong_protocol_parent = copy.deepcopy(parent.payload)
+    wrong_protocol_parent["header"]["protocol_version"] = "APCC-0.9-draft"
+    two_edge_leaf = _child_for_parents(
+        (leaf,),
+        node_id="node-2",
+        attempt_id="attempt-2",
+        commit_id="commit-2",
+        expected_version="8",
+        output_digest=_digest(b"output-2"),
+    )
+    leaf_digest = _digest(_canonical(leaf.payload))
+    vectors.extend(
+        [
+            causal(
+                "valid-causal-chain",
+                leaf.envelope,
+                "OK",
+                {parent_digest: parent.envelope},
+            ),
+            causal(
+                "valid-causal-two-edge-chain",
+                two_edge_leaf.envelope,
+                "OK",
+                {
+                    leaf_digest: leaf.envelope,
+                    parent_digest: parent.envelope,
+                },
+            ),
+            causal(
+                "causal-missing-predecessor", leaf.envelope, "INVALID_PREDECESSOR", {}
+            ),
+            causal(
+                "causal-found-malformed-envelope",
+                leaf.envelope,
+                "INVALID_PREDECESSOR",
+                {parent_digest: b"{}"},
+            ),
+            causal(
+                "causal-found-invalid-commit-seal",
+                leaf.envelope,
+                "INVALID_PREDECESSOR",
+                {parent_digest: invalid_commit_seal(parent.envelope)},
+            ),
+            causal(
+                "causal-found-wrong-protocol-version",
+                leaf.envelope,
+                "INVALID_PREDECESSOR",
+                {parent_digest: seal(wrong_protocol_parent)},
+            ),
+            causal(
+                "causal-digest-tamper",
+                leaf.envelope,
+                "INVALID_PREDECESSOR",
+                {parent_digest: vector.envelope},
+            ),
+            causal(
+                "causal-cycle-alias",
+                leaf.envelope,
+                "INVALID_PREDECESSOR",
+                {parent_digest: leaf.envelope},
+            ),
+            causal(
+                "causal-depth-limit",
+                leaf.envelope,
+                "DEPTH_LIMIT_EXCEEDED",
+                {parent_digest: parent.envelope},
+                {
+                    "max_depth": 0,
+                    "max_certificates": 4096,
+                    "max_total_bytes": 64 * 1024 * 1024,
+                },
+            ),
+            causal(
+                "causal-count-limit",
+                leaf.envelope,
+                "SIZE_LIMIT_EXCEEDED",
+                {parent_digest: parent.envelope},
+                {
+                    "max_depth": 64,
+                    "max_certificates": 1,
+                    "max_total_bytes": 64 * 1024 * 1024,
+                },
+            ),
+            causal(
+                "causal-total-byte-limit",
+                leaf.envelope,
+                "SIZE_LIMIT_EXCEEDED",
+                {parent_digest: parent.envelope},
+                {
+                    "max_depth": 64,
+                    "max_certificates": 4096,
+                    "max_total_bytes": len(leaf.envelope),
+                },
+            ),
+            causal(
+                "causal-invalid-negative-depth",
+                vector.envelope,
+                "SIZE_LIMIT_EXCEEDED",
+                {},
+                {"max_depth": -1, "max_certificates": 1, "max_total_bytes": 1},
+            ),
+            causal(
+                "causal-invalid-zero-certificates",
+                vector.envelope,
+                "SIZE_LIMIT_EXCEEDED",
+                {},
+                {"max_depth": 1, "max_certificates": 0, "max_total_bytes": 1},
+            ),
+            causal(
+                "causal-invalid-zero-bytes",
+                vector.envelope,
+                "SIZE_LIMIT_EXCEEDED",
+                {},
+                {"max_depth": 1, "max_certificates": 1, "max_total_bytes": 0},
+            ),
+        ]
+    )
+    mismatch_values = {
+        "workflow_id": ("workflow-2", "CROSS_WORKFLOW_PREDECESSOR"),
+        "node_id": ("other-node", "INVALID_PREDECESSOR"),
+        "committed_node_version": ("6", "INVALID_PREDECESSOR"),
+        "commit_id": ("other-commit", "INVALID_PREDECESSOR"),
+        "certificate_digest": (_digest(b"other-certificate"), "INVALID_PREDECESSOR"),
+        "output_digest": (_digest(b"other-output"), "INVALID_PREDECESSOR"),
+    }
+    for field, (value, expected) in mismatch_values.items():
+        mismatched = _with_reference_change(leaf, field, value)
+        claimed_digest = mismatched.payload["bindings"]["predecessors"][0][
+            "certificate_digest"
+        ]
+        vectors.append(
+            causal(
+                f"causal-edge-mismatch-{field.replace('_', '-')}",
+                mismatched.envelope,
+                expected,
+                {claimed_digest: parent.envelope},
+            )
+        )
+    left = _child_for_parents((parent,), node_id="node-left", commit_id="commit-left")
+    right = _child_for_parents(
+        (parent,), node_id="node-right", commit_id="commit-right"
+    )
+    shared_root = _child_for_parents(
+        (left, right), node_id="node-root", commit_id="commit-root"
+    )
+    vectors.append(
+        causal(
+            "valid-causal-shared-ancestor",
+            shared_root.envelope,
+            "OK",
+            {
+                _digest(_canonical(left.payload)): left.envelope,
+                _digest(_canonical(right.payload)): right.envelope,
+                parent_digest: parent.envelope,
+            },
+        )
+    )
     outer = json.loads(vector.envelope)
     tampered = copy.deepcopy(outer)
     signature = tampered["seal"]["signature_b64u"]
@@ -249,6 +445,24 @@ def _write_fixtures() -> None:
                 "noncanonical-whitespace",
                 json.dumps(outer, sort_keys=True).encode(),
                 "NONCANONICAL_ENCODING",
+            ),
+            historical(
+                "compound-unknown-escaped-solidus",
+                b'{"unexpected":"\\/"}',
+                "NONCANONICAL_ENCODING",
+                vector_provenance=hand_provenance,
+            ),
+            historical(
+                "compound-unknown-escaped-line-separator",
+                b'{"unexpected":"\\u2028"}',
+                "NONCANONICAL_ENCODING",
+                vector_provenance=hand_provenance,
+            ),
+            historical(
+                "compound-case-mismatch-whitespace",
+                b'{"Envelope_type": "x"}',
+                "NONCANONICAL_ENCODING",
+                vector_provenance=hand_provenance,
             ),
             historical(
                 "invalid-unicode", b'{"envelope_type":"\\ud800"}', "INVALID_UNICODE"
@@ -422,14 +636,15 @@ def _write_fixtures() -> None:
         ) + signature[1:]
         vectors.append(historical(f"invalid-{role}-signature", seal(broken), code))
 
-    missing_producer = copy.deepcopy(trust_value)
+    missing_producer: dict[str, Any] = copy.deepcopy(trust_value)
     missing_producer["bindings"] = [
         item for item in missing_producer["bindings"] if item["role"] != "producer"
     ]
-    wrong_scope = copy.deepcopy(trust_value)
-    next(item for item in wrong_scope["bindings"] if item["role"] == "producer")[
-        "scope"
-    ][0] = "agent-other"
+    wrong_scope: dict[str, Any] = copy.deepcopy(trust_value)
+    producer_binding = next(
+        item for item in wrong_scope["bindings"] if item["role"] == "producer"
+    )
+    cast(list[str], producer_binding["scope"])[0] = "agent-other"
     vectors.extend(
         [
             historical(
@@ -456,6 +671,78 @@ def _write_fixtures() -> None:
 
     binding_cases = [
         (
+            "producer-statement-workflow-mismatch",
+            "CROSS_WORKFLOW_REPLAY",
+            lambda p: p["evidence"]["producer_statement"].__setitem__(
+                "workflow_id", "workflow-other"
+            ),
+            True,
+        ),
+        (
+            "producer-statement-node-mismatch",
+            "CROSS_NODE_REPLAY",
+            lambda p: p["evidence"]["producer_statement"].__setitem__(
+                "node_id", "node-other"
+            ),
+            True,
+        ),
+        (
+            "producer-statement-attempt-mismatch",
+            "ATTEMPT_MISMATCH",
+            lambda p: p["evidence"]["producer_statement"].__setitem__(
+                "attempt_id", "attempt-other"
+            ),
+            True,
+        ),
+        (
+            "policy-statement-workflow-mismatch",
+            "CROSS_WORKFLOW_REPLAY",
+            lambda p: p["evidence"]["policy_statement"].__setitem__(
+                "workflow_id", "workflow-other"
+            ),
+            True,
+        ),
+        (
+            "policy-statement-node-mismatch",
+            "CROSS_NODE_REPLAY",
+            lambda p: p["evidence"]["policy_statement"].__setitem__(
+                "node_id", "node-other"
+            ),
+            True,
+        ),
+        (
+            "policy-statement-attempt-mismatch",
+            "ATTEMPT_MISMATCH",
+            lambda p: p["evidence"]["policy_statement"].__setitem__(
+                "attempt_id", "attempt-other"
+            ),
+            True,
+        ),
+        (
+            "authority-statement-workflow-mismatch",
+            "CROSS_WORKFLOW_REPLAY",
+            lambda p: p["evidence"]["authority_statement"].__setitem__(
+                "workflow_id", "workflow-other"
+            ),
+            True,
+        ),
+        (
+            "authority-statement-node-mismatch",
+            "CROSS_NODE_REPLAY",
+            lambda p: p["evidence"]["authority_statement"].__setitem__(
+                "node_id", "node-other"
+            ),
+            True,
+        ),
+        (
+            "authority-statement-attempt-mismatch",
+            "ATTEMPT_MISMATCH",
+            lambda p: p["evidence"]["authority_statement"].__setitem__(
+                "attempt_id", "attempt-other"
+            ),
+            True,
+        ),
+        (
             "producer-agent-subject-mismatch",
             "SUBJECT_MISMATCH",
             lambda p: p["subject"].__setitem__("agent_id", "agent-other"),
@@ -470,6 +757,14 @@ def _write_fixtures() -> None:
             True,
         ),
         (
+            "authority-producer-key-mismatch",
+            "KEY_ID_MISMATCH",
+            lambda p: p["evidence"]["authority_statement"].__setitem__(
+                "producer_key_id", "producer-other"
+            ),
+            True,
+        ),
+        (
             "policy-deny-subject-mismatch",
             "SUBJECT_MISMATCH",
             lambda p: p["evidence"]["policy_statement"].__setitem__("decision", "deny"),
@@ -479,6 +774,12 @@ def _write_fixtures() -> None:
             "decision-commit-subject-mismatch",
             "SUBJECT_MISMATCH",
             lambda p: p["decision"].__setitem__("commit_id", "commit-other"),
+            False,
+        ),
+        (
+            "decision-nonce-subject-mismatch",
+            "SUBJECT_MISMATCH",
+            lambda p: p["decision"].__setitem__("nonce", _b64u(bytes(range(1, 17)))),
             False,
         ),
         (
@@ -528,9 +829,29 @@ def _write_fixtures() -> None:
             False,
         ),
         (
+            "stale-policy-id",
+            "STALE_POLICY_EPOCH",
+            lambda p: p["context"].__setitem__("policy_id", "policy-other"),
+            False,
+        ),
+        (
+            "stale-policy-version",
+            "STALE_POLICY_EPOCH",
+            lambda p: p["context"].__setitem__("policy_version", "2"),
+            False,
+        ),
+        (
             "stale-authority-epoch",
             "STALE_AUTHORITY_EPOCH",
             lambda p: p["context"].__setitem__("authority_epoch", "6"),
+            False,
+        ),
+        (
+            "stale-authority-root",
+            "STALE_AUTHORITY_EPOCH",
+            lambda p: p["context"].__setitem__(
+                "authority_root", _digest(b"root-other")
+            ),
             False,
         ),
         (
@@ -558,6 +879,14 @@ def _write_fixtures() -> None:
                 "predecessor_root", _b64u(hashlib.sha256(b"wrong").digest())
             ),
             False,
+        ),
+        (
+            "producer-expected-node-version-mismatch",
+            "NODE_VERSION_CONFLICT",
+            lambda p: p["evidence"]["producer_statement"].__setitem__(
+                "expected_node_version", "8"
+            ),
+            True,
         ),
     ]
     vectors.extend(
@@ -721,7 +1050,6 @@ def _write_fixtures() -> None:
 
     unreachable = [
         "CROSS_ATTEMPT_REPLAY",
-        "INVALID_PREDECESSOR",
         "PREDECESSOR_REPLACED",
         "RESULT_NOT_STAGED",
         "STAGED_RESULT_CONFLICT",
@@ -779,6 +1107,7 @@ def test_fixture_manifest_is_content_addressed_and_has_three_origin_anchors() ->
         references = [vector["certificate"], vector["trust"]]
         if vector.get("authority_status"):
             references.append(vector["authority_status"])
+        references.extend(vector.get("predecessors", {}).values())
         for reference in references:
             referenced_objects.add(reference)
             raw = (FIXTURES / reference).read_bytes()
@@ -796,6 +1125,38 @@ def test_fixture_manifest_is_content_addressed_and_has_three_origin_anchors() ->
         "python-independent-verifier",
         "go-independent-verifier",
     }
+
+
+def test_fixture_manifest_covers_compound_precedence_and_every_binding_group() -> None:
+    manifest = json.loads((FIXTURES / "manifest.json").read_bytes())
+    names = {vector["name"] for vector in manifest["vectors"]}
+    required = {
+        "compound-unknown-escaped-solidus",
+        "compound-unknown-escaped-line-separator",
+        "compound-case-mismatch-whitespace",
+        "producer-statement-workflow-mismatch",
+        "producer-statement-node-mismatch",
+        "producer-statement-attempt-mismatch",
+        "policy-statement-workflow-mismatch",
+        "policy-statement-node-mismatch",
+        "policy-statement-attempt-mismatch",
+        "authority-statement-workflow-mismatch",
+        "authority-statement-node-mismatch",
+        "authority-statement-attempt-mismatch",
+        "authority-producer-key-mismatch",
+        "decision-nonce-subject-mismatch",
+        "stale-policy-id",
+        "stale-policy-version",
+        "stale-authority-root",
+        "producer-expected-node-version-mismatch",
+        "causal-invalid-negative-depth",
+        "causal-invalid-zero-certificates",
+        "causal-invalid-zero-bytes",
+        "causal-found-malformed-envelope",
+        "causal-found-invalid-commit-seal",
+        "causal-found-wrong-protocol-version",
+    }
+    assert required <= names
 
 
 def _build(binary: Path) -> None:

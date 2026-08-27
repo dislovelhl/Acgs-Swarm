@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
@@ -13,10 +14,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from constitutional_swarm.apcc.verifier import (
+    CausalClosureLimits,
     FailureCode,
     ScopedTrust,
     TrustBinding,
     TrustRole,
+    verify_causal_closure,
     verify_current,
     verify_historical,
 )
@@ -349,6 +352,393 @@ def _current(
     )
 
 
+def _parent_vector() -> ValidVector:
+    vector = valid_vector()
+    payload = copy.deepcopy(vector.payload)
+    predecessor = vector.payload["bindings"]["predecessors"][0]
+    payload["subject"].update(
+        node_id=predecessor["node_id"],
+        attempt_id="attempt-0",
+        output_digest=predecessor["output_digest"],
+    )
+    producer = payload["evidence"]["producer_statement"]
+    producer.update(
+        node_id=predecessor["node_id"],
+        attempt_id="attempt-0",
+        output_digest=predecessor["output_digest"],
+        expected_node_version="6",
+        commit_id=predecessor["commit_id"],
+    )
+    payload["decision"]["commit_id"] = predecessor["commit_id"]
+    payload["bindings"].update(
+        expected_node_version="6",
+        committed_node_version=predecessor["committed_node_version"],
+        predecessors=[],
+        predecessor_root=_digest(_canonical([])),
+    )
+    producer["predecessor_root"] = payload["bindings"]["predecessor_root"]
+    for statement_name, signature_name in (
+        ("producer_statement", "producer"),
+        ("policy_statement", "policy_authority"),
+        ("authority_statement", "authority_registry"),
+    ):
+        statement = payload["evidence"][statement_name]
+        if statement_name != "producer_statement":
+            statement.update(node_id=predecessor["node_id"], attempt_id="attempt-0")
+        _resign_statement(payload, statement_name, signature_name)
+    proposal_digest = payload["evidence"]["producer_statement_digest"]
+    for statement_name, signature_name in (
+        ("policy_statement", "policy_authority"),
+        ("authority_statement", "authority_registry"),
+    ):
+        payload["evidence"][statement_name]["proposal_digest"] = proposal_digest
+        _resign_statement(payload, statement_name, signature_name)
+    return _rebuild(vector, payload)
+
+
+def _predecessor_reference(parent: ValidVector) -> dict[str, str]:
+    return {
+        "workflow_id": parent.payload["subject"]["workflow_id"],
+        "node_id": parent.payload["subject"]["node_id"],
+        "committed_node_version": parent.payload["bindings"]["committed_node_version"],
+        "commit_id": parent.payload["decision"]["commit_id"],
+        "certificate_digest": _digest(_canonical(parent.payload)),
+        "output_digest": parent.payload["subject"]["output_digest"],
+    }
+
+
+def _child_for_parents(
+    parents: tuple[ValidVector, ...],
+    *,
+    node_id: str = "node-1",
+    attempt_id: str = "attempt-1",
+    commit_id: str = "commit-1",
+    expected_version: str = "7",
+    output_digest: str | None = None,
+) -> ValidVector:
+    child = valid_vector()
+    payload = copy.deepcopy(child.payload)
+    output_digest = output_digest or _digest(b"output")
+    payload["subject"].update(
+        node_id=node_id,
+        attempt_id=attempt_id,
+        output_digest=output_digest,
+    )
+    payload["decision"]["commit_id"] = commit_id
+    payload["bindings"].update(
+        expected_node_version=expected_version,
+        committed_node_version=str(int(expected_version) + 1),
+        predecessors=sorted(
+            (_predecessor_reference(parent) for parent in parents), key=_canonical
+        ),
+    )
+    payload["bindings"]["predecessor_root"] = _digest(
+        _canonical(payload["bindings"]["predecessors"])
+    )
+    producer = payload["evidence"]["producer_statement"]
+    producer.update(
+        node_id=node_id,
+        attempt_id=attempt_id,
+        output_digest=output_digest,
+        predecessor_root=payload["bindings"]["predecessor_root"],
+        expected_node_version=expected_version,
+        commit_id=commit_id,
+    )
+    _resign_statement(payload, "producer_statement", "producer")
+    proposal_digest = payload["evidence"]["producer_statement_digest"]
+    for statement_name, signature_name in (
+        ("policy_statement", "policy_authority"),
+        ("authority_statement", "authority_registry"),
+    ):
+        payload["evidence"][statement_name].update(
+            node_id=node_id,
+            attempt_id=attempt_id,
+            proposal_digest=proposal_digest,
+        )
+        _resign_statement(payload, statement_name, signature_name)
+    return _rebuild(child, payload)
+
+
+def _leaf_for_parent(parent: ValidVector) -> ValidVector:
+    return _child_for_parents((parent,))
+
+
+def _with_reference_change(child: ValidVector, field: str, value: str) -> ValidVector:
+    payload = copy.deepcopy(child.payload)
+    payload["bindings"]["predecessors"][0][field] = value
+    payload["bindings"]["predecessor_root"] = _digest(
+        _canonical(payload["bindings"]["predecessors"])
+    )
+    payload["evidence"]["producer_statement"]["predecessor_root"] = payload["bindings"][
+        "predecessor_root"
+    ]
+    _resign_statement(payload, "producer_statement", "producer")
+    proposal_digest = payload["evidence"]["producer_statement_digest"]
+    for statement_name, signature_name in (
+        ("policy_statement", "policy_authority"),
+        ("authority_statement", "authority_registry"),
+    ):
+        payload["evidence"][statement_name]["proposal_digest"] = proposal_digest
+        _resign_statement(payload, statement_name, signature_name)
+    return _rebuild(child, payload)
+
+
+def _with_invalid_commit_seal(envelope: bytes) -> bytes:
+    outer = json.loads(envelope)
+    signature = outer["seal"]["signature_b64u"]
+    outer["seal"]["signature_b64u"] = ("A" if signature[0] != "A" else "B") + signature[
+        1:
+    ]
+    return _canonical(outer)
+
+
+class _Resolver:
+    def __init__(self, values: dict[str, bytes]) -> None:
+        self.values = values
+
+    def resolve_predecessor(self, certificate_digest: str) -> bytes | None:
+        return self.values.get(certificate_digest)
+
+
+class _RaisingResolver:
+    def resolve_predecessor(self, certificate_digest: str) -> bytes | None:
+        raise RuntimeError(certificate_digest)
+
+
+class _RaisingTrust:
+    def resolve(self, role: TrustRole, scope: tuple[str, ...]) -> TrustBinding | None:
+        raise RuntimeError((role, scope))
+
+
+class _RaisingStatus(Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        raise RuntimeError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        raise RuntimeError("status iteration")
+
+    def __len__(self) -> int:
+        return 1
+
+
+def test_causal_closure_verifies_a_two_edge_digest_pinned_chain() -> None:
+    grandparent = _parent_vector()
+    parent = _leaf_for_parent(grandparent)
+    leaf = _child_for_parents(
+        (parent,),
+        node_id="node-2",
+        attempt_id="attempt-2",
+        commit_id="commit-2",
+        expected_version="8",
+        output_digest=_digest(b"output-2"),
+    )
+    grandparent_digest = _digest(_canonical(grandparent.payload))
+    parent_digest = _digest(_canonical(parent.payload))
+    verdict = verify_causal_closure(
+        leaf.envelope,
+        trust=leaf.trust,
+        resolver=_Resolver(
+            {
+                parent_digest: parent.envelope,
+                grandparent_digest: grandparent.envelope,
+            }
+        ),
+    )
+    assert verdict.ok
+
+
+def test_causal_closure_fails_closed_for_missing_and_resolver_exception() -> None:
+    parent = _parent_vector()
+    leaf = _leaf_for_parent(parent)
+    for resolver in (_Resolver({}), _RaisingResolver()):
+        verdict = verify_causal_closure(
+            leaf.envelope,
+            trust=leaf.trust,
+            resolver=resolver,
+        )
+        assert verdict.code is FailureCode.INVALID_PREDECESSOR
+    nil_verdict = verify_causal_closure(
+        leaf.envelope,
+        trust=leaf.trust,
+        resolver=None,  # type: ignore[arg-type]
+    )
+    assert nil_verdict.code is FailureCode.INVALID_PREDECESSOR
+
+
+@pytest.mark.parametrize(
+    ("resolved", "historical_code"),
+    (
+        (b"{}", FailureCode.MISSING_FIELD),
+        (
+            _with_invalid_commit_seal(_parent_vector().envelope),
+            FailureCode.INVALID_COMMIT_SEAL,
+        ),
+    ),
+)
+def test_causal_closure_collapses_found_invalid_predecessor_to_stable_code(
+    resolved: bytes, historical_code: FailureCode
+) -> None:
+    parent = _parent_vector()
+    leaf = _leaf_for_parent(parent)
+    parent_digest = _digest(_canonical(parent.payload))
+
+    historical = verify_historical(resolved, trust=leaf.trust)
+    assert not historical.ok
+    assert historical.code is historical_code
+
+    verdict = verify_causal_closure(
+        leaf.envelope,
+        trust=leaf.trust,
+        resolver=_Resolver({parent_digest: resolved}),
+    )
+    assert verdict.code is FailureCode.INVALID_PREDECESSOR
+
+
+def test_causal_closure_limits_fail_independently() -> None:
+    parent = _parent_vector()
+    leaf = _leaf_for_parent(parent)
+    parent_digest = _digest(_canonical(parent.payload))
+    resolver = _Resolver({parent_digest: parent.envelope})
+    cases = (
+        (CausalClosureLimits(max_depth=0), FailureCode.DEPTH_LIMIT_EXCEEDED),
+        (CausalClosureLimits(max_certificates=1), FailureCode.SIZE_LIMIT_EXCEEDED),
+        (
+            CausalClosureLimits(max_total_bytes=len(leaf.envelope)),
+            FailureCode.SIZE_LIMIT_EXCEEDED,
+        ),
+    )
+    for limits, expected in cases:
+        verdict = verify_causal_closure(
+            leaf.envelope,
+            trust=leaf.trust,
+            resolver=resolver,
+            limits=limits,
+        )
+        assert verdict.code is expected
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        (-1, 4096, 64 * 1024 * 1024),
+        (64, 0, 64 * 1024 * 1024),
+        (64, 4096, 0),
+    ),
+)
+def test_invalid_causal_closure_limits_fail_closed(
+    values: tuple[int, int, int],
+) -> None:
+    vector = valid_vector()
+    limits = CausalClosureLimits(*values)
+    verdict = verify_causal_closure(
+        vector.envelope,
+        trust=vector.trust,
+        resolver=_Resolver({}),
+        limits=limits,
+    )
+    assert verdict.code is FailureCode.SIZE_LIMIT_EXCEEDED
+
+
+def test_public_verifiers_fail_closed_for_hostile_trust_and_status() -> None:
+    vector = valid_vector()
+    for hostile_trust in (_RaisingTrust(), None):
+        historical = verify_historical(
+            vector.envelope,
+            trust=hostile_trust,  # type: ignore[arg-type]
+        )
+        causal = verify_causal_closure(
+            vector.envelope,
+            trust=hostile_trust,  # type: ignore[arg-type]
+            resolver=_Resolver({}),
+        )
+        current = verify_current(
+            vector.envelope,
+            trust=hostile_trust,  # type: ignore[arg-type]
+            authority_status=vector.status,
+            request_nonce=vector.status["body"]["request_nonce"],
+            now_ms="1760000001000",
+            highest_trust_log_sequence="42",
+            highest_trust_log_head=vector.status["body"]["trust_log_head"],
+            maximum_staleness_ms="5000",
+        )
+        assert historical.code is FailureCode.UNKNOWN_KEY
+        assert causal.code is FailureCode.UNKNOWN_KEY
+        assert current.code is FailureCode.UNKNOWN_KEY
+
+    hostile_status = verify_current(
+        vector.envelope,
+        trust=vector.trust,
+        authority_status=_RaisingStatus(),
+        request_nonce=vector.status["body"]["request_nonce"],
+        now_ms="1760000001000",
+        highest_trust_log_sequence="42",
+        highest_trust_log_head=vector.status["body"]["trust_log_head"],
+        maximum_staleness_ms="5000",
+    )
+    assert hostile_status.code is FailureCode.NONCANONICAL_ENCODING
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    (
+        ("workflow_id", "workflow-2", FailureCode.CROSS_WORKFLOW_PREDECESSOR),
+        ("node_id", "other-node", FailureCode.INVALID_PREDECESSOR),
+        ("committed_node_version", "6", FailureCode.INVALID_PREDECESSOR),
+        ("commit_id", "other-commit", FailureCode.INVALID_PREDECESSOR),
+        (
+            "certificate_digest",
+            _digest(b"other-certificate"),
+            FailureCode.INVALID_PREDECESSOR,
+        ),
+        ("output_digest", _digest(b"other-output"), FailureCode.INVALID_PREDECESSOR),
+    ),
+)
+def test_causal_closure_rejects_each_six_field_edge_mismatch(
+    field: str, value: str, expected: FailureCode
+) -> None:
+    parent = _parent_vector()
+    leaf = _with_reference_change(_leaf_for_parent(parent), field, value)
+    claimed_digest = leaf.payload["bindings"]["predecessors"][0]["certificate_digest"]
+    verdict = verify_causal_closure(
+        leaf.envelope,
+        trust=leaf.trust,
+        resolver=_Resolver({claimed_digest: parent.envelope}),
+    )
+    assert verdict.code is expected
+
+
+def test_causal_closure_memoizes_a_shared_ancestor() -> None:
+    grandparent = _parent_vector()
+    left = _child_for_parents(
+        (grandparent,), node_id="node-left", commit_id="commit-left"
+    )
+    right = _child_for_parents(
+        (grandparent,), node_id="node-right", commit_id="commit-right"
+    )
+    root = _child_for_parents(
+        (left, right), node_id="node-root", commit_id="commit-root"
+    )
+    values = {
+        _digest(_canonical(grandparent.payload)): grandparent.envelope,
+        _digest(_canonical(left.payload)): left.envelope,
+        _digest(_canonical(right.payload)): right.envelope,
+    }
+
+    class CountingResolver(_Resolver):
+        def __init__(self, items: dict[str, bytes]) -> None:
+            super().__init__(items)
+            self.calls: dict[str, int] = {}
+
+        def resolve_predecessor(self, certificate_digest: str) -> bytes | None:
+            self.calls[certificate_digest] = self.calls.get(certificate_digest, 0) + 1
+            return super().resolve_predecessor(certificate_digest)
+
+    resolver = CountingResolver(values)
+    verdict = verify_causal_closure(root.envelope, trust=root.trust, resolver=resolver)
+    assert verdict.ok
+    assert resolver.calls == {digest: 1 for digest in values}
+
+
 def test_valid_vector_is_independently_canonical_and_verifies_historically_and_currently() -> (
     None
 ):
@@ -373,7 +763,7 @@ def test_current_verifier_requires_a_string_maximum_staleness_bound() -> None:
     assert parameter.annotation == "str"
 
     with pytest.raises(TypeError, match="maximum_staleness_ms"):
-        verify_current(
+        verify_current(  # type: ignore[call-arg]
             vector.envelope,
             trust=vector.trust,
             authority_status=vector.status,
