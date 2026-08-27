@@ -93,3 +93,34 @@ separately confirm bypass closure and transaction/protocol atomicity. Otherwise
 the final status is BLOCKED, with runtime integrity remaining RED or YELLOW as
 the evidence requires. Algorithmic breakthrough status remains NO-GO in either
 case.
+
+## GCB-1.1 — TLC non-vacuity CI gate
+
+### Objective
+
+Continuously prove that the bounded governed-commit model has a reachable
+Root → Child → Leaf → executor-revocation → stale-attempt-denial trace,
+without reclassifying arbitrary TLC failures as success or weakening the
+ordinary safety configuration.
+
+### File-scoped TDD plan
+
+1. Add parser/runner regressions for the exact expected TLC exit, sole named
+   coverage violation, complete counterexample envelope, ordered semantic
+   milestones, malformed output, runtime/config/parser failures, timeout,
+   signals, and harmless TLC v1.7.4 formatting variation.
+2. Add a repository-owned Python wrapper with hard-coded GCB witness semantics,
+   fail-closed outcome taxonomy, argv-only subprocess execution, bounded timeout,
+   separate stdout/stderr capture, durable diagnostic log, and task-owned
+   temporary TLC state outside the source tree.
+3. Add `make tla-gcb-coverage` as the single local/CI command and document that
+   the witness is reachability evidence, while `governed_commit.cfg` remains the
+   independent exit-zero safety proof.
+4. Split formal CI into explicit Mesh, constitution-reconfiguration, GCB safety,
+   and GCB witness steps. Pin TLC v1.7.4 by immutable URL and SHA-256, verify the
+   checksum after cache restore and download, retain logs on failure, and forbid
+   exit suppression.
+5. Run focused RED→GREEN tests, a real TLC integration using the pinned jar,
+   all four formal gates, workflow/YAML static checks, `make verify`, formatting,
+   typing, and `git diff --check` without committing or changing runtime/model
+   semantics.

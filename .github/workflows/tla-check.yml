@@ -5,21 +5,33 @@ on:
     branches: [main]
     paths:
       - 'specs/**'
+      - 'scripts/run_tlc_expected_witness.py'
+      - 'tests/test_tlc_expected_witness.py'
+      - 'Makefile'
       - '.github/workflows/tla-check.yml'
   pull_request:
     branches: [main]
     paths:
       - 'specs/**'
+      - 'scripts/run_tlc_expected_witness.py'
+      - 'tests/test_tlc_expected_witness.py'
+      - 'Makefile'
       - '.github/workflows/tla-check.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  TLC_VERSION: v1.7.4
+  TLC_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+  TLA2TOOLS_JAR: /tmp/tla2tools-v1.7.4.jar
+
 jobs:
-  tlc:
-    name: TLC model check
+  safety:
+    name: Safety — ${{ matrix.spec.name }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -46,26 +58,32 @@ jobs:
         id: cache-tla
         uses: actions/cache@v6
         with:
-          path: tla2tools.jar
-          key: tla2tools-v1.8.0
+          path: ${{ env.TLA2TOOLS_JAR }}
+          key: tla2tools-${{ env.TLC_VERSION }}-${{ env.TLC_SHA256 }}
 
       - name: Download tla2tools.jar
         if: steps.cache-tla.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL -o tla2tools.jar \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          sha256sum tla2tools.jar
+          curl -fsSL -o "${TLA2TOOLS_JAR}" \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+
+      - name: Verify immutable TLC jar
+        run: echo "${TLC_SHA256}  ${TLA2TOOLS_JAR}" | sha256sum -c -
 
       - name: Run TLC on ${{ matrix.spec.name }}
-        working-directory: specs
         run: |
+          set -euo pipefail
+          task_tmp="${RUNNER_TEMP}/tlc-${{ matrix.spec.name }}"
+          mkdir -p "${task_tmp}/java" "${task_tmp}/states"
           java -XX:+UseParallelGC -Xmx2g \
-            -cp ../tla2tools.jar tlc2.TLC \
+            -Djava.io.tmpdir="${task_tmp}/java" \
+            -cp "${TLA2TOOLS_JAR}" tlc2.TLC \
             -deadlock \
             -workers auto \
-            -config ${{ matrix.spec.config }} \
-            ${{ matrix.spec.module }} \
-            | tee ../tlc-${{ matrix.spec.name }}.log
+            -metadir "${task_tmp}/states" \
+            -config "${GITHUB_WORKSPACE}/specs/${{ matrix.spec.config }}" \
+            "${GITHUB_WORKSPACE}/specs/${{ matrix.spec.module }}.tla" \
+            2>&1 | tee "${GITHUB_WORKSPACE}/tlc-${{ matrix.spec.name }}.log"
 
       - name: Upload TLC log
         if: always()
@@ -73,4 +91,57 @@ jobs:
         with:
           name: tlc-${{ matrix.spec.name }}-log
           path: tlc-${{ matrix.spec.name }}.log
+          retention-days: 14
+
+  gcb-witness:
+    name: GCB non-vacuity witness
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install locked test environment
+        run: uv sync --no-sources --extra dev
+
+      - name: Cache tla2tools.jar
+        id: cache-tla
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TLA2TOOLS_JAR }}
+          key: tla2tools-${{ env.TLC_VERSION }}-${{ env.TLC_SHA256 }}
+
+      - name: Download tla2tools.jar
+        if: steps.cache-tla.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o "${TLA2TOOLS_JAR}" \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+
+      - name: Verify immutable TLC jar
+        run: echo "${TLC_SHA256}  ${TLA2TOOLS_JAR}" | sha256sum -c -
+
+      - name: Run wrapper unit and workflow checks
+        run: uv run --no-sync pytest tests/test_tlc_expected_witness.py --import-mode=importlib -m "not integration" -q
+
+      - name: Run GCB non-vacuity witness
+        run: make tla-gcb-coverage TLC_LOG=tlc-gcb-witness.log
+
+      - name: Run real TLC wrapper integration
+        run: uv run --no-sync pytest tests/test_tlc_expected_witness.py --import-mode=importlib -m integration -q
+
+      - name: Upload GCB witness log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tlc-gcb-witness-log
+          path: tlc-gcb-witness.log
+          if-no-files-found: warn
           retention-days: 14

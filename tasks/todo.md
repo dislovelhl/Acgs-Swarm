@@ -25,3 +25,19 @@
 - [x] Resolve all P0/P1 findings.
 - [x] Create a local commit only if every approval criterion passes.
 - [x] Confirm no push, PR, or release occurred.
+
+## GCB-1.1 TLC non-vacuity CI gate
+
+- [x] Accept file scope, fixed TLC v1.7.4 URL/SHA-256, and no-runtime/model guard.
+- [x] Capture RED wrapper/parser/workflow regressions.
+- [x] Implement strict expected-witness parser and fail-closed runner.
+- [x] Add local Make parity target and formal-evidence documentation.
+- [x] Split and harden formal CI with checksum verification and retained logs.
+- [x] Run unit/static tests and real pinned-TLC integration.
+- [x] Run Mesh, constitution-reconfiguration, GCB safety, and GCB witness gates.
+- [x] Run `make verify`, format/type/static/diff checks.
+- [x] Confirm no generated TLC state, commit, push, PR, or release.
+- [x] Capture Reviewer A RED regressions for structured trace and runner failures.
+- [x] Close Reviewer A P1/P2 findings and rerun targeted gates.
+- [x] Independent Reviewer A re-review passes.
+- [x] Independent Reviewer B re-review passes.
