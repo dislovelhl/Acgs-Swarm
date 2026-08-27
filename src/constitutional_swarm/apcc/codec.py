@@ -205,6 +205,7 @@ _DECIMALS = frozenset(
         "policy_epoch",
         "authority_epoch",
         "agent_revocation_generation",
+        "actor_revocation_generation",
         "workflow_revocation_generation",
         "workflow_epoch",
         "expected_node_version",

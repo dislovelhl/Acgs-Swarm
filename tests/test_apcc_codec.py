@@ -30,6 +30,7 @@ def test_cj1_inner_payload_is_exactly_seven_objects_and_canonical() -> None:
         "subject",
     }
     assert b"\n" not in encoded
+    assert json.loads(encoded)["decision"]["outcome"] == "committed"
 
 
 def test_outer_envelope_is_exact_and_detached() -> None:

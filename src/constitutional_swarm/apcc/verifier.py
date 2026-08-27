@@ -423,7 +423,9 @@ def _status_literals(
     return None
 
 
-def _decimal_argument(value: str) -> int | None:
+def _decimal_argument(value: object) -> int | None:
+    if not isinstance(value, str):
+        return None
     if value == "0":
         return 0
     if not value.isascii() or not value.isdigit() or value.startswith("0"):
@@ -443,7 +445,7 @@ def verify_current(
     now_ms: str,
     highest_trust_log_sequence: str,
     highest_trust_log_head: str,
-    maximum_staleness_ms: str | None = None,
+    maximum_staleness_ms: str,
 ) -> VerificationResult:
     """Verify history plus the sole APCC v1 current-consumption status."""
     try:
@@ -453,16 +455,8 @@ def verify_current(
         return _failure(FailureCode.INVALID_BASE64URL)
     now = _decimal_argument(now_ms)
     highest = _decimal_argument(highest_trust_log_sequence)
-    maximum_staleness = (
-        None
-        if maximum_staleness_ms is None
-        else _decimal_argument(maximum_staleness_ms)
-    )
-    if (
-        now is None
-        or highest is None
-        or (maximum_staleness_ms is not None and maximum_staleness is None)
-    ):
+    maximum_staleness = _decimal_argument(maximum_staleness_ms)
+    if now is None or highest is None or maximum_staleness is None:
         return _failure(FailureCode.INVALID_DECIMAL_STRING)
     historical = verify_historical(envelope, trust=trust)
     if not historical.ok:
@@ -516,7 +510,7 @@ def verify_current(
         return _failure(FailureCode.ATTESTATION_NOT_YET_VALID)
     if next_update < now or this_update >= next_update:
         return _failure(FailureCode.AUTHORITY_STATUS_EXPIRED)
-    if maximum_staleness is not None and now - this_update > maximum_staleness:
+    if now - this_update > maximum_staleness:
         return _failure(FailureCode.AUTHORITY_STATUS_EXPIRED)
     sequence = int(status.trust_log_sequence)
     if sequence < highest or (

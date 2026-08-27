@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -344,6 +345,7 @@ def _current(
         now_ms="1760000001000",
         highest_trust_log_sequence=highest_trust_log_sequence,
         highest_trust_log_head=highest_trust_log_head or _digest(b"trust-log-head"),
+        maximum_staleness_ms="5000",
     )
 
 
@@ -362,6 +364,37 @@ def test_valid_vector_is_independently_canonical_and_verifies_historically_and_c
     assert len(vector.status["body"]["request_nonce"]) == 22
     assert _historical(vector).ok
     assert _current(vector).ok
+
+
+def test_current_verifier_requires_a_string_maximum_staleness_bound() -> None:
+    vector = valid_vector()
+    parameter = inspect.signature(verify_current).parameters["maximum_staleness_ms"]
+    assert parameter.default is inspect.Parameter.empty
+    assert parameter.annotation == "str"
+
+    with pytest.raises(TypeError, match="maximum_staleness_ms"):
+        verify_current(
+            vector.envelope,
+            trust=vector.trust,
+            authority_status=vector.status,
+            request_nonce=_b64u(bytes(range(16))),
+            now_ms="1760000001000",
+            highest_trust_log_sequence="42",
+            highest_trust_log_head=_digest(b"trust-log-head"),
+        )
+
+    for invalid in ("01", 5000):
+        verdict = verify_current(
+            vector.envelope,
+            trust=vector.trust,
+            authority_status=vector.status,
+            request_nonce=_b64u(bytes(range(16))),
+            now_ms="1760000001000",
+            highest_trust_log_sequence="42",
+            highest_trust_log_head=_digest(b"trust-log-head"),
+            maximum_staleness_ms=invalid,  # type: ignore[arg-type]
+        )
+        assert verdict.code is FailureCode.INVALID_DECIMAL_STRING
 
 
 @pytest.mark.parametrize("reuse", ("key_id", "public_key"))
@@ -652,6 +685,20 @@ def test_current_verifier_rejects_invalid_authority_status_signature() -> None:
     assert (
         _current(_rebuild(vector, status=status)).code
         is FailureCode.AUTHORITY_STATUS_INVALID_SIGNATURE
+    )
+
+
+def test_current_verifier_rejects_noncanonical_actor_revocation_generation() -> None:
+    vector = valid_vector()
+    status = copy.deepcopy(vector.status)
+    status["body"]["actor_revocation_generation"] = "03"
+    status["signature"] = _signature(
+        SEEDS["status"], DOMAINS["status"], _canonical(status["body"]), "status-key"
+    )
+
+    assert (
+        _current(_rebuild(vector, status=status)).code
+        is FailureCode.INVALID_DECIMAL_STRING
     )
 
 

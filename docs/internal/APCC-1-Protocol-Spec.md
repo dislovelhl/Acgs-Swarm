@@ -116,8 +116,9 @@ The inner payload has exactly seven objects:
 | `signatures` | `producer`, `policy_authority`, `authority_registry` | Typed signing roles |
 
 `header` literals are `APCC-1.0-draft`, `apcc.commit-certificate`, `APCC-CJ1`,
-`SHA-256`, and `Ed25519`. `decision.outcome` is `COMMITTED`; denials are decision
-records, not certificates. `committed_node_version` equals
+`SHA-256`, and `Ed25519`. Certificate `decision.outcome` is the lowercase wire
+literal `committed`; denials are decision records, not certificates. The public
+request outcome remains uppercase `COMMITTED`. `committed_node_version` equals
 `expected_node_version + 1` numerically.
 
 `actor_authority` has grammar `authority:<namespace>:<capability>`, where each
