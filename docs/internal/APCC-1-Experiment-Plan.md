@@ -129,6 +129,19 @@ version; oversized/deep certificate; duplicate/reordered predecessor; stale,
 rolled-back, equivocal, or incomplete `AuthorityStatus`
 ```
 
+The matrix also runs atomic supersession before/after each write and response,
+two concurrent supersessions of one old digest, exact supersession replay,
+committed-child nonretroactivity, pending-child predecessor replacement,
+multi-level effective-revocation closure, and pre-revocation status use at one
+millisecond before and after its effective expiry. Attempt cases separately
+exercise internally inconsistent fields (`ATTEMPT_MISMATCH`) and a coherent but
+inactive guarded attempt (`CROSS_ATTEMPT_REPLAY`) and assert admission precedence.
+Supersession replay is issued after the old certificate is already
+`SUPERSEDED` and must still return the original envelope bytes, edge, decision,
+and outbox identity. Every commit/replay cell compares persisted
+`certificate_payload_bytes`, returned `certificate_envelope_bytes`,
+`get_certificate` bytes, predecessor/status target digest, and Python/Go digest.
+
 Record baseline, attack, authoritative compromise, incorrect-current-consumption
 event, detection, fail-open/closed result, recovery, latency, and raw artifact.
 The primary metric is invalid authority, not logging.
@@ -155,6 +168,10 @@ configurations: valid chain, exact replay, stale-attempt denial, revocation
 blocks consumption, and recovery without authority manufacture. Record model,
 config/JAR hashes, command, exit status, generated/distinct states, depth,
 duration, witness markers, and failures. TLA runs use isolated model directories.
+The safety model includes candidate lifecycle, logical-node current pointer,
+certificate disposition, supersession edge/replay/crash/conflict behavior,
+committed versus pending children, guarded transitive effective revocation, and
+bounded pre-revocation status validity.
 
 ## Artifacts and stopping rules
 

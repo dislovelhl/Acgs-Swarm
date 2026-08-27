@@ -87,6 +87,20 @@ Verification canonically re-encodes the outer envelope, decodes under the size
 limit, canonically re-encodes the inner payload, recomputes the digest, checks
 the key binding, and verifies the commit preimage.
 
+`certificate_payload_bytes` are the exact APCC-CJ1 bytes of the seven-object
+inner payload. `certificate_digest` is
+`B64URL(SHA256(certificate_payload_bytes))`; it equals envelope
+`payload_sha256`, is used by predecessor bindings and `AuthorityStatus`, and is
+the logical-node pointer value. `certificate_envelope_bytes` are the exact
+APCC-CJ1 bytes of the detached outer envelope. They are the portable artifact
+returned by `get_certificate` and by commit/replay responses.
+
+The authority store MUST persist both byte strings, or persist the envelope and
+make the payload bytes deterministically available by strict base64url decode
+without reserialization. Exact replay identity and byte-preservation refer to
+`certificate_envelope_bytes`; replay returns those original bytes, not a newly
+serialized or newly signed envelope.
+
 ## Certificate schema and ownership
 
 The inner payload has exactly seven objects:
@@ -102,7 +116,7 @@ The inner payload has exactly seven objects:
 | `signatures` | `producer`, `policy_authority`, `authority_registry` | Typed signing roles |
 
 `header` literals are `APCC-1.0-draft`, `apcc.commit-certificate`, `APCC-CJ1`,
-`SHA-256`, and `Ed25519`. `decision.outcome` is `committed`; denials are decision
+`SHA-256`, and `Ed25519`. `decision.outcome` is `COMMITTED`; denials are decision
 records, not certificates. `committed_node_version` equals
 `expected_node_version + 1` numerically.
 
@@ -145,24 +159,100 @@ The predecessor root is exactly:
 predecessor_root = B64URL(SHA256(APCC-CJ1(bindings.predecessors)))
 ```
 
-## Node state and request outcomes
+## Candidate lifecycle, logical-node authority, and certificate disposition
+
+These are three distinct state dimensions.
+
+The non-authoritative candidate lifecycle is:
 
 ```text
 UNSEEN -> ELIGIBLE -> EXECUTING -> RESULT_STAGED
 RESULT_STAGED -> EVIDENCE_ASSEMBLED -> COMMIT_PENDING
-COMMIT_PENDING -> AUTHORITATIVE_COMMITTED
-COMMIT_PENDING -> EVIDENCE_ASSEMBLED on Denied or Conflict request outcome
-ELIGIBLE | EXECUTING | RESULT_STAGED | EVIDENCE_ASSEMBLED | COMMIT_PENDING -> REVOKED
-AUTHORITATIVE_COMMITTED -> REVOKED | SUPERSEDED
-any persisted state -> QUARANTINED on integrity failure
+any nonterminal candidate -> QUARANTINED on integrity failure
 ```
 
-Staging, outbox, legacy status, and recovery never enter
-`AUTHORITATIVE_COMMITTED`. `QUARANTINED` has no automatic exit. `DENIED` and
-`CONFLICTED` are request outcomes, not durable node states. They leave the node
-in its prior state and persist an immutable decision. Exact replay returns that
-decision. Corrected evidence uses a new nonce and, after equivocation, a new
-store-global `commit_id`.
+The result of processing `COMMIT_PENDING` is orthogonal to this lifecycle. A
+successful request consumes the candidate as evidence for the logical-node
+authoritative transition and immutable certificate. `DENIED` and `CONFLICTED`
+are request outcomes, not candidate or logical-node states. They preserve the
+candidate evidence, logical node, and pointer. Exact replay returns the
+immutable decision. Corrected evidence creates a new candidate with a new nonce
+and, after equivocation, a new store-global `commit_id`.
+
+Each logical node stores `current_node_version` and an optional
+`current_certificate_digest`. Initially the version is `0` and the pointer is
+absent. A successful first commit or supersession atomically advances `v` to
+`v+1` and sets the pointer to the new certificate. Staging, legacy status,
+outbox, recovery, denial, and conflict never set or advance this pointer.
+
+Certificate bytes are immutable. A separate append-only disposition log gives
+each committed certificate initial disposition `CURRENT` and permits exactly
+one terminal disposition event, `SUPERSEDED` or `REVOKED`. Terminal disposition
+never returns to `CURRENT`. The effective disposition is derived from this log;
+historical bytes and the original commit decision are never rewritten.
+
+### Atomic SupersedeCommit
+
+`SupersedeCommit(old_certificate_digest, new_proposal)` is the only replacement
+operation. It uses the same workflow guard and commit algorithm as `Commit`.
+Under that guard it MUST verify that:
+
+1. the new proposal's store-global `commit_id` is resolved first. Exact replay
+   immediately returns the original `certificate_envelope_bytes`, replacement
+   edge, `COMMITTED` decision, and outbox identity without evaluating the old
+   pointer, disposition, or version; different request bytes return
+   `COMMIT_ID_EQUIVOCATION`;
+2. `old_certificate_digest` equals the logical node's current pointer;
+3. the old certificate has disposition `CURRENT` and version `v`; and
+4. `new_proposal.expected_node_version` equals `v` and passes every ordinary
+   APCC evidence, attempt, governance, revocation, and predecessor check.
+
+One transaction then creates a new certificate for version `v+1`, appends the
+exact replacement edge `old_certificate_digest -> new_certificate_digest`,
+appends terminal `SUPERSEDED` disposition for the old certificate, creates
+`CURRENT` disposition for the new certificate, changes the logical-node pointer
+and version, persists the request/decision/nonce, and writes one supersession
+outbox intent. The transaction commit is the linearization point.
+
+Exact replay returns the same new certificate, edge, decision, and outbox
+identity without mutation. A crash before commit leaves the old pointer and
+disposition unchanged; a crash after commit is exact-replay recoverable. If the
+old digest is not current, its disposition is terminal, the version changed, or
+another supersession wins, a non-current old digest returns
+`PREDECESSOR_REPLACED`, while an expected-version race returns
+`NODE_VERSION_CONFLICT`; neither mutates authority. Different use of the same
+`commit_id` remains `COMMIT_ID_EQUIVOCATION`.
+
+Replacement is nonretroactive: a child committed before the supersession keeps
+its valid historical binding to the old certificate and is not retroactively
+denied or revoked. A pending child whose proposal binds the old certificate
+fails `PREDECESSOR_REPLACED` after the pointer changes and must be reproposed
+against the new current predecessor.
+
+### Effective revocation
+
+Under the workflow guard, the store computes the authoritative transitive
+predicate `EffectiveRevoked(c)` from canonical authority tables only:
+
+```text
+EffectiveRevoked(c) =
+  DirectCertificateRevoked(c)
+  or ActorRevoked(c.agent_id, c.agent_revocation_generation)
+  or WorkflowRevoked(c.workflow_id, c.workflow_revocation_generation)
+  or exists p in CertificatePredecessorEdges[c]: EffectiveRevoked(p)
+```
+
+The canonical inputs are the immutable certificate table, canonical
+certificate-predecessor edge table, monotonic actor-revocation table,
+workflow-revocation table, and append-only certificate-disposition log. Caches
+and projections are non-authoritative. Commit, supersession, and status issuance
+evaluate the closure while holding the same workflow guard; cycles or missing
+edges quarantine the affected workflow. `SUPERSEDED` alone is not revocation.
+
+An `AuthorityStatus` issued before a revocation may remain usable only through
+its signed `next_update_ms` and the consumer's smaller configured maximum
+staleness. Revocation does not retroactively alter an already issued signed
+status, so the bounded validity interval is an explicit residual-risk window.
 
 ## Operations and linearization
 
@@ -173,15 +263,20 @@ and `ConsumeAuthoritativeResult` return typed outcomes and audit event IDs.
 
 Every authority/control mutation MUST:
 
-1. begin a write transaction;
-2. acquire the workflow authority guard before freshness reads (`BEGIN
+1. perform only side-effect-free size, UTF-8, canonical schema parsing needed
+   to reject malformed wire input and locate `workflow_id` and `commit_id`;
+2. begin a write transaction and acquire the workflow authority guard before
+   replay resolution or any normative cryptographic, binding, or freshness
+   validation (`BEGIN
    IMMEDIATE` for SQLite; workflow-row `SELECT ... FOR UPDATE` for PostgreSQL
    17+);
 3. reserve/resolve the store-global `commit_id` through its unique index and
-   conflict ledger, then resolve exact replay or equivocation;
+   conflict ledger, then short-circuit exact replay or equivocation;
 4. read all state, policy, authority, revocation, predecessor, nonce, staging,
    trust-log, and control versions while holding the guard;
-5. verify syntax, signatures, bindings, freshness, causality, and transition;
+5. perform every normative digest, signature, internal binding, active-state,
+   freshness, causality, and transition check under the guard; any advisory
+   prevalidation MUST be repeated here;
 6. construct and seal the final canonical payload;
 7. conditionally advance the node and persist exact certificate bytes, request
    digest, decision, nonce use, evidence references, and one outbox intent; and
@@ -191,6 +286,29 @@ The database commit in step 8 is the single successful linearization point. A
 crash before it creates no authority; response loss after it is recovered by
 exact replay. All PostgreSQL authority and control mutations acquire the same
 workflow guard first; validation before the guard is non-conformant.
+
+### Deterministic admission and attempt failures
+
+`ATTEMPT_MISMATCH` means the submitted certificate/proposal objects are
+internally inconsistent: two or more embedded subject, producer, policy, or
+authority fields name different attempt IDs. `CROSS_ATTEMPT_REPLAY` means all
+submitted objects coherently name one attempt, but that attempt is not the
+active attempt read from authoritative state under the workflow guard.
+
+Admission reports the first failure in this exact precedence order:
+
+1. side-effect-free wire size, UTF-8, canonical schema, and version parsing;
+2. store availability, transaction start, and workflow-guard acquisition;
+3. store-global exact replay or `COMMIT_ID_EQUIVOCATION`;
+4. static proof validation and cross-object internal binding equality,
+   including `ATTEMPT_MISMATCH`;
+5. active attempt, node, version, and current predecessor binding, including
+   `CROSS_ATTEMPT_REPLAY` and `PREDECESSOR_REPLACED`;
+6. policy, authority, workflow, and effective-revocation freshness; and
+7. conditional write conflicts.
+
+Implementations MAY record all observed diagnostics internally, but the
+wire-visible code is the first code in this order.
 
 `commit_id` is store-global, not workflow-scoped. A global unique index maps it
 to one request digest and immutable decision. Same ID/digest returns original
@@ -216,6 +334,11 @@ node-version transitions have at most one winner.
 
 Every non-transient failure is fail-closed. New wire-visible codes require a
 protocol-version revision.
+
+The only public commit-request outcomes are the exact uppercase strings
+`COMMITTED`, `DENIED`, and `CONFLICTED`. Exact replay returns the originally
+persisted outcome; it is not a fourth outcome. Diagnostic failure codes refine
+`DENIED` or `CONFLICTED` without changing these spellings.
 
 ## V1 AuthorityStatus
 
