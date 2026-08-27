@@ -9,12 +9,20 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from tempfile import TemporaryDirectory
 from typing import Any
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from constitutional_swarm.artifact import Artifact, ArtifactStore
 from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.compiler import DAGCompiler, GoalSpec
 from constitutional_swarm.dna import AgentDNA
+from constitutional_swarm.governed_commit import (
+    TrustedGovernanceBootstrap,
+    sign_attempt_authorization,
+    sign_governed_receipt,
+)
 from constitutional_swarm.swarm import SwarmExecutor
 
 
@@ -143,8 +151,32 @@ class SwarmBenchmark:
         dna = AgentDNA.default(agent_id="bench-dna")
 
         store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
+        authority_dir = TemporaryDirectory(prefix="gcb-benchmark-")
+        admin = TrustedGovernanceBootstrap(
+            verifier_key=Ed25519PrivateKey.generate()
+        ).provision(f"{authority_dir.name}/authority.sqlite3")
+        boundary = admin.commit_port
+        executor = SwarmExecutor(
+            registry,
+            store,
+            boundary,
+            policy_version=dna.hash,
+            trusted_admin=admin,
+        )
         executor.load_dag(dag)
+        signing_keys = {
+            agent_id: Ed25519PrivateKey.generate() for agent_id in agent_ids
+        }
+        for agent_id, private_key in signing_keys.items():
+            admin.register_agent(
+                workflow_id=dag.dag_id,
+                agent_id=agent_id,
+                public_key=private_key.public_key(),
+                capabilities=tuple(
+                    capability.name
+                    for capability in registry.get_agent_capabilities(agent_id)
+                ),
+            )
 
         # Track timing
         total_validation_ns = 0
@@ -179,7 +211,14 @@ class SwarmBenchmark:
 
                 # Claim
                 work_start = time.perf_counter_ns()
-                executor.claim(task.node_id, agent_id)
+                executor.claim(
+                    task.node_id,
+                    agent_id,
+                    sign_attempt_authorization(
+                        executor.prepare_claim(task.node_id, agent_id),
+                        signing_keys[agent_id],
+                    ),
+                )
 
                 # DNA validation (the governance overhead we measure)
                 val_start = time.perf_counter_ns()
@@ -188,8 +227,8 @@ class SwarmBenchmark:
                 total_validation_ns += val_end - val_start
                 validation_count += 1
 
-                # Submit artifact (zero-cost work simulation)
-                executor.submit(
+                # Stage, sign, and atomically commit the zero-cost result.
+                payload = executor.produce_result(
                     task.node_id,
                     Artifact(
                         artifact_id=f"art-{task.node_id}",
@@ -201,6 +240,11 @@ class SwarmBenchmark:
                         constitutional_hash=dna.hash,
                     ),
                 )
+                executor.commit(
+                    admin.build_request(
+                        sign_governed_receipt(payload, signing_keys[agent_id])
+                    )
+                )
                 work_end = time.perf_counter_ns()
                 total_work_time_ns += work_end - work_start
 
@@ -210,13 +254,17 @@ class SwarmBenchmark:
         elapsed_ns = time.perf_counter_ns() - start_ns
         total_time_ms = elapsed_ns / 1_000_000
 
-        avg_validation_ns = total_validation_ns / validation_count if validation_count > 0 else 0.0
+        avg_validation_ns = (
+            total_validation_ns / validation_count if validation_count > 0 else 0.0
+        )
 
         throughput = (num_tasks / (total_time_ms / 1000)) if total_time_ms > 0 else 0.0
 
         total_possible_ns = elapsed_ns * num_agents if elapsed_ns > 0 else 1
         agent_utilization = (
-            min(total_work_time_ns / total_possible_ns, 1.0) if total_possible_ns > 0 else 0.0
+            min(total_work_time_ns / total_possible_ns, 1.0)
+            if total_possible_ns > 0
+            else 0.0
         )
 
         coordination_overhead = (
@@ -224,7 +272,7 @@ class SwarmBenchmark:
         )
         coordination_overhead = max(0.0, min(1.0, coordination_overhead))
 
-        return BenchmarkResult(
+        result = BenchmarkResult(
             total_time_ms=total_time_ms,
             avg_validation_ns=avg_validation_ns,
             coordination_overhead=coordination_overhead,
@@ -235,6 +283,8 @@ class SwarmBenchmark:
             num_tasks=num_tasks,
             dag_depth=dag_depth,
         )
+        authority_dir.cleanup()
+        return result
 
     def scaling_report(
         self,

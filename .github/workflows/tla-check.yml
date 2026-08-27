@@ -30,6 +30,9 @@ jobs:
           - name: constitution_reconfig
             module: constitution_reconfig
             config: constitution_reconfig.cfg
+          - name: governed_commit
+            module: governed_commit
+            config: governed_commit.cfg
     steps:
       - uses: actions/checkout@v7
 

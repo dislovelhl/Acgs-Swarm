@@ -14,6 +14,12 @@ in CI (`.github/workflows/tla-check.yml`).
   joint-consensus barrier. Invariant `NoStaleAcceptance`: no committed
   epoch exceeds the current epoch, and joint-consensus ratification is
   monotone.
+- **`governed_commit.tla`** — GCB-1 atomic proof-carrying commit model. Its
+  bounded configuration checks single-winner commit, immutable retry decisions,
+  fail-closed stale fences, staging invisibility, atomic outbox creation, and
+  downstream readiness only after a governed commit. In the SQLite refinement,
+  `BEGIN IMMEDIATE` acquires the write fence and successful `COMMIT` is the
+  authority linearization point.
 
 ## Running TLC locally
 
@@ -30,9 +36,15 @@ java -cp /tmp/tla2tools.jar tlc2.TLC \
 # Constitution reconfig
 java -cp /tmp/tla2tools.jar tlc2.TLC \
   -deadlock -workers auto -config constitution_reconfig.cfg constitution_reconfig
+
+# Governed commit boundary
+java -cp /tmp/tla2tools.jar tlc2.TLC \
+  -deadlock -workers auto -config governed_commit.cfg governed_commit
 ```
 
-Both checks should complete in well under a second. `-deadlock`
+The mesh and constitution-reconfiguration checks should complete quickly;
+the bounded governed-commit model explores roughly 1.7 million distinct
+states and may take several minutes. `-deadlock`
 *disables* deadlock checking (TLC convention; both specs have stable
 infinite-enabling `Next` transitions where "deadlock" is not a bug).
 
