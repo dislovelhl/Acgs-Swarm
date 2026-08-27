@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import ast
 import inspect
-from typing import Protocol, get_type_hints
+from dataclasses import FrozenInstanceError, replace
+from types import ModuleType
+from typing import get_args, get_type_hints
+
+import pytest
 
 from constitutional_swarm.apcc import codec, crypto, model, ports, verifier
-from constitutional_swarm.apcc.ports import AuthorityStore
+from constitutional_swarm.apcc.ports import AuthorityReader, AuthorityStore
+from constitutional_swarm.apcc.verifier import TrustRole
+from tests.test_apcc_verifier import valid_vector
 
 
 FORBIDDEN_IMPORTS = (
@@ -20,7 +26,7 @@ FORBIDDEN_IMPORTS = (
 )
 
 
-def _imports(module: object) -> set[str]:
+def _imports(module: ModuleType) -> set[str]:
     tree = ast.parse(inspect.getsource(module))
     return {
         name
@@ -45,14 +51,17 @@ def test_apcc_core_is_pure_and_has_no_scheduler_artifact_or_store_imports() -> N
 
 
 def test_authority_store_is_abstract_and_commit_id_lookup_is_store_global() -> None:
-    assert issubclass(AuthorityStore, Protocol)
+    assert getattr(AuthorityStore, "_is_protocol", False)
     authority_operations = {
         name
-        for name, member in AuthorityStore.__dict__.items()
+        for protocol in (AuthorityReader, AuthorityStore)
+        for name, member in protocol.__dict__.items()
         if not name.startswith("_") and callable(member)
     }
     assert authority_operations == {
         "stage_result",
+        "assemble_evidence",
+        "propose_commit",
         "read_commit_context",
         "atomic_commit",
         "replay_commit",
@@ -62,7 +71,10 @@ def test_authority_store_is_abstract_and_commit_id_lookup_is_store_global() -> N
         "supersede",
         "recover",
         "recover_outbox",
+        "get_outbox_event",
+        "read_logical_node",
     }
+    assert get_type_hints(AuthorityStore)["authority_store_id"] is str
     assert "commit" not in authority_operations
     assert list(inspect.signature(AuthorityStore.get_certificate).parameters) == [
         "self",
@@ -85,6 +97,55 @@ def test_revoke_returns_typed_revocation_result_not_an_arbitrary_node_state() ->
     }
     assert "node_state" not in inspect.get_annotations(result_type)
     assert get_type_hints(AuthorityStore.revoke)["return"] is result_type
+    assert "workflow-scoped key" in (inspect.getdoc(ports.RevocationRequest) or "")
+    assert set(ports.RevocationScope) == {
+        ports.RevocationScope.CERTIFICATE,
+        ports.RevocationScope.ACTOR,
+        ports.RevocationScope.WORKFLOW,
+    }
+
+
+def test_revocation_scopes_have_non_overlapping_target_semantics() -> None:
+    digest = "A" * 43
+    certificate = ports.RevocationRequest(
+        ports.RevocationScope.CERTIFICATE, "workflow-1", digest, "1", "reason"
+    )
+    actor = ports.RevocationRequest(
+        ports.RevocationScope.ACTOR, "workflow-1", "agent-1", "1", "reason"
+    )
+    workflow = ports.RevocationRequest(
+        ports.RevocationScope.WORKFLOW,
+        "workflow-1",
+        "workflow-1",
+        "1",
+        "reason",
+    )
+    assert certificate.target_id == digest
+    assert actor.target_id == "agent-1"
+    assert workflow.target_id == workflow.workflow_id
+    with pytest.raises(ValueError, match="SHA-256 digest"):
+        ports.RevocationRequest(
+            ports.RevocationScope.CERTIFICATE,
+            "workflow-1",
+            "workflow-1",
+            "1",
+            "reason",
+        )
+    with pytest.raises(ValueError, match="must equal workflow_id"):
+        ports.RevocationRequest(
+            ports.RevocationScope.WORKFLOW,
+            "workflow-1",
+            digest,
+            "1",
+            "reason",
+        )
+
+
+def test_commit_request_declares_store_global_idempotency_namespaces() -> None:
+    request_contract = inspect.getdoc(ports.AtomicCommitRequest) or ""
+    assert "authority-store-global" in request_contract
+    assert "commit_id" in request_contract
+    assert "nonce" in request_contract
 
 
 def test_exact_replay_result_has_no_second_authority_identity() -> None:
@@ -109,7 +170,7 @@ def test_get_certificate_is_explicitly_the_exact_envelope_bytes_port() -> None:
     )
 
 
-def test_supersession_port_carries_a_new_atomic_proposal_and_replay_identity() -> None:
+def test_supersession_port_has_three_statically_discriminated_branches() -> None:
     assert set(inspect.get_annotations(ports.SupersessionRequest)) == {
         "old_certificate_digest",
         "new_proposal",
@@ -118,16 +179,137 @@ def test_supersession_port_carries_a_new_atomic_proposal_and_replay_identity() -
         get_type_hints(ports.SupersessionRequest)["new_proposal"]
         is ports.AtomicCommitRequest
     )
-    assert {
+    branches = set(get_args(ports.SupersessionResult))
+    assert branches == {
+        ports.SupersessionCommitted,
+        ports.SupersessionDenied,
+        ports.SupersessionConflicted,
+    }
+    assert set(inspect.get_annotations(ports.SupersessionCommitted)) == {
         "commit_result",
         "old_certificate_digest",
         "new_certificate_digest",
+        "replacement_edge_id",
         "outbox_event_id",
-        "audit_event_id",
-    } <= set(inspect.get_annotations(ports.SupersessionResult))
-    assert (
-        get_type_hints(ports.SupersessionResult)["commit_result"] is ports.CommitResult
+        "kind",
+    }
+    for branch in (ports.SupersessionDenied, ports.SupersessionConflicted):
+        assert set(inspect.get_annotations(branch)) == {
+            "commit_result",
+            "old_certificate_digest",
+            "kind",
+        }
+        assert not {
+            "new_certificate_digest",
+            "replacement_edge_id",
+            "outbox_event_id",
+            "audit_event_id",
+        } & set(inspect.get_annotations(branch))
+
+
+def test_runtime_and_public_bootstrap_configuration_are_portable_and_separate() -> None:
+    assert set(ports.AuthoritySigningRole) == {
+        ports.AuthoritySigningRole.COMMIT,
+        ports.AuthoritySigningRole.STATUS,
+    }
+    assert getattr(ports.AuthorityKeyProvider, "_is_protocol", False)
+    assert getattr(ports.AuthorityClock, "_is_protocol", False)
+    assert getattr(ports.AuthorityOutboxSink, "_is_protocol", False)
+    assert set(inspect.get_annotations(ports.AuthorityRuntime)) == {
+        "key_provider",
+        "clock",
+        "outbox_sink",
+    }
+    config_fields = set(inspect.get_annotations(ports.APCCAuthorityConfig))
+    assert config_fields == {
+        "authority_store_id",
+        "producer_trust",
+        "policy_trust",
+        "registry_trust",
+        "commit_trust",
+        "status_trust",
+        "freshness",
+    }
+    assert not any(
+        forbidden in name.lower()
+        for name in config_fields
+        for forbidden in ("private", "seed", "signer", "runtime", "clock", "sink")
     )
+
+
+def test_signer_free_reader_exposes_only_read_operations() -> None:
+    reader_operations = {
+        name
+        for name, member in AuthorityReader.__dict__.items()
+        if not name.startswith("_") and callable(member)
+    }
+    assert reader_operations == {
+        "read_commit_context",
+        "read_logical_node",
+        "replay_commit",
+        "get_certificate",
+        "get_outbox_event",
+    }
+    assert not reader_operations & {
+        "stage_result",
+        "assemble_evidence",
+        "propose_commit",
+        "atomic_commit",
+        "current_status",
+        "revoke",
+        "supersede",
+        "recover",
+        "recover_outbox",
+    }
+
+
+def _authority_config() -> ports.APCCAuthorityConfig:
+    bindings = valid_vector().trust.bindings
+    by_role = {
+        role: tuple(binding for binding in bindings if binding.role is role)
+        for role in TrustRole
+    }
+    return ports.APCCAuthorityConfig(
+        "store-1",
+        by_role[TrustRole.PRODUCER],
+        by_role[TrustRole.POLICY],
+        by_role[TrustRole.REGISTRY],
+        by_role[TrustRole.COMMIT][0],
+        by_role[TrustRole.STATUS][0],
+        ports.StatusFreshnessPolicy("5000", "1000"),
+    )
+
+
+def test_public_authority_config_requires_five_distinct_exactly_scoped_roles() -> None:
+    config = _authority_config()
+    assert tuple(binding.role for binding in config.trust_bindings) == tuple(TrustRole)
+    assert len({binding.public_key for binding in config.trust_bindings}) == 5
+    with pytest.raises(FrozenInstanceError):
+        setattr(config, "authority_store_id", "other")
+    with pytest.raises(ValueError, match="producer"):
+        replace(config, producer_trust=())
+    with pytest.raises(ValueError, match="authority_store_id"):
+        replace(config, commit_trust=replace(config.commit_trust, scope=("other",)))
+    with pytest.raises(ValueError, match="reused"):
+        replace(
+            config,
+            status_trust=replace(
+                config.status_trust,
+                key_id=config.commit_trust.key_id,
+                public_key=config.commit_trust.public_key,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("maximum", "lifetime"),
+    (("0", "1"), ("1", "0"), ("01", "1"), ("1", "2"), ("-1", "1")),
+)
+def test_status_freshness_policy_is_positive_canonical_and_bounds_issuance(
+    maximum: str, lifetime: str
+) -> None:
+    with pytest.raises(ValueError):
+        ports.StatusFreshnessPolicy(maximum, lifetime)
 
 
 def test_ports_do_not_leak_runtime_rows_callbacks_or_repository_artifacts() -> None:
@@ -141,4 +323,25 @@ def test_protocol_surface_exposes_only_models_codec_crypto_verifier_and_ports() 
     assert hasattr(crypto, "predecessor_root")
     assert hasattr(codec, "encode_payload")
     assert hasattr(verifier, "verify_historical")
+    assert hasattr(verifier, "verify_causal_closure")
     assert hasattr(verifier, "verify_current")
+
+
+def test_core_has_no_backend_specific_linearization_primitives() -> None:
+    source = "\n".join(
+        inspect.getsource(module).lower()
+        for module in (model, codec, crypto, verifier, ports)
+    )
+    for backend_detail in (
+        "begin immediate",
+        "select for update",
+        "unique index",
+        "sqlite",
+        "postgres",
+    ):
+        assert backend_detail not in source
+
+
+def test_removed_ambiguous_state_aliases_are_not_public() -> None:
+    assert not hasattr(model, "NodeLifecycle")
+    assert not hasattr(model, "NodeState")

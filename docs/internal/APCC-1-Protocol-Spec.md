@@ -22,6 +22,12 @@ A certificate proves a historical commit. APCC v1 current consumption requires
 one nonce-bound, per-certificate `AuthorityStatus`. Snapshot status is reserved
 for a future version and is rejected by v1.
 
+`VerifyHistorical` proves only the integrity and signatures of the supplied
+certificate. It does not resolve predecessor references and therefore makes no
+claim that the transitive causal history is available or valid.
+`VerifyCausalClosure` is the distinct, bounded, digest-pinned operation defined
+below. Neither operation proves current consumability without fresh status.
+
 ## Roles
 
 | Role | Responsibility | Forbidden authority |
@@ -58,6 +64,20 @@ types, over-limit input, padded or noncanonical base64url, duplicate set
 members, and any value whose canonical re-encoding differs byte-for-byte.
 Duplicate names are rejected during tokenization. Existing GCB encoders are not
 APCC encoders and MUST NOT be reused.
+
+**Verification precedence.** An APCC verifier MUST process an encoded APCC-CJ1
+object in the following deterministic order: (1) enforce the applicable
+byte-size limit; (2) reject a UTF-8 BOM or invalid UTF-8; (3) enforce the
+structural-depth limit and parse exactly one JSON value while preserving the
+specific `MALFORMED_JSON`, `DUPLICATE_FIELD`, `WRONG_JSON_TYPE`,
+`INVALID_UNICODE`, `UNKNOWN_FIELD` for non-ASCII property names, and
+`TRAILING_BYTES` failures; (4) re-encode the generic parsed value under
+APCC-CJ1 and require byte-for-byte equality with the received bytes, otherwise
+return `NONCANONICAL_ENCODING`; and only then (5) apply the typed envelope,
+certificate, trust-manifest, or authority-status schema and scalar constraints.
+Consequently, a canonically encoded unknown property returns `UNKNOWN_FIELD`,
+while an object that is both noncanonical and contains an unknown or
+case-mismatched property returns `NONCANONICAL_ENCODING`.
 
 Objects use RFC 8785 property ordering and string escaping, no whitespace, BOM,
 or trailing newline. Semantic sets are sorted by unsigned lexicographic order
@@ -160,6 +180,46 @@ The predecessor root is exactly:
 predecessor_root = B64URL(SHA256(APCC-CJ1(bindings.predecessors)))
 ```
 
+### Bounded causal-closure verification
+
+`VerifyCausalClosure(root, resolver, limits)` first performs full
+`VerifyHistorical(root)`, then recursively resolves every predecessor by its
+declared `certificate_digest`. The resolver is typed as a mapping from that
+digest to the exact certificate envelope bytes; it MUST NOT select by mutable
+node pointer, commit ID, or any unpinned locator. Every resolved envelope MUST
+pass full historical verification, and its payload digest MUST equal the
+requested digest.
+
+For every edge, the resolved predecessor's exact six fields -- `workflow_id`,
+`node_id`, `committed_node_version`, `commit_id`, `certificate_digest`, and
+`output_digest` -- MUST equal the parent certificate's predecessor reference.
+Verification traverses the full reachable graph. The root is depth zero and
+counts as one certificate and its envelope byte length; a shared ancestor is
+charged once to certificate and byte limits, while every incoming edge is
+still compared. The implementation MUST enforce configured maximum depth,
+distinct-certificate count, and total resolved envelope bytes before accepting.
+
+Missing resolver results, resolver failure, digest mismatch, six-field
+mismatch, or a detected active-path cycle fail `INVALID_PREDECESSOR`; depth
+overflow fails `DEPTH_LIMIT_EXCEEDED`; certificate-count or byte overflow fails
+`SIZE_LIMIT_EXCEEDED`. Exact SHA-256-pinned cycles require a hash collision or
+fixed point and are therefore not ordinarily constructible, but active-path
+cycle detection remains mandatory and resolver alias attempts fail at the
+earlier digest-pinning check.
+
+**Causal resolver failures.** A predecessor resolver MUST distinguish a found
+value, a missing value, and an operational error internally. Missing values,
+resolver errors, invalid returned values, and resolver panics or exceptions
+MUST be contained at the verification boundary and MUST return
+`INVALID_PREDECESSOR`. They MUST NOT escape the public verification API or
+terminate the verifier process.
+
+**Causal limit validation.** After historical verification of the root and
+validation that a resolver is present, `max_depth < 0`, `max_certificates < 1`,
+or `max_total_bytes < 1` MUST return `SIZE_LIMIT_EXCEEDED`. Construction or
+submission of such per-call limits MUST NOT cause a panic or uncaught
+exception.
+
 ## Candidate lifecycle, logical-node authority, and certificate disposition
 
 These are three distinct state dimensions.
@@ -171,6 +231,14 @@ UNSEEN -> ELIGIBLE -> EXECUTING -> RESULT_STAGED
 RESULT_STAGED -> EVIDENCE_ASSEMBLED -> COMMIT_PENDING
 any nonterminal candidate -> QUARANTINED on integrity failure
 ```
+
+`StageResult` produces `RESULT_STAGED`; `AssembleEvidence` consumes a typed
+proposal and produces `EVIDENCE_ASSEMBLED`; `ProposeCommit` consumes a typed
+proposal and produces `COMMIT_PENDING`. These are durable, non-authoritative
+lifecycle operations. `VerifyProposal` is side-effect-free verification of a
+typed proposal against a supplied guarded context. Outside the authority guard
+its result is advisory only: `Commit` and `SupersedeCommit` MUST repeat every
+normative check under their authority-linearization primitive.
 
 The result of processing `COMMIT_PENDING` is orthogonal to this lifecycle. A
 successful request consumes the candidate as evidence for the logical-node
@@ -224,6 +292,15 @@ another supersession wins, a non-current old digest returns
 `NODE_VERSION_CONFLICT`; neither mutates authority. Different use of the same
 `commit_id` remains `COMMIT_ID_EQUIVOCATION`.
 
+`SupersedeCommit` returns one discriminated typed `SupersessionResult` for
+every durable outcome. Its `commit_result` is the exact persisted
+`COMMITTED`, `DENIED`, or `CONFLICTED` decision and supplies the stable audit
+identity. Only a `COMMITTED` branch contains a new certificate digest,
+replacement-edge identity, and outbox identity; all three are absent on a
+denial or conflict. Implementations MUST NOT expose a protocol failure through
+an exception string or require a caller to invoke ordinary `Commit` first to
+materialize supersession replay/equivocation state.
+
 Replacement is nonretroactive: a child committed before the supersession keeps
 its valid historical binding to the old certificate and is not retroactively
 denied or revoked. A pending child whose proposal binds the old certificate
@@ -238,7 +315,8 @@ predicate `EffectiveRevoked(c)` from canonical authority tables only:
 ```text
 EffectiveRevoked(c) =
   DirectCertificateRevoked(c)
-  or ActorRevoked(c.agent_id, c.agent_revocation_generation)
+  or ActorRevoked(c.workflow_id, c.agent_id,
+                  c.agent_revocation_generation)
   or WorkflowRevoked(c.workflow_id, c.workflow_revocation_generation)
   or exists p in CertificatePredecessorEdges[c]: EffectiveRevoked(p)
 ```
@@ -250,6 +328,20 @@ and projections are non-authoritative. Commit, supersession, and status issuance
 evaluate the closure while holding the same workflow guard; cycles or missing
 edges quarantine the affected workflow. `SUPERSEDED` alone is not revocation.
 
+An `ACTOR` revocation is workflow-scoped. Its canonical key is
+`(workflow_id, agent_id)`, and it is advanced while holding that workflow's
+guard; it has no effect on the same agent identifier in another workflow.
+
+Revocation requests have three non-overlapping typed scopes:
+
+- `CERTIFICATE`: `target_id` is the exact 43-character certificate payload
+  digest and directly revokes only that immutable certificate (descendants are
+  affected through `EffectiveRevoked`);
+- `ACTOR`: `target_id` is `agent_id`, keyed as `(workflow_id, agent_id)`; and
+- `WORKFLOW`: `target_id` MUST equal the request's `workflow_id`.
+
+`WORKFLOW` MUST NOT be overloaded to carry a certificate digest.
+
 An `AuthorityStatus` issued before a revocation may remain usable only through
 its signed `next_update_ms` and the consumer's smaller configured maximum
 staleness. Revocation does not retroactively alter an already issued signed
@@ -258,7 +350,8 @@ status, so the bounded validity interval is an explicit residual-risk window.
 ## Operations and linearization
 
 `StageResult`, `AssembleEvidence`, `ProposeCommit`, `VerifyProposal`, `Commit`,
-`ReplayCommit`, `RejectCommit`, `RevokeAuthority`, `RevokeWorkflowRoot`,
+`ReplayCommit`, `RejectCommit`, `RevokeCertificate`, `RevokeActor`,
+`RevokeWorkflowRoot`,
 `SupersedeCommit`, `VerifyCertificate`, `RecoverPendingCommit`, `RecoverOutbox`,
 and `ConsumeAuthoritativeResult` return typed outcomes and audit event IDs.
 
@@ -266,13 +359,11 @@ Every authority/control mutation MUST:
 
 1. perform only side-effect-free size, UTF-8, canonical schema parsing needed
    to reject malformed wire input and locate `workflow_id` and `commit_id`;
-2. begin a write transaction and acquire the workflow authority guard before
-   replay resolution or any normative cryptographic, binding, or freshness
-   validation (`BEGIN
-   IMMEDIATE` for SQLite; workflow-row `SELECT ... FOR UPDATE` for PostgreSQL
-   17+);
-3. reserve/resolve the store-global `commit_id` through its unique index and
-   conflict ledger, then short-circuit exact replay or equivocation;
+2. enter one atomic authority-linearization primitive and acquire the workflow
+   authority guard before replay resolution or any normative cryptographic,
+   binding, or freshness validation;
+3. conditionally reserve/resolve the store-global `commit_id` and nonce within
+   that primitive, then short-circuit exact replay or equivocation;
 4. read all state, policy, authority, revocation, predecessor, nonce, staging,
    trust-log, and control versions while holding the guard;
 5. perform every normative digest, signature, internal binding, active-state,
@@ -281,12 +372,16 @@ Every authority/control mutation MUST:
 6. construct and seal the final canonical payload;
 7. conditionally advance the node and persist exact certificate bytes, request
    digest, decision, nonce use, evidence references, and one outbox intent; and
-8. commit.
+8. durably commit the primitive.
 
-The database commit in step 8 is the single successful linearization point. A
-crash before it creates no authority; response loss after it is recovered by
-exact replay. All PostgreSQL authority and control mutations acquire the same
-workflow guard first; validation before the guard is non-conformant.
+The successful durable commit in step 8 is the single linearization point. The
+primitive MUST provide atomic guarded reads, conditional transitions, durable
+all-or-nothing persistence, and mutual exclusion sufficient to permit at most
+one winner. A crash before it creates no authority; response loss after it is
+recovered by exact replay. Backend lock syntax, indexes, isolation levels, and
+retry mechanics are nonnormative refinements documented in
+`APCC-1-Authority-Store-Profiles.md`. Validation before the guard is
+non-conformant.
 
 ### Deterministic admission and attempt failures
 
@@ -311,13 +406,16 @@ Admission reports the first failure in this exact precedence order:
 Implementations MAY record all observed diagnostics internally, but the
 wire-visible code is the first code in this order.
 
-`commit_id` is store-global, not workflow-scoped. A global unique index maps it
-to one request digest and immutable decision. Same ID/digest returns original
-bytes without resigning or duplicate side effects. Different digest appends a
-conflict-ledger row containing ID, original/conflicting digests, both claimed
-workflows, observation sequence, and audit identity; it returns
-`COMMIT_ID_EQUIVOCATION`. Cross-workflow races serialize at the global index and
-never acquire two workflow guards. Reused nonce is `NONCE_REPLAY`. Competing
+Both `commit_id` and commit nonce namespaces are authority-store-global, not
+workflow-scoped. The authority-linearization primitive maps each `commit_id` to
+one request digest and immutable decision, and conditionally reserves every
+nonce once across all workflows. Same ID/digest returns original bytes without
+resigning or duplicate side effects. Different digest appends a conflict-ledger
+record containing ID, original/conflicting digests, both claimed workflows,
+observation sequence, and audit identity; it returns
+`COMMIT_ID_EQUIVOCATION`. Any nonce reuse, including reuse by a different
+workflow, returns `NONCE_REPLAY`. Cross-workflow races serialize through the
+store-global reservations and never acquire two workflow guards. Competing
 node-version transitions have at most one winner.
 
 ## Stable failure codes

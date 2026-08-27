@@ -52,10 +52,6 @@ class CertificateDisposition(StrEnum):
     REVOKED = "REVOKED"
 
 
-# Temporary import compatibility for callers migrating to CandidateLifecycle.
-NodeLifecycle = CandidateLifecycle
-
-
 class RequestOutcome(StrEnum):
     COMMITTED = "COMMITTED"
     DENIED = "DENIED"
@@ -830,10 +826,6 @@ class LogicalNodeState:
         if self.current_certificate_digest is not None:
             result["current_certificate_digest"] = self.current_certificate_digest
         return result
-
-
-# Temporary import compatibility; the constructor follows the logical-node model.
-NodeState = LogicalNodeState
 
 
 @dataclass(frozen=True, slots=True)

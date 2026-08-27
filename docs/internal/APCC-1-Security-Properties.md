@@ -7,7 +7,9 @@ implementation evidence is pending; existing GCB tests are regression anchors,
 not APCC proof. `BASELINE_REMOTE_EVIDENCE_INCOMPLETE` applies.
 
 Let `Auth(n,v,c)` mean node `n` version `v` is authoritative under certificate
-`c`; `Valid(c)` mean static certificate validity; `Current(c,s,t)` mean fresh
+`c`; `Valid(c)` mean historical validity of the supplied certificate only;
+`CausallyValid(c,L)` mean bounded, digest-pinned validity of its complete
+resolved predecessor closure under limits `L`; `Current(c,s,t)` mean fresh
 authenticated trust status `s` authorizes consumption at time `t`; and
 `Lin(op)` denote the store transaction's durable commit.
 `CurrentPtr(n)` is the logical node's current certificate digest,
@@ -26,6 +28,7 @@ canonical certificate/predecessor and revocation tables.
 | `NoRevokedActorCommit` | Actor generation in the request equals guarded current generation and is not revoked at `Lin`. |
 | `NoStaleWorkflowCommit` | Workflow epoch and revocation generation are current at `Lin`. |
 | `NoInvalidPredecessorCommit` | Every bound predecessor is valid, same-workflow, exact, and currently consumable at `Lin`. |
+| `BoundedIndependentCausalVerification` | `CausallyValid(c,L)` requires full historical verification of every digest-pinned resolved certificate, exact six-field comparison on every edge, and fail-closed depth/count/byte limits; `Valid(c)` alone makes no causal-availability claim. |
 | `NoCrossAttemptReplay` | A coherent proposal naming an attempt other than the active guarded attempt fails `CROSS_ATTEMPT_REPLAY`; internally inconsistent attempt fields fail earlier as `ATTEMPT_MISMATCH`. |
 | `NoCrossWorkflowReplay` | Workflow mismatch, including predecessor import, cannot authorize a transition. |
 | `NoCrossNodeReplay` | Node mismatch cannot authorize a transition. |
@@ -41,9 +44,12 @@ canonical certificate/predecessor and revocation tables.
 | `AtMostOneAuthoritativeCommitPerNodeVersion` | Competing requests for one `(workflow,node,expected_version)` have at most one successful `Lin`. |
 | `CommitIdUniqueness` | One store-global `commit_id` maps to one canonical request digest and immutable decision across all workflows. |
 | `CommitIdEquivocationDetection` | Different-digest reuse, including a cross-workflow race, appends the conflict ledger and never mutates authority. |
+| `NonceUniqueness` | One authority-store-global commit nonce may be reserved once across all workflows; cross-workflow reuse fails `NONCE_REPLAY`. |
 | `PredecessorCausalConsistency` | A committed child binds the exact committed predecessor set observed under the guard. |
 | `CertificateStateConsistency` | Persisted state version, output digest, decision, and certificate agree atomically. |
 | `RevocationMonotonicity` | Actor/workflow revocation generations and trust sequences never decrease. |
+| `ActorRevocationWorkflowScope` | Actor revocation is keyed by `(workflow_id, agent_id)`, advances under that workflow guard, and cannot revoke the same agent identifier in another workflow. |
+| `RevocationTargetSeparation` | `CERTIFICATE` targets a certificate digest, `ACTOR` targets an Agent within one workflow, and `WORKFLOW` targets exactly its request workflow; no scope is overloaded for another target type. |
 | `EffectiveRevocationClosure` | Under the workflow guard, direct certificate, actor, or workflow revocation and revoked predecessors imply `EffectiveRevoked`; caches cannot weaken the canonical closure. |
 | `DownstreamAuthorityConsistency` | Ordinary consumption requires `Valid(c)` and a nonce/certificate-bound, unexpired, non-rollback v1 `AuthorityStatus`. |
 | `ExactReplayPreservesState` | Exact replay causes no state/version change. |
@@ -55,6 +61,15 @@ canonical certificate/predecessor and revocation tables.
 | `AtomicSupersession` | A successful supersession atomically advances `v` to `v+1`, creates the new certificate, old-to-new edge, old/new dispositions, current pointer, decision, nonce, and one outbox intent. |
 | `SupersessionReplayPrecedence` | Under the workflow guard, exact replay/equivocation resolves before old-pointer/disposition/version checks, so post-success replay returns the original envelope despite the old certificate no longer being current. |
 | `SupersessionNonretroactivity` | Supersession does not invalidate already committed children bound to the old certificate; a pending stale binding fails `PREDECESSOR_REPLACED`. |
+
+### Implementation/API conformance (outside the TLA+ invariant matrix)
+
+Typed conformance tests enforce that every supersession returns a durable typed
+result: a committed branch carries replacement identities, while a denied or
+conflicted branch carries the exact immutable `CommitResult` and no replacement
+identities. This return-shape requirement is an API contract, not an additional
+state-machine safety invariant; `AtomicSupersession`, replay/equivocation, and
+state-consistency properties above cover the transition semantics.
 
 ## Visibility and recovery
 
@@ -103,13 +118,13 @@ establishes state-machine properties only, not cryptographic security.
 
 | Formal boundary | Required implementation evidence | Status |
 |---|---|---|
-| Guard precedes freshness reads | SQLite `BEGIN IMMEDIATE`; PostgreSQL workflow-row lock; source/static assertion | `PENDING_IMPLEMENTATION` |
+| Guard precedes freshness reads | Abstract atomic authority guard precedes normative reads; backend-profile source/static assertion | `PENDING_IMPLEMENTATION` |
 | `Lin` atomicity | Faults before/after state, certificate, decision, and outbox writes on real stores | `PENDING_EMPIRICAL` |
 | Certificate validity | Embedded exact bodies/digests/signatures and strict Python/Go tamper vectors | `PENDING_IMPLEMENTATION` |
 | Replay/equivocation | Both-store concurrent and response-loss tests | GCB baseline only; APCC pending |
 | Revocation/current status | Guarded transitive-closure tests plus `AuthorityStatus` nonce, certificate, expiry, generation, and rollback tests | `PENDING_IMPLEMENTATION` |
 | Supersession | Both-store atomic edge/pointer/disposition/outbox, replay, response-loss, crash, and conflict tests | `PENDING_IMPLEMENTATION` |
-| Portable bytes | Persisted payload/envelope byte comparison, `get_certificate`, exact replay, predecessor/status digest targeting, and Python/Go agreement | `PENDING_IMPLEMENTATION` |
+| Portable bytes | Persisted payload/envelope byte comparison, `get_certificate`, exact replay, predecessor/status digest targeting, and Python/Go historical plus bounded-causal agreement | `PENDING_IMPLEMENTATION` |
 | Causal consistency | Committed-child nonretroactivity and pending-child `PREDECESSOR_REPLACED` tests plus exact witness | GCB baseline only; APCC pending |
 | Attempt precedence | Internal mismatch and coherent stale-attempt vectors asserting deterministic failure codes | `PENDING_IMPLEMENTATION` |
 | No parallel authority path | Architecture/static scan plus `SwarmExecutor` integration test | `PENDING_IMPLEMENTATION`; any failure is P0 |

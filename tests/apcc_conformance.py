@@ -1,0 +1,802 @@
+"""Backend-neutral real-store APCC authority conformance contract."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
+from pathlib import Path
+from threading import Barrier
+from typing import Protocol
+
+import pytest
+
+from constitutional_swarm.apcc.model import (
+    AuthorityStatus,
+    CandidateLifecycle,
+    FailureCode,
+    RequestOutcome,
+)
+from constitutional_swarm.apcc.ports import (
+    AssembleEvidenceRequest,
+    AssembleEvidenceResult,
+    AtomicCommitRequest,
+    AuthorityStore,
+    CommitContextRequest,
+    CommitResult,
+    OutboxRecoveryRequest,
+    PersistedOutboxEvent,
+    ProposeCommitRequest,
+    ProposeCommitResult,
+    RecoveryRequest,
+    ReplayCommitRequest,
+    RevocationRequest,
+    RevocationScope,
+    StageResultRequest,
+    SupersessionCommitted,
+    SupersessionConflicted,
+    SupersessionDenied,
+    SupersessionRequest,
+)
+from constitutional_swarm.apcc.verifier import ScopedTrust, verify_current
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoritySnapshot:
+    """Exact canonical observation of all authority/control tables and pointers."""
+
+    tables: Mapping[str, tuple[bytes, ...]]
+    current_pointers: tuple[bytes, ...]
+
+
+class FaultProbe(Protocol):
+    """Private test fixture protocol; never part of a production open API."""
+
+    def hit(self, point: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityStoreHarness:
+    """Only test fixtures supply bootstrap, faults, and persistence observation."""
+
+    open_store: Callable[[Path, FaultProbe | None], AuthorityStore]
+    reopen_store: Callable[[Path], AuthorityStore]
+    make_request: Callable[..., AtomicCommitRequest]
+    trust: ScopedTrust
+    snapshot: Callable[[AuthorityStore], AuthoritySnapshot]
+    stage_request: Callable[[AtomicCommitRequest], StageResultRequest]
+    assemble_evidence_request: Callable[[AtomicCommitRequest], AssembleEvidenceRequest]
+    propose_commit_request: Callable[[AtomicCommitRequest], ProposeCommitRequest]
+    outbox_event: Callable[[AuthorityStore, str], PersistedOutboxEvent]
+    assert_conflict_and_audit_delta: Callable[
+        [AuthoritySnapshot, AuthoritySnapshot, str], None
+    ]
+    assert_denied_decision_delta: Callable[
+        [AuthoritySnapshot, AuthoritySnapshot, str], None
+    ]
+    assert_missing_recovery_delta: Callable[
+        [AuthoritySnapshot, AuthoritySnapshot], None
+    ]
+    assert_outbox_delivery_delta: Callable[[AuthoritySnapshot, AuthoritySnapshot], None]
+
+
+def _stage(
+    store: AuthorityStore, harness: AuthorityStoreHarness, request: AtomicCommitRequest
+) -> None:
+    staged = store.stage_result(harness.stage_request(request))
+    assert staged.candidate_state.workflow_id == request.subject.workflow_id
+    assert staged.candidate_state.lifecycle is CandidateLifecycle.RESULT_STAGED
+
+    assembled: AssembleEvidenceResult = store.assemble_evidence(
+        harness.assemble_evidence_request(request)
+    )
+    assert assembled.candidate_state.lifecycle is CandidateLifecycle.EVIDENCE_ASSEMBLED
+
+    proposed: ProposeCommitResult = store.propose_commit(
+        harness.propose_commit_request(request)
+    )
+    assert proposed.candidate_state.lifecycle is CandidateLifecycle.COMMIT_PENDING
+
+
+def assert_commit_tuple_is_exact(store: AuthorityStore, result: CommitResult) -> None:
+    assert result.decision.outcome is RequestOutcome.COMMITTED
+    assert (
+        store.get_certificate(result.decision.commit_id)
+        == result.certificate_envelope_bytes
+    )
+    assert result.certificate_payload_bytes
+    assert result.certificate_digest
+
+
+def assert_non_authoritative_tuple_is_exact(
+    result: CommitResult,
+    *,
+    commit_id: str,
+    outcome: RequestOutcome,
+    reason: FailureCode,
+) -> None:
+    assert result.decision.commit_id == commit_id
+    assert result.decision.outcome is outcome
+    assert result.decision.reason is reason
+    assert result.certificate_payload_bytes is None
+    assert result.certificate_envelope_bytes is None
+    assert result.certificate_digest is None
+    assert result.audit_event_id
+
+
+def _verify_store_status(
+    harness: AuthorityStoreHarness,
+    result: CommitResult,
+    *,
+    status: AuthorityStatus,
+    request_nonce: str,
+    expected: FailureCode | None,
+    highest_sequence: str | None = None,
+    highest_head: str | None = None,
+    now_ms: str | None = None,
+    maximum_staleness_ms: str = "5000",
+) -> None:
+    assert result.certificate_envelope_bytes is not None
+    verdict = verify_current(
+        result.certificate_envelope_bytes,
+        trust=harness.trust,
+        authority_status=status,
+        request_nonce=request_nonce,
+        now_ms=now_ms or status.this_update_ms,
+        highest_trust_log_sequence=highest_sequence or status.trust_log_sequence,
+        highest_trust_log_head=highest_head or status.trust_log_head,
+        maximum_staleness_ms=maximum_staleness_ms,
+    )
+    if expected is None:
+        assert verdict.ok
+    else:
+        assert verdict.code is expected
+
+
+def _predecessor(
+    request: AtomicCommitRequest, committed: CommitResult
+) -> dict[str, str]:
+    """Return the exact six-field reference required by the APCC wire contract."""
+    assert committed.certificate_digest
+    return {
+        "workflow_id": request.subject.workflow_id,
+        "node_id": request.subject.node_id,
+        "committed_node_version": request.bindings.committed_node_version,
+        "commit_id": request.commit_id,
+        "certificate_digest": committed.certificate_digest,
+        "output_digest": request.subject.output_digest,
+    }
+
+
+def assert_authority_store_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    """Run unchanged against SQLite and PostgreSQL authority stores."""
+    store = harness.open_store(tmp_path / "authority.db", None)
+    request = harness.make_request(commit_id="commit-1", nonce_byte=1)
+    _stage(store, harness, request)
+    committed = store.atomic_commit(request)
+    assert_commit_tuple_is_exact(store, committed)
+    committed_snapshot = harness.snapshot(store)
+
+    replay = store.replay_commit(
+        ReplayCommitRequest(request.commit_id, request.request_digest)
+    )
+    assert replay == committed
+    assert harness.snapshot(store) == committed_snapshot
+    assert store.atomic_commit(request) == committed  # response-loss exact replay
+    assert harness.snapshot(store) == committed_snapshot
+
+    equivocation = harness.make_request(
+        commit_id=request.commit_id, nonce_byte=2, workflow_id="workflow-2"
+    )
+    conflicted = store.atomic_commit(equivocation)
+    assert_non_authoritative_tuple_is_exact(
+        conflicted,
+        commit_id=request.commit_id,
+        outcome=RequestOutcome.CONFLICTED,
+        reason=FailureCode.COMMIT_ID_EQUIVOCATION,
+    )
+    harness.assert_conflict_and_audit_delta(
+        committed_snapshot, harness.snapshot(store), request.commit_id
+    )
+    conflicted_snapshot = harness.snapshot(store)
+    assert store.atomic_commit(equivocation) == conflicted
+    assert (
+        store.replay_commit(
+            ReplayCommitRequest(equivocation.commit_id, equivocation.request_digest)
+        )
+        == conflicted
+    )
+    assert harness.snapshot(store) == conflicted_snapshot
+
+    nonce_replay = harness.make_request(commit_id="commit-2", nonce_byte=1)
+    _stage(store, harness, nonce_replay)
+    before_nonce_denial = harness.snapshot(store)
+    denied = store.atomic_commit(nonce_replay)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=nonce_replay.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.NONCE_REPLAY,
+    )
+    denied_snapshot = harness.snapshot(store)
+    harness.assert_denied_decision_delta(
+        before_nonce_denial, denied_snapshot, nonce_replay.commit_id
+    )
+    assert (
+        store.replay_commit(
+            ReplayCommitRequest(nonce_replay.commit_id, nonce_replay.request_digest)
+        )
+        == denied
+    )
+    assert store.atomic_commit(nonce_replay) == denied
+    assert harness.snapshot(store) == denied_snapshot
+
+    # A persisted denial still reserves the store-global commit ID. A different
+    # request must report equivocation before staging, nonce, or workflow checks.
+    denied_equivocation = harness.make_request(
+        commit_id=nonce_replay.commit_id,
+        nonce_byte=1,
+        workflow_id="workflow-3",
+    )
+    conflicted_denial = store.atomic_commit(denied_equivocation)
+    assert_non_authoritative_tuple_is_exact(
+        conflicted_denial,
+        commit_id=nonce_replay.commit_id,
+        outcome=RequestOutcome.CONFLICTED,
+        reason=FailureCode.COMMIT_ID_EQUIVOCATION,
+    )
+    after_denied_equivocation = harness.snapshot(store)
+    harness.assert_conflict_and_audit_delta(
+        denied_snapshot, after_denied_equivocation, nonce_replay.commit_id
+    )
+    assert store.atomic_commit(denied_equivocation) == conflicted_denial
+    assert (
+        store.replay_commit(
+            ReplayCommitRequest(
+                denied_equivocation.commit_id, denied_equivocation.request_digest
+            )
+        )
+        == conflicted_denial
+    )
+    assert harness.snapshot(store) == after_denied_equivocation
+
+    # Same active attempt, different IDs/nonces, same expected version: one winner.
+    race_store = harness.open_store(tmp_path / "race.db", None)
+    race_one = harness.make_request(commit_id="race-1", nonce_byte=3)
+    race_two = harness.make_request(commit_id="race-2", nonce_byte=4)
+    _stage(race_store, harness, race_one)
+    _stage(race_store, harness, race_two)
+    start = Barrier(3)
+
+    def contend(request_item: AtomicCommitRequest) -> CommitResult:
+        start.wait()
+        return race_store.atomic_commit(request_item)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = (pool.submit(contend, race_one), pool.submit(contend, race_two))
+        start.wait()
+        results = [future.result() for future in futures]
+    assert (
+        sum(item.decision.outcome is RequestOutcome.COMMITTED for item in results) == 1
+    )
+    loser_request, loser = next(
+        (request_item, result_item)
+        for request_item, result_item in zip((race_one, race_two), results, strict=True)
+        if result_item.decision.outcome is not RequestOutcome.COMMITTED
+    )
+    assert_non_authoritative_tuple_is_exact(
+        loser,
+        commit_id=loser_request.commit_id,
+        outcome=RequestOutcome.CONFLICTED,
+        reason=FailureCode.NODE_VERSION_CONFLICT,
+    )
+    race_snapshot = harness.snapshot(race_store)
+    assert (
+        race_store.replay_commit(
+            ReplayCommitRequest(loser_request.commit_id, loser_request.request_digest)
+        )
+        == loser
+    )
+    assert race_store.atomic_commit(loser_request) == loser
+    assert harness.snapshot(race_store) == race_snapshot
+
+    before_exact_recovery = harness.snapshot(store)
+    assert (
+        store.recover(RecoveryRequest(request.commit_id, request.request_digest))
+        == committed
+    )
+    assert harness.snapshot(store) == before_exact_recovery
+    before_missing = harness.snapshot(store)
+    missing = store.recover(RecoveryRequest("missing", request.request_digest))
+    after_missing = harness.snapshot(store)
+    mismatch = store.recover(RecoveryRequest(request.commit_id, "different-digest"))
+    after_mismatch = harness.snapshot(store)
+    assert missing.decision.outcome is RequestOutcome.DENIED
+    assert missing.decision.reason == FailureCode.AUTHORITY_FROM_RECOVERY_DENIED
+    assert mismatch.decision.outcome is RequestOutcome.CONFLICTED
+    assert mismatch.decision.reason == FailureCode.COMMIT_ID_EQUIVOCATION
+    assert missing.certificate_envelope_bytes is None
+    assert mismatch.certificate_envelope_bytes is None
+    harness.assert_missing_recovery_delta(before_missing, after_missing)
+    harness.assert_conflict_and_audit_delta(
+        after_missing, after_mismatch, request.commit_id
+    )
+    assert (
+        store.recover(RecoveryRequest(request.commit_id, "different-digest"))
+        == mismatch
+    )
+    assert harness.snapshot(store) == after_mismatch
+    assert before_missing.current_pointers == after_mismatch.current_pointers
+
+    # A replacement is one atomic authority transition. The old certificate
+    # remains historical, the replacement is current, and every exact replay is
+    # immutable. Reusing the replacement commit ID wins over stale-pointer checks.
+    committed_digest = committed.certificate_digest
+    assert committed_digest is not None
+    replacement = harness.make_request(
+        commit_id="replacement-1",
+        nonce_byte=5,
+        expected_node_version="1",
+        attempt_id="attempt-replacement",
+    )
+    _stage(store, harness, replacement)
+    superseded = store.supersede(SupersessionRequest(committed_digest, replacement))
+    assert isinstance(superseded, SupersessionCommitted)
+    assert_commit_tuple_is_exact(store, superseded.commit_result)
+    assert superseded.old_certificate_digest == committed_digest
+    replacement_snapshot = harness.snapshot(store)
+    assert (
+        store.supersede(SupersessionRequest(committed_digest, replacement))
+        == superseded
+    )
+    assert harness.snapshot(store) == replacement_snapshot
+
+    stale_pointer = harness.make_request(
+        commit_id="replacement-stale-pointer",
+        nonce_byte=12,
+        expected_node_version="2",
+        attempt_id="stale-pointer-attempt",
+    )
+    _stage(store, harness, stale_pointer)
+    denied_replacement = store.supersede(
+        SupersessionRequest(committed_digest, stale_pointer)
+    )
+    assert isinstance(denied_replacement, SupersessionDenied)
+    assert_non_authoritative_tuple_is_exact(
+        denied_replacement.commit_result,
+        commit_id=stale_pointer.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.PREDECESSOR_REPLACED,
+    )
+    denied_snapshot = harness.snapshot(store)
+    assert (
+        store.supersede(SupersessionRequest(committed_digest, stale_pointer))
+        == denied_replacement
+    )
+    assert harness.snapshot(store) == denied_snapshot
+    replacement_equivocation = harness.make_request(
+        commit_id=replacement.commit_id,
+        nonce_byte=6,
+        expected_node_version="0",
+        attempt_id="stale-conflicting-attempt",
+    )
+    replacement_conflict = store.supersede(
+        SupersessionRequest(committed_digest, replacement_equivocation)
+    )
+    assert isinstance(replacement_conflict, SupersessionConflicted)
+    assert_non_authoritative_tuple_is_exact(
+        replacement_conflict.commit_result,
+        commit_id=replacement.commit_id,
+        outcome=RequestOutcome.CONFLICTED,
+        reason=FailureCode.COMMIT_ID_EQUIVOCATION,
+    )
+    assert replacement_conflict.old_certificate_digest == committed.certificate_digest
+    replacement_conflict_snapshot = harness.snapshot(store)
+    assert (
+        store.supersede(
+            SupersessionRequest(committed.certificate_digest, replacement_equivocation)
+        )
+        == replacement_conflict
+    )
+    assert harness.snapshot(store) == replacement_conflict_snapshot
+
+    # Causal closure and propagation are backend contracts, not SQLite-only
+    # behavior: direct root revocation reaches a grandchild across reopen-safe
+    # persisted predecessor edges.
+    chain_path = tmp_path / "causal-chain.db"
+    chain_store = harness.open_store(chain_path, None)
+    root_request = harness.make_request(
+        commit_id="causal-root", nonce_byte=7, node_id="root"
+    )
+    _stage(chain_store, harness, root_request)
+    root = chain_store.atomic_commit(root_request)
+    root_digest = root.certificate_digest
+    assert root_digest is not None
+    middle_request = harness.make_request(
+        commit_id="causal-middle",
+        nonce_byte=8,
+        node_id="middle",
+        predecessors=[_predecessor(root_request, root)],
+    )
+    _stage(chain_store, harness, middle_request)
+    middle = chain_store.atomic_commit(middle_request)
+    leaf_request = harness.make_request(
+        commit_id="causal-leaf",
+        nonce_byte=9,
+        node_id="leaf",
+        predecessors=[_predecessor(middle_request, middle)],
+    )
+    _stage(chain_store, harness, leaf_request)
+    leaf = chain_store.atomic_commit(leaf_request)
+    assert leaf.certificate_digest
+    current = chain_store.current_status(
+        leaf.certificate_digest, "AAAAAAAAAAAAAAAAAAAAAA"
+    )
+    assert current.status.value == "current"
+    _verify_store_status(
+        harness,
+        leaf,
+        status=current,
+        request_nonce="AAAAAAAAAAAAAAAAAAAAAA",
+        expected=None,
+    )
+    chain_store.revoke(
+        RevocationRequest(
+            RevocationScope.CERTIFICATE,
+            root_request.subject.workflow_id,
+            root_digest,
+            "1",
+            "backend-neutral transitive propagation",
+        )
+    )
+    chain_store = harness.reopen_store(chain_path)
+    propagated = chain_store.current_status(
+        leaf.certificate_digest, "AQEBAQEBAQEBAQEBAQEBAQ"
+    )
+    assert propagated.status.value == "revoked"
+    assert int(propagated.trust_log_sequence) > int(current.trust_log_sequence)
+    _verify_store_status(
+        harness,
+        leaf,
+        status=current,
+        request_nonce="AAAAAAAAAAAAAAAAAAAAAA",
+        expected=FailureCode.AUTHORITY_STATUS_ROLLBACK,
+        highest_sequence=propagated.trust_log_sequence,
+        highest_head=propagated.trust_log_head,
+    )
+    _verify_store_status(
+        harness,
+        leaf,
+        status=propagated,
+        request_nonce="AQEBAQEBAQEBAQEBAQEBAQ",
+        expected=FailureCode.AUTHORITY_STATUS_REVOKED,
+    )
+
+    before_delivery = harness.snapshot(store)
+    outbox = store.recover_outbox(OutboxRecoveryRequest(max_items="100"))
+    assert int(outbox.delivered_count) >= 0
+    after_delivery = harness.snapshot(store)
+    harness.assert_outbox_delivery_delta(before_delivery, after_delivery)
+    assert (
+        store.recover_outbox(OutboxRecoveryRequest(max_items="100")).delivered_count
+        == "0"
+    )
+    assert harness.snapshot(store) == after_delivery
+
+
+def assert_authority_store_extended_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    """Portable lifecycle, revocation, status, and causality conformance slice."""
+    lifecycle_path = tmp_path / "lifecycle"
+    lifecycle = harness.open_store(lifecycle_path, None)
+    request = harness.make_request(commit_id="lifecycle-1", nonce_byte=31)
+    with pytest.raises(ValueError):
+        lifecycle.assemble_evidence(harness.assemble_evidence_request(request))
+    with pytest.raises(ValueError):
+        lifecycle.propose_commit(harness.propose_commit_request(request))
+    staged = lifecycle.stage_result(harness.stage_request(request))
+    assert staged.candidate_state.lifecycle is CandidateLifecycle.RESULT_STAGED
+    lifecycle = harness.reopen_store(lifecycle_path)
+    context_request = CommitContextRequest(
+        request.subject.workflow_id,
+        request.subject.node_id,
+        request.subject.attempt_id,
+        request.subject.agent_id,
+    )
+    assert (
+        lifecycle.read_commit_context(context_request).candidate_state.lifecycle
+        is CandidateLifecycle.RESULT_STAGED
+    )
+    assert (
+        lifecycle.assemble_evidence(
+            harness.assemble_evidence_request(request)
+        ).candidate_state.lifecycle
+        is CandidateLifecycle.EVIDENCE_ASSEMBLED
+    )
+    lifecycle = harness.reopen_store(lifecycle_path)
+    assert (
+        lifecycle.propose_commit(
+            harness.propose_commit_request(request)
+        ).candidate_state.lifecycle
+        is CandidateLifecycle.COMMIT_PENDING
+    )
+    lifecycle = harness.reopen_store(lifecycle_path)
+    assert (
+        lifecycle.read_commit_context(context_request).candidate_state.lifecycle
+        is CandidateLifecycle.COMMIT_PENDING
+    )
+
+    quarantine_path = tmp_path / "quarantine"
+    quarantine = harness.open_store(quarantine_path, None)
+    quarantined = harness.make_request(commit_id="quarantine-1", nonce_byte=32)
+    stage_request = harness.stage_request(quarantined)
+    quarantine.stage_result(stage_request)
+    with pytest.raises(ValueError):
+        quarantine.stage_result(
+            replace(stage_request, result_bytes=b"different-output")
+        )
+    quarantine = harness.reopen_store(quarantine_path)
+    quarantined_context = quarantine.read_commit_context(
+        CommitContextRequest(
+            quarantined.subject.workflow_id,
+            quarantined.subject.node_id,
+            quarantined.subject.attempt_id,
+            quarantined.subject.agent_id,
+        )
+    )
+    assert (
+        quarantined_context.candidate_state.lifecycle is CandidateLifecycle.QUARANTINED
+    )
+    assert quarantined_context.logical_node_state.current_certificate_digest is None
+    assert quarantine.get_certificate(quarantined.commit_id) is None
+    with pytest.raises(ValueError):
+        quarantine.assemble_evidence(harness.assemble_evidence_request(quarantined))
+
+    actor_path = tmp_path / "actor-scope"
+    actor_store = harness.open_store(actor_path, None)
+    first_request = harness.make_request(commit_id="actor-w1", nonce_byte=33)
+    second_request = harness.make_request(
+        commit_id="actor-w2", nonce_byte=34, workflow_id="workflow-2"
+    )
+    _stage(actor_store, harness, first_request)
+    _stage(actor_store, harness, second_request)
+    first = actor_store.atomic_commit(first_request)
+    second = actor_store.atomic_commit(second_request)
+    assert first.certificate_digest and second.certificate_digest
+    actor_store.revoke(
+        RevocationRequest(
+            RevocationScope.ACTOR,
+            first_request.subject.workflow_id,
+            first_request.subject.agent_id,
+            "1",
+            "workflow-scoped actor revocation",
+        )
+    )
+    actor_store = harness.reopen_store(actor_path)
+    first_status = actor_store.current_status(
+        first.certificate_digest, "AwMDAwMDAwMDAwMDAwMDAw"
+    )
+    second_status = actor_store.current_status(
+        second.certificate_digest, "BAQEBAQEBAQEBAQEBAQEBA"
+    )
+    _verify_store_status(
+        harness,
+        first,
+        status=first_status,
+        request_nonce="AwMDAwMDAwMDAwMDAwMDAw",
+        expected=FailureCode.AUTHORITY_STATUS_REVOKED,
+    )
+    _verify_store_status(
+        harness,
+        second,
+        status=second_status,
+        request_nonce="BAQEBAQEBAQEBAQEBAQEBA",
+        expected=None,
+    )
+    assert int(second_status.next_update_ms) > int(second_status.this_update_ms) + 2
+    _verify_store_status(
+        harness,
+        second,
+        status=second_status,
+        request_nonce="BAQEBAQEBAQEBAQEBAQEBA",
+        expected=FailureCode.AUTHORITY_STATUS_EXPIRED,
+        now_ms=str(int(second_status.this_update_ms) + 2),
+        maximum_staleness_ms="1",
+    )
+
+    predecessor_path = tmp_path / "supersession-causality"
+    predecessor_store = harness.open_store(predecessor_path, None)
+    root_request = harness.make_request(
+        commit_id="root-1", nonce_byte=35, node_id="root"
+    )
+    _stage(predecessor_store, harness, root_request)
+    root = predecessor_store.atomic_commit(root_request)
+    root_digest = root.certificate_digest
+    assert root_digest is not None
+    root_ref = _predecessor(root_request, root)
+    child_request = harness.make_request(
+        commit_id="child-1", nonce_byte=36, node_id="child", predecessors=[root_ref]
+    )
+    _stage(predecessor_store, harness, child_request)
+    child = predecessor_store.atomic_commit(child_request)
+    pending_request = harness.make_request(
+        commit_id="pending-1", nonce_byte=37, node_id="leaf", predecessors=[root_ref]
+    )
+    _stage(predecessor_store, harness, pending_request)
+    replacement = harness.make_request(
+        commit_id="root-2",
+        nonce_byte=38,
+        node_id="root",
+        expected_node_version="1",
+        attempt_id="root-replacement",
+    )
+    _stage(predecessor_store, harness, replacement)
+    replacement_result = predecessor_store.supersede(
+        SupersessionRequest(root_digest, replacement)
+    )
+    assert isinstance(replacement_result, SupersessionCommitted)
+    assert replacement_result.commit_result.decision.outcome is RequestOutcome.COMMITTED
+    terminal = harness.snapshot(predecessor_store)
+    assert (
+        predecessor_store.supersede(SupersessionRequest(root_digest, replacement))
+        == replacement_result
+    )
+    assert harness.snapshot(predecessor_store) == terminal
+    assert child.certificate_digest
+    child_status = predecessor_store.current_status(
+        child.certificate_digest, "BgYGBgYGBgYGBgYGBgYGBg"
+    )
+    _verify_store_status(
+        harness,
+        child,
+        status=child_status,
+        request_nonce="BgYGBgYGBgYGBgYGBgYGBg",
+        expected=None,
+    )
+    stale = predecessor_store.atomic_commit(pending_request)
+    assert_non_authoritative_tuple_is_exact(
+        stale,
+        commit_id=pending_request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.PREDECESSOR_REPLACED,
+    )
+    stale_snapshot = harness.snapshot(predecessor_store)
+    assert predecessor_store.atomic_commit(pending_request) == stale
+    assert (
+        predecessor_store.replay_commit(
+            ReplayCommitRequest(
+                pending_request.commit_id, pending_request.request_digest
+            )
+        )
+        == stale
+    )
+    assert harness.snapshot(predecessor_store) == stale_snapshot
+
+    attempt_store = harness.open_store(tmp_path / "attempt-precedence", None)
+    malformed_base = harness.make_request(commit_id="attempt-mismatch", nonce_byte=39)
+    mismatched = replace(
+        malformed_base,
+        subject=replace(malformed_base.subject, attempt_id="subject-only-mismatch"),
+    )
+    coherent = harness.make_request(
+        commit_id="inactive-attempt", nonce_byte=40, attempt_id="inactive-attempt"
+    )
+    malformed = attempt_store.atomic_commit(mismatched)
+    assert_non_authoritative_tuple_is_exact(
+        malformed,
+        commit_id=mismatched.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.ATTEMPT_MISMATCH,
+    )
+    malformed_snapshot = harness.snapshot(attempt_store)
+    assert attempt_store.atomic_commit(mismatched) == malformed
+    assert harness.snapshot(attempt_store) == malformed_snapshot
+    inactive = attempt_store.atomic_commit(coherent)
+    assert_non_authoritative_tuple_is_exact(
+        inactive,
+        commit_id=coherent.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.CROSS_ATTEMPT_REPLAY,
+    )
+    inactive_snapshot = harness.snapshot(attempt_store)
+    assert attempt_store.atomic_commit(coherent) == inactive
+    assert harness.snapshot(attempt_store) == inactive_snapshot
+
+
+def assert_fault_is_atomic(
+    harness: AuthorityStoreHarness, tmp_path: Path, point: str
+) -> None:
+    controller = _FailController(point)
+    path = tmp_path / f"fault-{point}.db"
+    if "predecessor_edges" in point:
+        setup = harness.open_store(path, None)
+        parent_request = harness.make_request(
+            commit_id=f"fault-parent-{point}", nonce_byte=10, node_id="root"
+        )
+        _stage(setup, harness, parent_request)
+        parent = setup.atomic_commit(parent_request)
+        request = harness.make_request(
+            commit_id=f"fault-{point}",
+            nonce_byte=11,
+            node_id="child",
+            predecessors=[_predecessor(parent_request, parent)],
+        )
+        store = harness.open_store(path, controller)
+    else:
+        store = harness.open_store(path, controller)
+        request = harness.make_request(commit_id=f"fault-{point}", nonce_byte=10)
+    _stage(store, harness, request)
+    before = harness.snapshot(store)
+    try:
+        store.atomic_commit(request)
+    except _InjectedFault:
+        pass
+    else:
+        raise AssertionError(f"fault {point!r} did not abort")
+    assert harness.snapshot(store) == before
+    assert store.get_certificate(request.commit_id) is None
+
+
+def assert_supersession_fault_is_atomic(
+    harness: AuthorityStoreHarness, tmp_path: Path, point: str
+) -> None:
+    """Every replacement write is atomic: old authority survives every crash."""
+    path = tmp_path / f"supersession-{point}.db"
+    setup = harness.open_store(path, None)
+    parent_request = harness.make_request(
+        commit_id="supersession-parent", nonce_byte=70, node_id="root"
+    )
+    _stage(setup, harness, parent_request)
+    parent = setup.atomic_commit(parent_request)
+    parent_ref = _predecessor(parent_request, parent)
+    old_request = harness.make_request(
+        commit_id="supersession-old",
+        nonce_byte=71,
+        node_id="child",
+        predecessors=[parent_ref],
+    )
+    _stage(setup, harness, old_request)
+    old = setup.atomic_commit(old_request)
+    old_digest = old.certificate_digest
+    assert old_digest is not None
+    controller = _FailController(point)
+    store = harness.open_store(path, controller)
+    replacement = harness.make_request(
+        commit_id=f"supersession-{point}",
+        nonce_byte=72,
+        node_id="child",
+        expected_node_version="1",
+        attempt_id=f"attempt-{point}",
+        predecessors=[parent_ref],
+    )
+    _stage(store, harness, replacement)
+    before = harness.snapshot(store)
+    try:
+        store.supersede(SupersessionRequest(old_digest, replacement))
+    except _InjectedFault:
+        pass
+    else:
+        raise AssertionError(f"supersession fault {point!r} did not abort")
+    assert harness.snapshot(store) == before
+    assert (
+        store.get_certificate(old_request.commit_id) == old.certificate_envelope_bytes
+    )
+    assert store.get_certificate(replacement.commit_id) is None
+
+
+class _InjectedFault(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class _FailController:
+    """Private test-only failpoint controller; production defaults to no controller."""
+
+    point: str
+
+    def hit(self, point: str) -> None:
+        if point == self.point:
+            raise _InjectedFault(point)
