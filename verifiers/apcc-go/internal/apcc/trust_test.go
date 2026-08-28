@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 )
@@ -92,7 +93,7 @@ func (resolver testResolver) ResolvePredecessor(digest string) ([]byte, bool, er
 
 func TestTrustRejectsCrossRoleKeyMaterialReuse(t *testing.T) {
 	t.Parallel()
-	raw := []byte(`{"bindings":[{"key_id":"producer-key","public_key_b64u":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","role":"producer","scope":["agent-1","authority:ns:execute","root"]},{"key_id":"policy-key","public_key_b64u":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","role":"policy","scope":["policy-1","1","1"]}],"protocol_version":"APCC-1.0-draft"}`)
+	raw := []byte(`{"bindings":[{"key_id":"producer-key","public_key_b64u":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","role":"producer","scope":["agent-1","authority:ns:execute","AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]},{"key_id":"policy-key","public_key_b64u":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","role":"policy","scope":["policy-1","1","1"]}],"protocol_version":"APCC-1.0-draft"}`)
 	if _, code := ParseTrust(raw); code != "UNKNOWN_KEY" {
 		t.Fatalf("got %q, want UNKNOWN_KEY", code)
 	}
@@ -103,6 +104,77 @@ func TestTrustRequiresExactRoleScope(t *testing.T) {
 	raw := []byte(`{"bindings":[{"key_id":"commit-key","public_key_b64u":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","role":"commit","scope":["store-1","extra"]}],"protocol_version":"APCC-1.0-draft"}`)
 	if _, code := ParseTrust(raw); code != "UNKNOWN_KEY" {
 		t.Fatalf("got %q, want UNKNOWN_KEY", code)
+	}
+}
+
+func TestTrustValidatesEveryRoleSpecificScopeComponent(t *testing.T) {
+	t.Parallel()
+	validDigest := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	tests := []struct {
+		name  string
+		role  string
+		scope []string
+		code  string
+	}{
+		{name: "producer-agent-id-newline", role: "producer", scope: []string{"agent\n1", "authority:ns:execute", validDigest}, code: "NONCANONICAL_ENCODING"},
+		{name: "producer-actor-authority-case", role: "producer", scope: []string{"agent-1", "Authority:ns:execute", validDigest}, code: "NONCANONICAL_ENCODING"},
+		{name: "producer-authority-root-digest", role: "producer", scope: []string{"agent-1", "authority:ns:execute", "not-a-digest"}, code: "INVALID_BASE64URL"},
+		{name: "policy-id-newline", role: "policy", scope: []string{"policy\n1", "7", "11"}, code: "NONCANONICAL_ENCODING"},
+		{name: "policy-version-noncanonical-decimal", role: "policy", scope: []string{"policy-1", "07", "11"}, code: "INVALID_DECIMAL_STRING"},
+		{name: "policy-epoch-nondecimal", role: "policy", scope: []string{"policy-1", "7", "epoch"}, code: "INVALID_DECIMAL_STRING"},
+		{name: "registry-authority-root-digest", role: "registry", scope: []string{"not-a-digest", "5"}, code: "INVALID_BASE64URL"},
+		{name: "registry-epoch-signed-decimal", role: "registry", scope: []string{validDigest, "+5"}, code: "INVALID_DECIMAL_STRING"},
+		{name: "commit-store-id-newline", role: "commit", scope: []string{"store\n1"}, code: "NONCANONICAL_ENCODING"},
+		{name: "status-store-id-newline", role: "status", scope: []string{"store\n1"}, code: "NONCANONICAL_ENCODING"},
+		{name: "role-case", role: "Producer", scope: []string{"agent-1", "authority:ns:execute", validDigest}, code: "UNKNOWN_KEY"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{
+				"bindings": []any{map[string]any{
+					"key_id": "test-key", "public_key_b64u": validDigest,
+					"role": test.role, "scope": test.scope,
+				}},
+				"protocol_version": "APCC-1.0-draft",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, code := ParseTrust(raw); code != test.code {
+				t.Fatalf("ParseTrust code = %q, want %q", code, test.code)
+			}
+		})
+	}
+}
+
+func TestTrustRejectsMalformedUnusedBinding(t *testing.T) {
+	t.Parallel()
+	validDigest := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	raw, err := json.Marshal(map[string]any{
+		"bindings": []any{
+			map[string]any{
+				"key_id": "commit-key", "public_key_b64u": validDigest,
+				"role": "commit", "scope": []string{"store-1"},
+			},
+			map[string]any{
+				"key_id": "unused-policy-key", "public_key_b64u": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+				"role": "policy", "scope": []string{"policy-1", "01", "11"},
+			},
+		},
+		"protocol_version": "APCC-1.0-draft",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, code := ParseTrust(raw); code != "INVALID_DECIMAL_STRING" {
+		t.Fatalf("ParseTrust code = %q, want INVALID_DECIMAL_STRING", code)
+	}
+}
+
+func TestVerificationResultDoesNotExportMutableCertificate(t *testing.T) {
+	t.Parallel()
+	if _, exported := reflect.TypeOf(Result{}).FieldByName("Certificate"); exported {
+		t.Fatal("Result exports a mutable verified certificate")
 	}
 }
 

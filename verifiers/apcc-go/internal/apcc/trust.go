@@ -55,9 +55,9 @@ func ParseTrust(raw []byte) (*Trust, string) {
 		scope := make([]string, len(scopeValues))
 		for index, rawScope := range scopeValues {
 			scope[index], _ = rawScope.(string)
-			if scope[index] == "" {
-				return nil, "UNKNOWN_KEY"
-			}
+		}
+		if code := validateTrustScope(role, scope); code != "" {
+			return nil, code
 		}
 		keyID := text(item, "key_id")
 		if !identifierPattern.MatchString(keyID) {
@@ -82,6 +82,42 @@ func ParseTrust(raw []byte) (*Trust, string) {
 		keyRoles[keyID], materialRoles[material] = role, role
 	}
 	return trust, ""
+}
+
+func validateTrustScope(role string, scope []string) string {
+	switch role {
+	case "producer":
+		if !identifierPattern.MatchString(scope[0]) || !authorityPattern.MatchString(scope[1]) {
+			return "NONCANONICAL_ENCODING"
+		}
+		if _, valid := decodeB64u(scope[2], 32); !valid {
+			return "INVALID_BASE64URL"
+		}
+	case "policy":
+		if !identifierPattern.MatchString(scope[0]) {
+			return "NONCANONICAL_ENCODING"
+		}
+		if _, valid := decimal(scope[1]); !valid {
+			return "INVALID_DECIMAL_STRING"
+		}
+		if _, valid := decimal(scope[2]); !valid {
+			return "INVALID_DECIMAL_STRING"
+		}
+	case "registry":
+		if _, valid := decodeB64u(scope[0], 32); !valid {
+			return "INVALID_BASE64URL"
+		}
+		if _, valid := decimal(scope[1]); !valid {
+			return "INVALID_DECIMAL_STRING"
+		}
+	case "commit", "status":
+		if !identifierPattern.MatchString(scope[0]) {
+			return "NONCANONICAL_ENCODING"
+		}
+	default:
+		return "UNKNOWN_KEY"
+	}
+	return ""
 }
 
 func trustKey(role string, scope []string) string {

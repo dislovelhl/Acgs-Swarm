@@ -22,7 +22,7 @@ type Result struct {
 	OK                bool
 	Code              string
 	CertificateDigest string
-	Certificate       cj1.Object
+	certificate       cj1.Object
 }
 
 type PredecessorResolver interface {
@@ -81,7 +81,7 @@ func VerifyHistorical(envelope []byte, trust *Trust) Result {
 	if code = verifyBindings(certificate.root); code != "" {
 		return failure(code)
 	}
-	return Result{OK: true, Code: "OK", CertificateDigest: certificate.digest, Certificate: certificate.root}
+	return Result{OK: true, Code: "OK", CertificateDigest: certificate.digest, certificate: certificate.root}
 }
 
 func VerifyCausalClosure(envelope []byte, trust *Trust, resolver PredecessorResolver, limits CausalClosureLimits) Result {
@@ -98,7 +98,7 @@ func VerifyCausalClosure(envelope []byte, trust *Trust, resolver PredecessorReso
 	if len(envelope) > limits.MaxTotalBytes {
 		return failure("SIZE_LIMIT_EXCEEDED")
 	}
-	cache := map[string]cj1.Object{root.CertificateDigest: root.Certificate}
+	cache := map[string]cj1.Object{root.CertificateDigest: root.certificate}
 	active := map[string]bool{root.CertificateDigest: true}
 	complete := map[string]bool{}
 	totalBytes := len(envelope)
@@ -133,7 +133,7 @@ func VerifyCausalClosure(envelope []byte, trust *Trust, resolver PredecessorReso
 				if historical.CertificateDigest != claimedDigest {
 					return "INVALID_PREDECESSOR"
 				}
-				resolved = historical.Certificate
+				resolved = historical.certificate
 				cache[claimedDigest] = resolved
 				totalBytes += len(predecessorEnvelope)
 			}
@@ -152,7 +152,7 @@ func VerifyCausalClosure(envelope []byte, trust *Trust, resolver PredecessorReso
 		}
 		return ""
 	}
-	if code := visit(root.Certificate, 0); code != "" {
+	if code := visit(root.certificate, 0); code != "" {
 		return failure(code)
 	}
 	return root
@@ -482,7 +482,7 @@ func VerifyCurrent(envelope []byte, trust *Trust, input CurrentInputs) Result {
 	if text(body, "superseded") != "yes" && text(body, "superseded") != "no" {
 		return failure("AUTHORITY_STATUS_SUPERSEDED")
 	}
-	header, context := child(historical.Certificate, "header"), child(historical.Certificate, "context")
+	header, context := child(historical.certificate, "header"), child(historical.certificate, "context")
 	if text(body, "authority_store_id") != text(header, "authority_store_id") {
 		return failure("AUTHORITY_STATUS_CERTIFICATE_MISMATCH")
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/acgs/apcc-go-verifier/internal/apcc"
+	"github.com/acgs/apcc-go-verifier/internal/cj1"
 )
 
 const protocolVersion = "APCC-1.0-draft"
@@ -36,7 +37,32 @@ func (resolver fileResolver) ResolvePredecessor(digest string) ([]byte, bool, er
 	return value, ok, nil
 }
 
-func Main(arguments []string, stdout, stderr io.Writer) int {
+type predecessorSource struct {
+	digest string
+	path   string
+}
+
+func readFileAtMost(path string, maximum int) ([]byte, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = file.Close() }()
+	reader := io.Reader(file)
+	if uint64(maximum) < ^uint64(0)>>1 {
+		reader = io.LimitReader(file, int64(maximum)+1)
+	}
+	value, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(value) > maximum {
+		return nil, true, nil
+	}
+	return value, false, nil
+}
+
+func Main(arguments []string, stdout, _ io.Writer) int {
 	if len(arguments) == 0 {
 		return emit(stdout, "", "", false, "CLI_ERROR", 2)
 	}
@@ -45,7 +71,7 @@ func Main(arguments []string, stdout, stderr io.Writer) int {
 		return emit(stdout, mode, "", false, "CLI_ERROR", 2)
 	}
 	flags := flag.NewFlagSet(mode, flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags.SetOutput(io.Discard)
 	certificatePath := flags.String("certificate", "", "canonical APCC detached certificate envelope")
 	trustPath := flags.String("trust", "", "canonical scoped trust manifest")
 	statusPath := flags.String("authority-status", "", "canonical nonce-bound AuthorityStatus")
@@ -62,13 +88,86 @@ func Main(arguments []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 0 || *certificatePath == "" || *trustPath == "" {
 		return emit(stdout, mode, "", false, "CLI_ERROR", 2)
 	}
-	certificate, err := os.ReadFile(*certificatePath)
+	allowed := map[string]bool{"certificate": true, "trust": true}
+	if mode == "causal" {
+		allowed["predecessor"] = true
+		allowed["max-depth"] = true
+		allowed["max-certificates"] = true
+		allowed["max-total-bytes"] = true
+	} else if mode == "current" {
+		allowed["authority-status"] = true
+		allowed["request-nonce"] = true
+		allowed["now-ms"] = true
+		allowed["highest-trust-log-sequence"] = true
+		allowed["highest-trust-log-head"] = true
+		allowed["maximum-staleness-ms"] = true
+	}
+	invalidModeFlag := false
+	flags.Visit(func(item *flag.Flag) {
+		if !allowed[item.Name] {
+			invalidModeFlag = true
+		}
+	})
+	if invalidModeFlag {
+		return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+	}
+	if mode == "current" && (*requestNonce == "" || *nowMS == "" || *highestSequence == "" || *highestHead == "" || *maximumStaleness == "") {
+		return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+	}
+	predecessorSources := make([]predecessorSource, 0, len(predecessorArguments))
+	seenPredecessors := map[string]struct{}{}
+	for _, argument := range predecessorArguments {
+		digest, path, found := strings.Cut(argument, "=")
+		if !found || digest == "" || path == "" {
+			return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+		}
+		if _, duplicate := seenPredecessors[digest]; duplicate {
+			return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+		}
+		seenPredecessors[digest] = struct{}{}
+		predecessorSources = append(predecessorSources, predecessorSource{digest: digest, path: path})
+	}
+	certificate, tooLarge, err := readFileAtMost(*certificatePath, cj1.MaxEnvelopeBytes)
 	if err != nil {
 		return emit(stdout, mode, "", false, "CLI_ERROR", 2)
 	}
-	trustBytes, err := os.ReadFile(*trustPath)
+	if tooLarge {
+		return emit(stdout, mode, "", false, "SIZE_LIMIT_EXCEEDED", 1)
+	}
+	trustBytes, tooLarge, err := readFileAtMost(*trustPath, cj1.MaxPayloadBytes)
 	if err != nil {
 		return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+	}
+	if tooLarge {
+		return emit(stdout, mode, "", false, "SIZE_LIMIT_EXCEEDED", 1)
+	}
+	resolver := fileResolver{}
+	if mode == "causal" {
+		if *maxCertificates < 1 || *maxTotalBytes < 1 || len(predecessorSources) >= *maxCertificates || len(certificate) > *maxTotalBytes {
+			return emit(stdout, mode, "", false, "SIZE_LIMIT_EXCEEDED", 1)
+		}
+		remaining := *maxTotalBytes - len(certificate)
+		for _, source := range predecessorSources {
+			value, tooLarge, readErr := readFileAtMost(source.path, remaining)
+			if readErr != nil {
+				return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+			}
+			if tooLarge {
+				return emit(stdout, mode, "", false, "SIZE_LIMIT_EXCEEDED", 1)
+			}
+			resolver[source.digest] = value
+			remaining -= len(value)
+		}
+	}
+	var status []byte
+	if *statusPath != "" {
+		status, tooLarge, err = readFileAtMost(*statusPath, cj1.MaxPayloadBytes)
+		if err != nil {
+			return emit(stdout, mode, "", false, "CLI_ERROR", 2)
+		}
+		if tooLarge {
+			return emit(stdout, mode, "", false, "SIZE_LIMIT_EXCEEDED", 1)
+		}
 	}
 	trust, code := apcc.ParseTrust(trustBytes)
 	if code != "" {
@@ -78,31 +177,8 @@ func Main(arguments []string, stdout, stderr io.Writer) int {
 	if mode == "historical" {
 		result = apcc.VerifyHistorical(certificate, trust)
 	} else if mode == "causal" {
-		resolver := fileResolver{}
-		for _, argument := range predecessorArguments {
-			digest, path, found := strings.Cut(argument, "=")
-			if !found || digest == "" || path == "" {
-				return emit(stdout, mode, "", false, "CLI_ERROR", 2)
-			}
-			value, readErr := os.ReadFile(path)
-			if readErr != nil {
-				return emit(stdout, mode, "", false, "CLI_ERROR", 2)
-			}
-			resolver[digest] = value
-		}
 		result = apcc.VerifyCausalClosure(certificate, trust, resolver, apcc.CausalClosureLimits{MaxDepth: *maxDepth, MaxCertificates: *maxCertificates, MaxTotalBytes: *maxTotalBytes})
 	} else {
-		if *requestNonce == "" || *nowMS == "" || *highestSequence == "" || *highestHead == "" || *maximumStaleness == "" {
-			return emit(stdout, mode, "", false, "CLI_ERROR", 2)
-		}
-		var status []byte
-		if *statusPath != "" {
-			var readErr error
-			status, readErr = os.ReadFile(*statusPath)
-			if readErr != nil {
-				return emit(stdout, mode, "", false, "CLI_ERROR", 2)
-			}
-		}
 		result = apcc.VerifyCurrent(certificate, trust, apcc.CurrentInputs{AuthorityStatus: status, RequestNonce: *requestNonce, NowMS: *nowMS, HighestTrustLogSequence: *highestSequence, HighestTrustLogHead: *highestHead, MaximumStalenessMS: *maximumStaleness})
 	}
 	if result.OK {
@@ -114,9 +190,11 @@ func Main(arguments []string, stdout, stderr io.Writer) int {
 func emit(writer io.Writer, mode, certificateDigest string, ok bool, code string, exit int) int {
 	encoded, err := json.Marshal(output{CertificateDigest: certificateDigest, Code: code, Mode: mode, OK: ok, ProtocolVersion: protocolVersion})
 	if err != nil {
-		fmt.Fprintln(writer, `{"certificate_digest":"","code":"CLI_ERROR","mode":"","ok":false,"protocol_version":"APCC-1.0-draft"}`)
+		_, _ = fmt.Fprintln(writer, `{"certificate_digest":"","code":"CLI_ERROR","mode":"","ok":false,"protocol_version":"APCC-1.0-draft"}`)
 		return 2
 	}
-	fmt.Fprintln(writer, string(encoded))
+	if _, err := fmt.Fprintln(writer, string(encoded)); err != nil {
+		return 2
+	}
 	return exit
 }
