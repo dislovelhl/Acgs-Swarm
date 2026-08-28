@@ -15,7 +15,6 @@ from constitutional_swarm.apcc_empirical.adapters import (
     BaselineEvidence,
     B4InterleavingBarrier,
     B6AuthorityAdapter,
-    BaselineBlocked,
     Capability,
     ExperimentalSQLiteAdapter,
     ScenarioExecutionError,
@@ -23,6 +22,7 @@ from constitutional_swarm.apcc_empirical.adapters import (
     create_baseline_adapter,
     native_evidence_for_variant,
 )
+from constitutional_swarm.apcc_empirical.historical_gcb import HistoricalGCBAdapter
 
 
 def test_b0_through_b4_are_isolated_sqlite_experiments_with_exact_guarantees(
@@ -49,8 +49,15 @@ def test_b0_through_b4_are_isolated_sqlite_experiments_with_exact_guarantees(
         assert control.authoritative_outcome == "committed"
         assert adapter.snapshot().accepted_count == 1
 
-    with pytest.raises(BaselineBlocked, match="frozen historical GCB"):
-        create_baseline_adapter("B5", tmp_path / "b5.db")
+    b5 = create_baseline_adapter("B5", tmp_path / "b5.db")
+    assert isinstance(b5, HistoricalGCBAdapter)
+    try:
+        assert b5.baseline_id == "B5"
+        assert b5.execute(TrialStimulus.control(b"valid")).authoritative_outcome == (
+            "committed"
+        )
+    finally:
+        b5.close()
 
 
 def test_b4_interleaving_barrier_is_explicit_and_one_shot() -> None:

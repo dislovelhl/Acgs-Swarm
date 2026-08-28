@@ -26,6 +26,7 @@ class ScenarioOutcome(StrEnum):
     FAIL_CLOSED = "fail-closed"
     RECOVERED = "recovered"
     BLOCKED = "blocked"
+    NOT_APPLICABLE = "not-applicable"
 
 
 class ScenarioCatalogError(ValueError):
@@ -63,6 +64,8 @@ class ScenarioResult:
     attack_payload_differs: bool
     attack_evidence_differs: bool
     blocked_capabilities: frozenset[Capability]
+    blocked_reason: str | None = None
+    not_applicable_reason: str | None = None
 
 
 _VARIANTS: dict[str, tuple[str, ...]] = {
@@ -147,9 +150,58 @@ def _capabilities_for(attack_id: str) -> frozenset[Capability]:
 
 _B2_DENIES = {"malicious-scheduler", "policy-update-race"}
 _B4_COMPROMISES = {"concurrent-double-commit"}
+_B5_FAILS_CLOSED = frozenset(
+    {
+        "missing-proof:absent",
+        "invalid-signature:default",
+        "unknown-key:default",
+        "output-substitution:output-digest",
+        "input-substitution:input-digest",
+        "identity-substitution:default",
+        "cross-node-replay:default",
+        "cross-workflow-replay:default",
+        "cross-attempt-replay:default",
+        "commit-id-equivocation:default",
+        "policy-update-race:default",
+        "authority-update-race:default",
+        "authority-store-transaction-failure:default",
+        "actor-revocation-race:revoked",
+        "actor-revocation-race:status-expired",
+        "workflow-revocation-race:revoked",
+        "workflow-revocation-race:status-expired",
+        "concurrent-double-commit:default",
+        "malicious-executor:default",
+        "canonicalization-ambiguity:default",
+        "duplicate-predecessor:default",
+        "predecessor-set-reordering:default",
+        "unknown-protocol-version:default",
+        "legacy-completion-promotion:default",
+    }
+)
+_B5_BLOCKED = frozenset(
+    {
+        "predecessor-replacement-race:supersession-current",
+        "predecessor-replacement-race:supersession-stale",
+    }
+)
+_B5_NOT_APPLICABLE = frozenset(
+    {
+        "actor-revocation-race:status-expired",
+        "workflow-revocation-race:status-expired",
+        "malicious-scheduler:default",
+        "malicious-retry-caller:default",
+        "stale-cache:status-replay",
+        "stale-cache:status-wrong-certificate",
+        "stale-cache:status-fresh-nonce",
+        "certificate-truncation:payload-digest",
+        "certificate-truncation:envelope-digest",
+        "canonicalization-ambiguity:default",
+        "oversized-certificate:default",
+    }
+)
 
 
-def _expected_for(attack_id: str) -> Mapping[str, ScenarioOutcome]:
+def _expected_for(attack_id: str, variant_id: str) -> Mapping[str, ScenarioOutcome]:
     required = _capabilities_for(attack_id)
     operational = required != frozenset({Capability.DURABLE_SNAPSHOT})
     result: dict[str, ScenarioOutcome] = {}
@@ -172,7 +224,22 @@ def _expected_for(attack_id: str) -> Mapping[str, ScenarioOutcome]:
                 if attack_id in _B4_COMPROMISES
                 else ScenarioOutcome.FAIL_CLOSED
             )
-    result["B5"] = ScenarioOutcome.BLOCKED
+    if variant_id in _B5_BLOCKED:
+        result["B5"] = ScenarioOutcome.BLOCKED
+    elif variant_id in _B5_NOT_APPLICABLE:
+        result["B5"] = ScenarioOutcome.NOT_APPLICABLE
+    elif variant_id in {
+        "response-loss-and-retry:default",
+        "validator-crash:validator-crash",
+        "validator-crash:verifier-crash",
+        "outbox-failure:default",
+        "recovery-import:default",
+    }:
+        result["B5"] = ScenarioOutcome.RECOVERED
+    elif variant_id in _B5_FAILS_CLOSED:
+        result["B5"] = ScenarioOutcome.FAIL_CLOSED
+    else:
+        result["B5"] = ScenarioOutcome.COMPROMISED
     result["B6"] = ScenarioOutcome.BLOCKED
     return result
 
@@ -183,7 +250,7 @@ def default_scenario_catalog() -> tuple[ScenarioSpec, ...]:
             attack_id,
             variant_id,
             _capabilities_for(attack_id),
-            _expected_for(attack_id),
+            _expected_for(attack_id, variant_id),
         )
         for attack_id in ATTACK_IDS
         for variant_id in _VARIANTS[attack_id]
@@ -215,10 +282,8 @@ def validate_scenario_catalog(catalog: tuple[ScenarioSpec, ...]) -> None:
             raise ScenarioCatalogError("scenario outcome mapping cannot be vacuous")
         if spec.capabilities != _capabilities_for(spec.attack_id):
             raise ScenarioCatalogError("scenario capability mapping is not canonical")
-        if dict(spec.expected) != dict(_expected_for(spec.attack_id)):
+        if dict(spec.expected) != dict(_expected_for(spec.attack_id, spec.variant_id)):
             raise ScenarioCatalogError("scenario outcome mapping is not canonical")
-        if spec.expected["B5"] is not ScenarioOutcome.BLOCKED:
-            raise ScenarioCatalogError("B5 must remain BLOCKED")
         native_evidence_for_variant(spec.variant_id)
     if attacks != set(ATTACK_IDS):
         raise ScenarioCatalogError("catalog must cover exactly the 32 source attacks")
@@ -250,6 +315,37 @@ class ScenarioRunner:
             raise ScenarioCatalogError("attack mutation is vacuous")
         if attack.capabilities != spec.capabilities:
             raise ScenarioCatalogError("attack capabilities do not match scenario spec")
+        blocked_reason = getattr(adapter, "blocked_reason", lambda _variant: None)(
+            spec.variant_id
+        )
+        if blocked_reason is not None:
+            return ScenarioResult(
+                ScenarioOutcome.BLOCKED,
+                None,
+                None,
+                None,
+                None,
+                payload_differs,
+                evidence_differs,
+                frozenset(),
+                str(blocked_reason),
+            )
+        not_applicable_reason = getattr(
+            adapter, "not_applicable_reason", lambda _variant: None
+        )(spec.variant_id)
+        if not_applicable_reason is not None:
+            return ScenarioResult(
+                ScenarioOutcome.NOT_APPLICABLE,
+                None,
+                None,
+                None,
+                None,
+                payload_differs,
+                evidence_differs,
+                frozenset(),
+                None,
+                str(not_applicable_reason),
+            )
         missing = spec.capabilities - adapter.capabilities
         if missing:
             return ScenarioResult(
@@ -279,10 +375,17 @@ class ScenarioRunner:
             except Exception:
                 error.after_attack = None
             raise
+        classified = getattr(
+            adapter, "classify_outcome", lambda _variant, _observation: None
+        )(spec.variant_id, attack_observation)
         outcome = (
-            ScenarioOutcome.COMPROMISED
-            if attack_observation.authoritative_outcome == "committed"
-            else ScenarioOutcome.FAIL_CLOSED
+            ScenarioOutcome(str(classified))
+            if classified is not None
+            else (
+                ScenarioOutcome.COMPROMISED
+                if attack_observation.authoritative_outcome == "committed"
+                else ScenarioOutcome.FAIL_CLOSED
+            )
         )
         return ScenarioResult(
             outcome,

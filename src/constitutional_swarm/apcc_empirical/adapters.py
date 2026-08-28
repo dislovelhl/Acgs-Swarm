@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import sqlite3
 import threading
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Protocol, cast
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -248,6 +249,26 @@ def native_evidence_for_variant(variant_id: str) -> BaselineEvidence:
     return _seal(replace(evidence, **cast(Any, mutation)))
 
 
+def variant_id_for_native_evidence(attack_id: str, evidence: BaselineEvidence) -> str:
+    candidates = (
+        "invalid-signature:default",
+        "unknown-key:default",
+        "canonicalization-ambiguity:default",
+        *_EVIDENCE_MUTATIONS,
+    )
+    matches = [
+        variant_id
+        for variant_id in candidates
+        if variant_id.partition(":")[0] == attack_id
+        and native_evidence_for_variant(variant_id) == evidence
+    ]
+    if len(matches) != 1:
+        raise ScenarioExecutionError(
+            "attack evidence does not identify exactly one empirical variant"
+        )
+    return matches[0]
+
+
 @dataclass(frozen=True, slots=True)
 class TrialStimulus:
     payload: bytes
@@ -315,6 +336,15 @@ class ScenarioExecutionError(RuntimeError):
         self.control: AuthorityObservation | None = None
         self.before_attack: DurableSnapshot | None = None
         self.after_attack: DurableSnapshot | None = None
+
+
+class BaselineAdapter(Protocol):
+    baseline_id: str
+    capabilities: frozenset[Capability]
+
+    def execute(self, stimulus: TrialStimulus) -> AuthorityObservation: ...
+
+    def snapshot(self) -> DurableSnapshot: ...
 
 
 class B4InterleavingBarrier:
@@ -663,11 +693,15 @@ def create_baseline_adapter(
     path: Path,
     *,
     interleaving_barrier: B4InterleavingBarrier | None = None,
-) -> ExperimentalSQLiteAdapter:
+) -> BaselineAdapter:
     if baseline_id == "B5":
-        raise BaselineBlocked(
-            "B5 is BLOCKED until a frozen historical GCB adapter exists"
+        module = importlib.import_module(
+            "constitutional_swarm.apcc_empirical.historical_gcb"
         )
+        constructor = cast(
+            Callable[[Path], BaselineAdapter], module.HistoricalGCBAdapter
+        )
+        return constructor(path)
     return ExperimentalSQLiteAdapter(
         baseline_id, path, interleaving_barrier=interleaving_barrier
     )

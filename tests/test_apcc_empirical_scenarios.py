@@ -32,7 +32,12 @@ def test_catalog_covers_exact_source_attacks_and_mandatory_subvariants() -> None
     assert {item.variant_id for item in catalog}.issuperset(REQUIRED_VARIANTS)
     assert all(item.capabilities for item in catalog)
     assert all(set(item.expected) == set(BASELINE_IDS) for item in catalog)
-    assert all(item.expected["B5"] is ScenarioOutcome.BLOCKED for item in catalog)
+    assert {item.expected["B5"] for item in catalog} == {
+        ScenarioOutcome.BLOCKED,
+        ScenarioOutcome.FAIL_CLOSED,
+        ScenarioOutcome.RECOVERED,
+        ScenarioOutcome.NOT_APPLICABLE,
+    }
 
 
 def test_catalog_rejects_duplicate_unknown_and_vacuous_mappings() -> None:
