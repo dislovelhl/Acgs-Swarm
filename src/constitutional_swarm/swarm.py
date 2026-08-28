@@ -28,13 +28,13 @@ from constitutional_swarm.governed_commit import (
     CommitOutcome,
     CommitRequest,
     GovernanceBypassDenied,
-    GovernedCommitBoundary,
     GovernedReceiptPayload,
     SignedAttemptAuthorization,
 )
 
 NodeStatus = ExecutionStatus
 _UNSET = object()
+_AUTHORITY_TRANSPORT_ERRORS = (ConnectionError, EOFError, OSError, TimeoutError)
 
 
 def _neg_priority(node: TaskNode) -> int:
@@ -217,24 +217,20 @@ class SwarmExecutor:
         self,
         registry: CapabilityRegistry,
         store: ArtifactStore,
-        boundary: GovernedCommitBoundary | None = None,
+        boundary: object = _UNSET,
         *,
         policy_version: str = "",
-        trusted_admin: Any | None = None,
+        trusted_admin: object = _UNSET,
     ) -> None:
-        if (
-            trusted_admin is None
-            and boundary is not None
-            and hasattr(boundary, "commit_port")
-        ):
-            trusted_admin = boundary
-            boundary = boundary.commit_port
+        if boundary is not _UNSET or trusted_admin is not _UNSET:
+            raise TypeError(
+                "legacy boundary/admin access is forbidden; execution_client is "
+                "injected only by AuthorityServiceHandle.spawn_executor()"
+            )
         self._registry = registry
         self._store = store
-        self._boundary = boundary
+        self._execution_client: object | None = None
         self._policy_version = policy_version
-        self._trusted_admin = trusted_admin
-        self._projection: Any | None = None
         self._dag: TaskDAG | None = None
         self._lock = threading.Lock()
         self._ready_ids: set[str] = set()
@@ -253,6 +249,18 @@ class SwarmExecutor:
         self._all_ready_unconstrained: bool = True
         # Whether the DAG has any constrained nodes at all. Set once at load.
         self._dag_has_constrained: bool = False
+
+    def _authority_call(self, operation: str, /, *args: Any, **kwargs: Any) -> Any:
+        client = self._execution_client
+        if client is None:
+            raise GovernanceBypassDenied("governed boundary is not configured")
+        try:
+            method = getattr(client, operation)
+            return method(*args, **kwargs)
+        except GovernanceBypassDenied:
+            raise
+        except _AUTHORITY_TRANSPORT_ERRORS as exc:
+            raise GovernanceBypassDenied("authority_unavailable") from exc
 
     def _rebuild_ready_index(self) -> None:
         self._ready_ids = set()
@@ -289,12 +297,11 @@ class SwarmExecutor:
 
     def load_dag(self, dag: TaskDAG) -> None:
         """Load a task DAG for execution."""
-        recovering = False
         with self._lock:
             if self._dag is not None and self._dag.dag_id != dag.dag_id:
                 raise GovernanceBypassDenied("executor_workflow_identity_mismatch")
             authoritative_states = None
-            if self._boundary is not None:
+            if self._execution_client is not None:
                 if not self._policy_version:
                     raise GovernanceBypassDenied(
                         "policy_version is required for governed execution"
@@ -323,38 +330,18 @@ class SwarmExecutor:
                     for node in dag.nodes.values()
                 }
                 try:
-                    authoritative_states = self._boundary.attach_workflow(
+                    authoritative_states = self._authority_call(
+                        "attach_workflow",
                         workflow_id=dag.dag_id,
                         nodes=topology,
                         policy_version=self._policy_version,
                         required_capabilities=capabilities,
                         input_digests=input_digests,
                     )
-                    recovering = True
                 except KeyError:
-                    if self._trusted_admin is None:
-                        raise GovernanceBypassDenied(
-                            "workflow_requires_signed_trusted_provisioning"
-                        ) from None
-                    self._trusted_admin.create_workflow(
-                        workflow_id=dag.dag_id,
-                        nodes=topology,
-                        policy_version=self._policy_version,
-                        required_capabilities=capabilities,
-                        input_digests=input_digests,
-                    )
-                    authoritative_states = self._boundary.attach_workflow(
-                        workflow_id=dag.dag_id,
-                        nodes=topology,
-                        policy_version=self._policy_version,
-                        required_capabilities=capabilities,
-                        input_digests=input_digests,
-                    )
-                if self._trusted_admin is None:
-                    raise GovernanceBypassDenied("trusted_projection_service_required")
-                self._projection = self._trusted_admin.bind_projection(
-                    dag.dag_id, self._store
-                )
+                    raise GovernanceBypassDenied(
+                        "workflow_requires_signed_trusted_provisioning"
+                    ) from None
             normalized_nodes: dict[str, TaskNode] = {}
             for node_id, source_node in dag.nodes.items():
                 normalized = _with_status(
@@ -388,19 +375,16 @@ class SwarmExecutor:
                 )
             else:
                 self._all_ready_unconstrained = True
-        if recovering and self._boundary is not None:
-            self._boundary.resume_revocation_propagation()
-            if self._projection is not None:
-                assert self._trusted_admin is not None
-                self._trusted_admin.dispatch_outbox(self._projection)
-                self._trusted_admin.dispatch_revocation_outbox(self._projection)
 
     def _synchronize_authoritative_states(self) -> None:
         """Refresh the in-memory projection from the SQLite authority."""
-        if self._dag is None or self._boundary is None:
+        if self._dag is None or self._execution_client is None:
             return
+        states = self._authority_call(
+            "workflow_node_states", self._dag.dag_id, tuple(self._dag.nodes)
+        )
         for node_id, node in self._dag.nodes.items():
-            state = self._boundary.node_state(self._dag.dag_id, node_id)
+            state = states[node_id]
             node.status = ExecutionStatus(state.status)
             node.claimed_by = state.claimed_by
             node.artifact_id = state.artifact_id
@@ -411,38 +395,15 @@ class SwarmExecutor:
         self._rebuild_ready_index()
         self._build_dep_index()
 
-    def revoke_root(self, node_id: str, *, event_id: str, reason: str) -> int:
-        """Fence, materialize, and project a retroactive governed revocation."""
-        with self._lock:
-            if self._dag is None:
-                raise RuntimeError("No DAG loaded")
-            if self._boundary is None:
-                raise GovernanceBypassDenied("governed boundary is not configured")
-            if self._trusted_admin is None:
-                raise GovernanceBypassDenied("signed_admin_authority_required")
-            workflow_id = self._dag.dag_id
-        generation = self._trusted_admin.revoke_root(
-            workflow_id=workflow_id,
-            node_id=node_id,
-            event_id=event_id,
-            reason=reason,
-        )
-        self._boundary.resume_revocation_propagation()
-        if self._projection is not None:
-            self._trusted_admin.dispatch_revocation_outbox(self._projection)
-        with self._lock:
-            self._synchronize_authoritative_states()
-        return generation
-
     def authoritative_artifact(self, artifact_id: str) -> Artifact | None:
         """Read only an artifact backed by a currently valid governed commit."""
         with self._lock:
             if self._dag is None:
                 raise RuntimeError("No DAG loaded")
-            if self._boundary is None:
+            if self._execution_client is None:
                 raise GovernanceBypassDenied("governed boundary is not configured")
             workflow_id = self._dag.dag_id
-        return self._boundary.authoritative_artifact(workflow_id, artifact_id)
+        return self._authority_call("authoritative_artifact", workflow_id, artifact_id)
 
     def available_tasks(self, agent_id: str) -> list[TaskNode]:
         """Get tasks an agent can claim based on its capabilities.
@@ -501,14 +462,15 @@ class SwarmExecutor:
         with self._lock:
             if self._dag is None:
                 raise RuntimeError("No DAG loaded")
-            if self._boundary is None:
+            if self._execution_client is None:
                 raise GovernanceBypassDenied("claim requires a governed boundary")
             node = self._dag.nodes.get(node_id)
             if node is None:
                 raise KeyError(f"Node {node_id} not found")
             if node.status != ExecutionStatus.READY:
                 raise ValueError(f"Node {node_id} is {node.status.value}, not ready")
-            payload = self._boundary.prepare_attempt_authorization(
+            payload = self._authority_call(
+                "prepare_attempt_authorization",
                 workflow_id=self._dag.dag_id,
                 node_id=node_id,
                 attempt_id=uuid.uuid4().hex,
@@ -536,9 +498,10 @@ class SwarmExecutor:
             if not isinstance(authorization, SignedAttemptAuthorization):
                 raise GovernanceBypassDenied("signed_attempt_authorization_required")
             attempt_id = authorization.payload.attempt_id
-            if self._boundary is None:
+            if self._execution_client is None:
                 raise GovernanceBypassDenied("claim requires a governed boundary")
-            self._boundary.claim(
+            self._authority_call(
+                "claim",
                 workflow_id=self._dag.dag_id,
                 node_id=node_id,
                 attempt_id=attempt_id,
@@ -588,7 +551,7 @@ class SwarmExecutor:
         with self._lock:
             if self._dag is None:
                 raise RuntimeError("No DAG loaded")
-            if self._boundary is None:
+            if self._execution_client is None:
                 raise GovernanceBypassDenied("governed boundary is not configured")
             node = self._dag.nodes.get(node_id)
             if node is None:
@@ -598,7 +561,8 @@ class SwarmExecutor:
                 authorization = node.metadata.get("attempt_authorization")
             if not isinstance(authorization, SignedAttemptAuthorization):
                 raise GovernanceBypassDenied("signed_attempt_authorization_required")
-            self._boundary.stage_result(
+            self._authority_call(
+                "stage_result",
                 workflow_id=self._dag.dag_id,
                 node_id=node_id,
                 attempt_id=attempt_id,
@@ -607,7 +571,8 @@ class SwarmExecutor:
             )
             node.status = ExecutionStatus.RESULT_PRODUCED
             node.artifact_id = artifact.artifact_id
-            return self._boundary.prepare_receipt_payload(
+            return self._authority_call(
+                "prepare_receipt_payload",
                 workflow_id=self._dag.dag_id,
                 node_id=node_id,
                 attempt_id=attempt_id,
@@ -621,16 +586,16 @@ class SwarmExecutor:
         with self._lock:
             if self._dag is None:
                 raise RuntimeError("No DAG loaded")
-            if self._boundary is None:
+            if self._execution_client is None:
                 raise GovernanceBypassDenied("governed boundary is not configured")
             if request.receipt.payload.workflow_id != self._dag.dag_id:
                 raise GovernanceBypassDenied("executor_workflow_identity_mismatch")
-            decision = self._boundary.commit(request)
+            decision = self._authority_call("commit", request)
             if decision.outcome is not CommitOutcome.COMMITTED:
                 return decision
             node = self._dag.nodes[decision.node_id]
-            authority_state = self._boundary.node_state(
-                self._dag.dag_id, decision.node_id
+            authority_state = self._authority_call(
+                "node_state", self._dag.dag_id, decision.node_id
             )
             if authority_state.status != "governed_committed":
                 raise GovernanceBypassDenied("commit_projection_authority_mismatch")
@@ -638,18 +603,13 @@ class SwarmExecutor:
                 node.status = ExecutionStatus(authority_state.status)
                 self._completed_count += 1
             for child_id in self._children.get(decision.node_id, ()):
-                state = self._boundary.node_state(self._dag.dag_id, child_id)
+                state = self._authority_call("node_state", self._dag.dag_id, child_id)
                 child = self._dag.nodes[child_id]
                 if state.status == "ready" and child.status == ExecutionStatus.BLOCKED:
                     child.status = ExecutionStatus.READY
                     self._ready_ids.add(child_id)
                     self._ready_index[child_id] = len(self._ready_list)
                     self._ready_list.append(child)
-        if self._projection is None:
-            raise GovernanceBypassDenied("governed_projection_not_bound")
-        if self._trusted_admin is None:
-            raise GovernanceBypassDenied("trusted_projection_service_required")
-        self._trusted_admin.dispatch_outbox(self._projection)
         return decision
 
     @property

@@ -7,15 +7,22 @@ writer process and is never persisted.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import os
 import re
 import secrets
 import sqlite3
-import os
-from contextlib import contextmanager
-from dataclasses import replace
+from collections.abc import Mapping
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Iterator, Protocol, cast
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .codec import (
     canonical_statement,
@@ -106,10 +113,116 @@ class _FaultProbe(Protocol):
     def hit(self, point: str) -> None: ...
 
 
-class _SQLitePredecessorResolver:
+class _AuthorityCursor(Protocol):
+    @property
+    def rowcount(self) -> int: ...
+
+    def fetchone(self) -> tuple[object, ...] | None: ...
+
+    def fetchall(self) -> list[tuple[object, ...]]: ...
+
+    def __iter__(self) -> Iterator[tuple[object, ...]]: ...
+
+
+class _AuthorityConnection(Protocol):
+    """Small DB-API surface shared by the SQLite and PostgreSQL realizations."""
+
+    def execute(
+        self, statement: str, parameters: tuple[object, ...] = (), /
+    ) -> _AuthorityCursor: ...
+
+    def close(self) -> None: ...
+
+
+class _GCBProjectionCheckpoint(Enum):
+    """Fixed, raise-only test checkpoints in the closed GCB projection."""
+
+    BEFORE_LEGACY_WRITE = "before_legacy_write"
+    AFTER_NODE_WRITE = "after_node_write"
+    AFTER_WORKFLOW_WRITE = "after_workflow_write"
+    AFTER_DECISION_WRITE = "after_decision_write"
+    AFTER_EVIDENCE_WRITE = "after_evidence_write"
+    AFTER_OUTBOX_WRITE = "after_outbox_write"
+    AFTER_CHILD_UNLOCK = "after_child_unlock"
+    AFTER_ATTESTATION = "after_attestation"
+
+
+@dataclass(frozen=True, slots=True)
+class _GCBProjectionPlan:
+    """Immutable semantic values for the one built-in legacy projection.
+
+    This record intentionally contains no SQL, operations, connections, or
+    callables.  Every value is checked against the APCC request and locked GCB
+    rows before the store executes its own fixed statements.  This is a closed
+    trusted-host boundary, not a Python sandbox: same-UID reflection or process
+    compromise remains outside the host threat model.
+    """
+
+    workflow_id: str
+    node_id: str
+    attempt_id: str
+    agent_id: str
+    commit_id: str
+    nonce: str
+    expected_node_version: int
+    committed_node_version: int
+    expected_workflow_state_version: int
+    policy_digest: str
+    request_hash: str
+    receipt_material: str
+    receipt_digest: str
+    verdict_material: str
+    verdict_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class _GCBAtomicCommitRequest(AtomicCommitRequest):
+    """Internal APCC request carrying only an immutable GCB semantic plan."""
+
+    _gcb_projection_plan: _GCBProjectionPlan
+
+
+class _GCBProjectionDenied(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _GCBProjectionFault(RuntimeError):
+    pass
+
+
+def _row_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("APCC authority row contains non-text data")
+    return value
+
+
+def _row_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    return _row_text(value)
+
+
+def _row_bytes(value: object) -> bytes:
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise ValueError("APCC authority row contains non-binary data")
+    return bytes(value)
+
+
+def _row_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("APCC authority row contains non-integer data")
+    try:
+        return int(value)
+    except ValueError as error:
+        raise ValueError("APCC authority row contains non-integer data") from error
+
+
+class _AuthorityPredecessorResolver:
     """Resolve and adjacency-check certificates in the active write transaction."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: _AuthorityConnection) -> None:
         self._connection = connection
 
     def resolve_predecessor(self, certificate_digest: str) -> bytes | None:
@@ -121,8 +234,8 @@ class _SQLitePredecessorResolver:
         if row is None:
             return None
         try:
-            payload = bytes(row[1])
-            envelope = bytes(row[2])
+            payload = _row_bytes(row[1])
+            envelope = _row_bytes(row[2])
             detached = decode_envelope(envelope)
             if (
                 detached.payload != payload
@@ -157,6 +270,620 @@ def _json(value: object) -> str:
 
 def _loads(value: str) -> object:
     return json.loads(value)
+
+
+_GCB_RECEIPT_PROFILE = "acgs-swarm/gcb-receipt/v1"
+_GCB_SIGNATURE_ALGORITHM = "Ed25519"
+_GCB_COMMIT_INTENT = "governed_commit"
+_GCB_VERDICT_DOMAIN = b"ACGS-SWARM\x00GCB\x00VERDICT\x00V1\x00"
+
+
+def _gcb_material_object(value: str, *, label: str) -> dict[str, object]:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 1_048_576:
+        raise _GCBProjectionDenied(f"invalid_{label}_material")
+
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, item in items:
+            if key in result:
+                raise _GCBProjectionDenied(f"invalid_{label}_material")
+            result[key] = item
+        return result
+
+    def number(_: str) -> object:
+        raise _GCBProjectionDenied(f"invalid_{label}_material")
+
+    try:
+        parsed = json.loads(
+            value,
+            object_pairs_hook=pairs,
+            parse_constant=number,
+        )
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise _GCBProjectionDenied(f"invalid_{label}_material") from error
+    if not isinstance(parsed, dict) or _json(parsed) != value:
+        raise _GCBProjectionDenied(f"invalid_{label}_material")
+    return parsed
+
+
+def _gcb_exact_int(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise _GCBProjectionDenied(f"invalid_{label}")
+    return value
+
+
+def _gcb_decimal(value: object, *, label: str) -> int:
+    if not isinstance(value, str) or (
+        not value.isascii()
+        or not value.isdecimal()
+        or (len(value) > 1 and value.startswith("0"))
+    ):
+        raise _GCBProjectionDenied(f"invalid_{label}")
+    return int(value)
+
+
+def _gcb_seconds(statement: object, field: str) -> int:
+    if not isinstance(statement, Mapping):
+        raise _GCBProjectionDenied("projection_request_mismatch")
+    milliseconds = _gcb_decimal(statement.get(field), label=field)
+    if milliseconds % 1000:
+        raise _GCBProjectionDenied("projection_request_mismatch")
+    return milliseconds // 1000
+
+
+def _gcb_string_list(value: object, *, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item for item in value
+    ):
+        raise _GCBProjectionDenied(f"invalid_{label}")
+    items = tuple(value)
+    if len(set(items)) != len(items):
+        raise _GCBProjectionDenied(f"invalid_{label}")
+    return items
+
+
+def _gcb_revoked_closure(
+    connection: sqlite3.Connection, workflow_id: str, node_id: str
+) -> bool:
+    roots = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT root_node_id FROM revoked_roots WHERE workflow_id=?",
+            (workflow_id,),
+        ).fetchall()
+    }
+    pending = [node_id]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if current in roots:
+            return True
+        row = connection.execute(
+            "SELECT predecessors FROM nodes WHERE workflow_id=? AND node_id=?",
+            (workflow_id, current),
+        ).fetchone()
+        if row is None:
+            raise _GCBProjectionDenied("unknown_context")
+        pending.extend(_gcb_string_list(json.loads(str(row[0])), label="predecessors"))
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedGCBProjection:
+    legacy_node_version: int
+    next_workflow_state_version: int
+    artifact_json: str
+
+
+def _validate_gcb_projection_plan(
+    connection: sqlite3.Connection,
+    config: APCCAuthorityConfig,
+    clock: AuthorityClock,
+    request: AtomicCommitRequest,
+    plan: _GCBProjectionPlan,
+) -> _ValidatedGCBProjection:
+    string_fields = (
+        plan.workflow_id,
+        plan.node_id,
+        plan.attempt_id,
+        plan.agent_id,
+        plan.commit_id,
+        plan.nonce,
+        plan.policy_digest,
+        plan.request_hash,
+        plan.receipt_material,
+        plan.receipt_digest,
+        plan.verdict_material,
+        plan.verdict_digest,
+    )
+    if any(not isinstance(value, str) or not value for value in string_fields):
+        raise _GCBProjectionDenied("projection_plan_type_mismatch")
+    expected_node_version = _gcb_exact_int(
+        plan.expected_node_version, label="expected_node_version"
+    )
+    committed_node_version = _gcb_exact_int(
+        plan.committed_node_version, label="committed_node_version"
+    )
+    workflow_state_version = _gcb_exact_int(
+        plan.expected_workflow_state_version, label="workflow_state_version"
+    )
+    if (
+        plan.workflow_id != request.subject.workflow_id
+        or plan.node_id != request.subject.node_id
+        or plan.attempt_id != request.subject.attempt_id
+        or plan.agent_id != request.subject.agent_id
+        or plan.commit_id != request.commit_id
+        or plan.nonce != request.nonce
+        or str(expected_node_version) != request.bindings.expected_node_version
+        or committed_node_version != expected_node_version + 1
+        or str(committed_node_version) != request.bindings.committed_node_version
+    ):
+        raise _GCBProjectionDenied("projection_request_mismatch")
+
+    workflow = connection.execute(
+        "SELECT generation,policy_version,policy_digest,policy_epoch,"
+        "verifier_policy_id,authority_root,authority_epoch,"
+        "revocation_generation,state_version FROM workflows WHERE workflow_id=?",
+        (plan.workflow_id,),
+    ).fetchone()
+    node = connection.execute(
+        "SELECT status,version,input_digest,required_capabilities,predecessors,"
+        "attempt_id,claimed_by,result_digest,tainted FROM nodes "
+        "WHERE workflow_id=? AND node_id=?",
+        (plan.workflow_id, plan.node_id),
+    ).fetchone()
+    agent = connection.execute(
+        "SELECT public_key,key_id,capabilities,authority_epoch,revocation_epoch,revoked "
+        "FROM agents WHERE workflow_id=? AND agent_id=?",
+        (plan.workflow_id, plan.agent_id),
+    ).fetchone()
+    staged = connection.execute(
+        "SELECT artifact_json,output_digest FROM staged_artifacts "
+        "WHERE workflow_id=? AND node_id=? AND attempt_id=?",
+        (plan.workflow_id, plan.node_id, plan.attempt_id),
+    ).fetchone()
+    seal = connection.execute(
+        "SELECT store_id FROM store_seal WHERE singleton=1 AND sealed=1"
+    ).fetchone()
+    if any(row is None for row in (workflow, node, agent, staged, seal)):
+        raise _GCBProjectionDenied("unknown_context")
+    assert workflow is not None
+    assert node is not None
+    assert agent is not None
+    assert staged is not None
+    assert seal is not None
+
+    legacy_predecessors = _gcb_string_list(
+        json.loads(str(node[4])), label="predecessors"
+    )
+    legacy_node_version = _gcb_exact_int(node[1], label="legacy_node_version")
+    if (
+        node[0] != "result_produced"
+        or legacy_node_version != 2 + bool(legacy_predecessors)
+        or node[2] != request.subject.input_digest
+        or node[5] != plan.attempt_id
+        or node[6] != plan.agent_id
+        or node[7] != request.subject.output_digest
+        or node[8] != 0
+        or staged[1] != request.subject.output_digest
+        or agent[1] != request.signatures.producer.key_id
+        or agent[3] != workflow[6]
+        or agent[4] != int(request.context.agent_revocation_generation)
+        or agent[5] != 0
+        or workflow[2] != plan.policy_digest
+        or workflow[8] != workflow_state_version
+    ):
+        raise _GCBProjectionDenied("stale_or_mismatched_projection_state")
+    if _gcb_revoked_closure(connection, plan.workflow_id, plan.node_id):
+        raise _GCBProjectionDenied("node_tainted_by_revocation")
+    required = set(
+        _gcb_string_list(json.loads(str(node[3])), label="required_capabilities")
+    )
+    capabilities = set(
+        _gcb_string_list(json.loads(str(agent[2])), label="agent_capabilities")
+    )
+    if not required.issubset(capabilities):
+        raise _GCBProjectionDenied("authority_or_capability_denied")
+
+    producer_binding = next(
+        (
+            binding
+            for binding in config.producer_trust
+            if binding.key_id == agent[1]
+            and binding.public_key == bytes(agent[0])
+            and binding.scope
+            == (
+                plan.agent_id,
+                request.subject.actor_authority,
+                request.context.authority_root,
+            )
+        ),
+        None,
+    )
+    if producer_binding is None:
+        raise _GCBProjectionDenied("authority_or_capability_denied")
+    if (
+        request.context.policy_version != workflow[1]
+        or int(request.context.policy_epoch) != workflow[3]
+        or request.context.policy_id != workflow[4]
+        or request.context.authority_root != workflow[5]
+        or int(request.context.authority_epoch) != workflow[6]
+        or int(request.context.workflow_revocation_generation) != workflow[7]
+        or int(request.context.workflow_epoch) != workflow[0]
+    ):
+        raise _GCBProjectionDenied("stale_or_mismatched_projection_context")
+
+    predecessor_by_node = {item.node_id: item for item in request.bindings.predecessors}
+    if set(predecessor_by_node) != set(legacy_predecessors) or any(
+        item.workflow_id != plan.workflow_id for item in predecessor_by_node.values()
+    ):
+        raise _GCBProjectionDenied("predecessor_binding_mismatch")
+    for predecessor_id in legacy_predecessors:
+        predecessor = connection.execute(
+            "SELECT status,commit_id,result_digest,tainted FROM nodes "
+            "WHERE workflow_id=? AND node_id=?",
+            (plan.workflow_id, predecessor_id),
+        ).fetchone()
+        logical = connection.execute(
+            "SELECT version,certificate_digest FROM logical_nodes "
+            "WHERE workflow_id=? AND node_id=?",
+            (plan.workflow_id, predecessor_id),
+        ).fetchone()
+        binding = predecessor_by_node[predecessor_id]
+        if (
+            predecessor is None
+            or logical is None
+            or predecessor[0] != "governed_committed"
+            or predecessor[1] != binding.commit_id
+            or predecessor[2] != binding.output_digest
+            or predecessor[3] != 0
+            or logical[0] != binding.committed_node_version
+            or logical[1] != binding.certificate_digest
+        ):
+            raise _GCBProjectionDenied("predecessor_binding_mismatch")
+
+    producer = request.evidence.producer_statement
+    issued_at = _gcb_seconds(producer, "issued_at_ms")
+    expires_at = _gcb_seconds(producer, "expires_at_ms")
+    receipt_signature = base64.b64encode(
+        b64u_decode(request.signatures.producer.signature_b64u, expected_length=64)
+    ).decode("ascii")
+    predecessor_bindings = [
+        {
+            "node_id": item.node_id,
+            "node_version": int(item.committed_node_version),
+            "commit_id": item.commit_id,
+            "receipt_digest": item.certificate_digest,
+            "authoritative_result_digest": item.output_digest,
+        }
+        for item in sorted(request.bindings.predecessors, key=lambda item: item.node_id)
+    ]
+    receipt_payload: dict[str, object] = {
+        "profile": _GCB_RECEIPT_PROFILE,
+        "signature_algorithm": _GCB_SIGNATURE_ALGORITHM,
+        "key_id": request.signatures.producer.key_id,
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+        "intent": _GCB_COMMIT_INTENT,
+        "verifier_policy_id": request.context.policy_id,
+        "workflow_id": plan.workflow_id,
+        "node_id": plan.node_id,
+        "attempt_id": plan.attempt_id,
+        "agent_id": plan.agent_id,
+        "input_digest": request.subject.input_digest,
+        "output_digest": request.subject.output_digest,
+        "predecessor_bindings": predecessor_bindings,
+        "predecessor_root": request.bindings.predecessor_root,
+        "policy_version": request.context.policy_version,
+        "policy_digest": plan.policy_digest,
+        "policy_epoch": int(request.context.policy_epoch),
+        "authority_snapshot_digest": request.subject.actor_authority,
+        "authority_root": request.context.authority_root,
+        "authority_epoch": int(request.context.authority_epoch),
+        "agent_revocation_epoch": int(request.context.agent_revocation_generation),
+        "workflow_revocation_generation": int(
+            request.context.workflow_revocation_generation
+        ),
+        "workflow_generation": int(request.context.workflow_epoch),
+        "state_version": workflow_state_version,
+        "expected_node_state_version": expected_node_version,
+        "nonce": plan.nonce,
+        "commit_id": plan.commit_id,
+    }
+    receipt_body = _gcb_material_object(plan.receipt_material, label="receipt")
+    if receipt_body != {"payload": receipt_payload, "signature": receipt_signature}:
+        raise _GCBProjectionDenied("projection_receipt_mismatch")
+    if (
+        hashlib.sha256(plan.receipt_material.encode()).hexdigest()
+        != plan.receipt_digest
+    ):
+        raise _GCBProjectionDenied("projection_receipt_digest_mismatch")
+
+    verdict = _gcb_material_object(plan.verdict_material, label="verdict")
+    expected_verdict_keys = {
+        "decision",
+        "store_id",
+        "verifier_policy_id",
+        "policy_id",
+        "policy_version",
+        "verifier_key_id",
+        "receipt_digest",
+        "workflow_id",
+        "node_id",
+        "attempt_id",
+        "agent_id",
+        "expected_node_state_version",
+        "policy_epoch",
+        "authority_epoch",
+        "agent_revocation_epoch",
+        "workflow_revocation_generation",
+        "workflow_generation",
+        "issued_at",
+        "expires_at",
+        "reason",
+        "signature",
+    }
+    if set(verdict) != expected_verdict_keys:
+        raise _GCBProjectionDenied("projection_verdict_mismatch")
+    policy_binding = next(
+        (
+            binding
+            for binding in config.policy_trust
+            if binding.scope
+            == (
+                request.context.policy_id,
+                request.context.policy_version,
+                request.context.policy_epoch,
+            )
+        ),
+        None,
+    )
+    if policy_binding is None:
+        raise _GCBProjectionDenied("untrusted_policy_binding")
+    verdict_issued = _gcb_exact_int(verdict["issued_at"], label="verdict_issued_at")
+    verdict_expires = _gcb_exact_int(verdict["expires_at"], label="verdict_expires_at")
+    expected_verdict = {
+        "decision": "allow",
+        "store_id": seal[0],
+        "verifier_policy_id": request.context.policy_id,
+        "policy_id": request.context.policy_id,
+        "policy_version": request.context.policy_version,
+        "verifier_key_id": policy_binding.key_id,
+        "receipt_digest": plan.receipt_digest,
+        "workflow_id": plan.workflow_id,
+        "node_id": plan.node_id,
+        "attempt_id": plan.attempt_id,
+        "agent_id": plan.agent_id,
+        "expected_node_state_version": expected_node_version,
+        "policy_epoch": int(request.context.policy_epoch),
+        "authority_epoch": int(request.context.authority_epoch),
+        "agent_revocation_epoch": int(request.context.agent_revocation_generation),
+        "workflow_revocation_generation": int(
+            request.context.workflow_revocation_generation
+        ),
+        "workflow_generation": int(request.context.workflow_epoch),
+    }
+    if any(verdict.get(key) != value for key, value in expected_verdict.items()):
+        raise _GCBProjectionDenied("projection_verdict_mismatch")
+    now_seconds = _trusted_now(clock) // 1000
+    signature = verdict["signature"]
+    if (
+        not isinstance(verdict["reason"], str)
+        or not isinstance(signature, str)
+        or verdict_issued > now_seconds + 30
+        or verdict_expires < now_seconds
+        or verdict_expires <= verdict_issued
+    ):
+        raise _GCBProjectionDenied("invalid_projection_verdict")
+    unsigned_verdict = {
+        key: value for key, value in verdict.items() if key != "signature"
+    }
+    try:
+        Ed25519PublicKey.from_public_bytes(policy_binding.public_key).verify(
+            base64.b64decode(signature, validate=True),
+            _GCB_VERDICT_DOMAIN
+            + json.dumps(
+                unsigned_verdict, sort_keys=True, separators=(",", ":")
+            ).encode("ascii"),
+        )
+    except (InvalidSignature, ValueError, TypeError) as error:
+        raise _GCBProjectionDenied("invalid_projection_verdict_signature") from error
+    if (
+        hashlib.sha256(plan.verdict_material.encode()).hexdigest()
+        != plan.verdict_digest
+    ):
+        raise _GCBProjectionDenied("projection_verdict_digest_mismatch")
+    request_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "payload": receipt_payload,
+                "signature": receipt_signature,
+                "verdict": verdict,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    if request_hash != plan.request_hash:
+        raise _GCBProjectionDenied("projection_request_hash_mismatch")
+    return _ValidatedGCBProjection(
+        legacy_node_version,
+        workflow_state_version + 1,
+        str(staged[0]),
+    )
+
+
+def _attest_gcb_projection(
+    connection: sqlite3.Connection,
+    request: AtomicCommitRequest,
+    result: CommitResult,
+    plan: _GCBProjectionPlan,
+    validated: _ValidatedGCBProjection,
+    unlocked_children: tuple[tuple[str, int], ...],
+) -> None:
+    if result.certificate_digest is None:
+        raise _GCBProjectionDenied("projection_certificate_missing")
+    node = connection.execute(
+        "SELECT status,version,attempt_id,claimed_by,result_digest,commit_id,"
+        "receipt_digest,tainted FROM nodes WHERE workflow_id=? AND node_id=?",
+        (plan.workflow_id, plan.node_id),
+    ).fetchone()
+    workflow = connection.execute(
+        "SELECT state_version FROM workflows WHERE workflow_id=?", (plan.workflow_id,)
+    ).fetchone()
+    decision = connection.execute(
+        "SELECT request_hash,outcome,reason,workflow_id,node_id,state_version,nonce "
+        "FROM decisions WHERE commit_id=?",
+        (plan.commit_id,),
+    ).fetchone()
+    evidence = connection.execute(
+        "SELECT receipt_material,receipt_digest,verdict_material,verdict_digest "
+        "FROM receipt_evidence WHERE commit_id=?",
+        (plan.commit_id,),
+    ).fetchone()
+    outbox = connection.execute(
+        "SELECT workflow_id,node_id,artifact_json,dispatched FROM outbox WHERE commit_id=?",
+        (plan.commit_id,),
+    ).fetchone()
+    logical = connection.execute(
+        "SELECT version,certificate_digest FROM logical_nodes "
+        "WHERE workflow_id=? AND node_id=?",
+        (plan.workflow_id, plan.node_id),
+    ).fetchone()
+    expected_node = (
+        "governed_committed",
+        validated.legacy_node_version + 1,
+        plan.attempt_id,
+        plan.agent_id,
+        request.subject.output_digest,
+        plan.commit_id,
+        plan.receipt_digest,
+        0,
+    )
+    expected_decision = (
+        plan.request_hash,
+        "committed",
+        "verified",
+        plan.workflow_id,
+        plan.node_id,
+        validated.next_workflow_state_version,
+        plan.nonce,
+    )
+    if (
+        node != expected_node
+        or workflow != (validated.next_workflow_state_version,)
+        or decision != expected_decision
+        or evidence
+        != (
+            plan.receipt_material,
+            plan.receipt_digest,
+            plan.verdict_material,
+            plan.verdict_digest,
+        )
+        or outbox != (plan.workflow_id, plan.node_id, validated.artifact_json, 0)
+        or logical
+        != (request.bindings.committed_node_version, result.certificate_digest)
+    ):
+        raise _GCBProjectionDenied("projection_semantic_attestation_failed")
+    for child_id, expected_version in unlocked_children:
+        child = connection.execute(
+            "SELECT status,version FROM nodes WHERE workflow_id=? AND node_id=?",
+            (plan.workflow_id, child_id),
+        ).fetchone()
+        if child != ("ready", expected_version):
+            raise _GCBProjectionDenied("projection_semantic_attestation_failed")
+
+
+def _attest_gcb_projection_replay(
+    connection: _AuthorityConnection,
+    request: AtomicCommitRequest,
+    plan: _GCBProjectionPlan,
+) -> None:
+    expected_node_version = _gcb_exact_int(
+        plan.expected_node_version, label="expected_node_version"
+    )
+    committed_node_version = _gcb_exact_int(
+        plan.committed_node_version, label="committed_node_version"
+    )
+    expected_workflow_state_version = _gcb_exact_int(
+        plan.expected_workflow_state_version, label="workflow_state_version"
+    )
+    receipt = _gcb_material_object(plan.receipt_material, label="receipt")
+    receipt_payload = receipt.get("payload")
+    if not isinstance(receipt_payload, dict):
+        raise _GCBProjectionDenied("projection_replay_mismatch")
+    if (
+        plan.workflow_id != request.subject.workflow_id
+        or plan.node_id != request.subject.node_id
+        or plan.attempt_id != request.subject.attempt_id
+        or plan.agent_id != request.subject.agent_id
+        or plan.commit_id != request.commit_id
+        or plan.nonce != request.nonce
+        or str(expected_node_version) != request.bindings.expected_node_version
+        or committed_node_version != expected_node_version + 1
+        or str(committed_node_version) != request.bindings.committed_node_version
+        or receipt_payload.get("policy_digest") != plan.policy_digest
+        or receipt_payload.get("state_version") != expected_workflow_state_version
+        or hashlib.sha256(plan.receipt_material.encode()).hexdigest()
+        != plan.receipt_digest
+        or hashlib.sha256(plan.verdict_material.encode()).hexdigest()
+        != plan.verdict_digest
+    ):
+        raise _GCBProjectionDenied("projection_replay_mismatch")
+    decision = connection.execute(
+        "SELECT request_hash,outcome,reason,workflow_id,node_id,state_version,nonce "
+        "FROM decisions WHERE commit_id=?",
+        (plan.commit_id,),
+    ).fetchone()
+    evidence = connection.execute(
+        "SELECT receipt_material,receipt_digest,verdict_material,verdict_digest "
+        "FROM receipt_evidence WHERE commit_id=?",
+        (plan.commit_id,),
+    ).fetchone()
+    node = connection.execute(
+        "SELECT status,attempt_id,claimed_by,result_digest,commit_id,receipt_digest "
+        "FROM nodes WHERE workflow_id=? AND node_id=?",
+        (plan.workflow_id, plan.node_id),
+    ).fetchone()
+    outbox = connection.execute(
+        "SELECT workflow_id,node_id FROM outbox WHERE commit_id=?", (plan.commit_id,)
+    ).fetchone()
+    logical = connection.execute(
+        "SELECT version FROM logical_nodes WHERE workflow_id=? AND node_id=?",
+        (plan.workflow_id, plan.node_id),
+    ).fetchone()
+    if (
+        decision is None
+        or decision[0] != plan.request_hash
+        or decision[1] != "committed"
+        or decision[2] != "verified"
+        or decision[3] != plan.workflow_id
+        or decision[4] != plan.node_id
+        or decision[5] != expected_workflow_state_version + 1
+        or decision[6] != plan.nonce
+        or evidence
+        != (
+            plan.receipt_material,
+            plan.receipt_digest,
+            plan.verdict_material,
+            plan.verdict_digest,
+        )
+        or node
+        != (
+            "governed_committed",
+            plan.attempt_id,
+            plan.agent_id,
+            request.subject.output_digest,
+            plan.commit_id,
+            plan.receipt_digest,
+        )
+        or outbox != (plan.workflow_id, plan.node_id)
+        or logical != (request.bindings.committed_node_version,)
+    ):
+        raise _GCBProjectionDenied("projection_replay_mismatch")
 
 
 def _config_object(config: APCCAuthorityConfig) -> dict[str, object]:
@@ -395,13 +1122,13 @@ def _trusted_now(clock: object) -> int:
 
 
 def _has_later_generation_revocation(
-    connection: sqlite3.Connection, certificate: CommitCertificate
+    connection: _AuthorityConnection, certificate: CommitCertificate
 ) -> bool:
     actor = connection.execute(
         "SELECT generation FROM actor_revocations WHERE workflow_id=? AND actor_id=?",
         (certificate.subject.workflow_id, certificate.subject.agent_id),
     ).fetchone()
-    if actor is not None and int(actor[0]) > int(
+    if actor is not None and _row_int(actor[0]) > int(
         certificate.context.agent_revocation_generation
     ):
         return True
@@ -409,20 +1136,20 @@ def _has_later_generation_revocation(
         "SELECT generation FROM workflow_revocations WHERE workflow_id=?",
         (certificate.subject.workflow_id,),
     ).fetchone()
-    return workflow is not None and int(workflow[0]) > int(
+    return workflow is not None and _row_int(workflow[0]) > int(
         certificate.context.workflow_revocation_generation
     )
 
 
 def _latest_disposition(
-    connection: sqlite3.Connection, certificate_digest: str
+    connection: _AuthorityConnection, certificate_digest: str
 ) -> CertificateDisposition | None:
     row = connection.execute(
         "SELECT disposition FROM certificate_dispositions "
         "WHERE certificate_digest=? ORDER BY event_sequence DESC LIMIT 1",
         (certificate_digest,),
     ).fetchone()
-    return None if row is None else CertificateDisposition(row[0])
+    return None if row is None else CertificateDisposition(_row_text(row[0]))
 
 
 def _candidate_matches(
@@ -451,7 +1178,7 @@ def _candidate_matches(
 
 
 def _write_audit(
-    connection: sqlite3.Connection,
+    connection: _AuthorityConnection,
     audit_event_id: str,
     kind: str,
     subject: str,
@@ -491,12 +1218,116 @@ def _canonical_nonnegative_decimal(value: object, *, maximum: int) -> int:
     return _canonical_positive_decimal(value, maximum=maximum)
 
 
-class SQLiteAuthorityReader:
-    """Signer-free APCC reader.  It never opens a writer transaction."""
+class _AuthorityReaderCore:
+    """Storage-neutral APCC read operations over a transactional DB-API port."""
+
+    def __init__(self, authority_store_id: str) -> None:
+        self.authority_store_id = authority_store_id
+
+    def _read_transaction(
+        self,
+    ) -> AbstractContextManager[_AuthorityConnection]:
+        raise NotImplementedError
+
+    def read_logical_node(self, workflow_id: str, node_id: str) -> LogicalNodeState:
+        with self._read_transaction() as connection:
+            row = connection.execute(
+                "SELECT version, certificate_digest FROM logical_nodes "
+                "WHERE workflow_id = ? AND node_id = ?",
+                (workflow_id, node_id),
+            ).fetchone()
+            if row is None:
+                return LogicalNodeState(workflow_id, node_id, "0", None)
+            return LogicalNodeState(
+                workflow_id, node_id, str(row[0]), _row_optional_text(row[1])
+            )
+
+    def read_commit_context(self, request: CommitContextRequest) -> CommitContext:
+        with self._read_transaction() as connection:
+            candidate = connection.execute(
+                "SELECT lifecycle, subject_json, context_json, predecessors_json, audit_event_id "
+                "FROM candidates WHERE workflow_id=? AND node_id=? AND attempt_id=?",
+                (request.workflow_id, request.node_id, request.attempt_id),
+            ).fetchone()
+            if candidate is None:
+                raise ValueError(FailureCode.CROSS_ATTEMPT_REPLAY.value)
+            subject = CommitCertificate.from_object(
+                _certificate_shell(
+                    _loads(_row_text(candidate[1])),
+                    _loads(_row_text(candidate[2])),
+                    _loads(_row_text(candidate[3])),
+                )
+            ).subject
+            certificate = CommitCertificate.from_object(
+                _certificate_shell(
+                    _loads(_row_text(candidate[1])),
+                    _loads(_row_text(candidate[2])),
+                    _loads(_row_text(candidate[3])),
+                )
+            )
+            logical_row = connection.execute(
+                "SELECT version, certificate_digest FROM logical_nodes "
+                "WHERE workflow_id=? AND node_id=?",
+                (request.workflow_id, request.node_id),
+            ).fetchone()
+            logical = (
+                LogicalNodeState(request.workflow_id, request.node_id, "0", None)
+                if logical_row is None
+                else LogicalNodeState(
+                    request.workflow_id,
+                    request.node_id,
+                    str(logical_row[0]),
+                    _row_optional_text(logical_row[1]),
+                )
+            )
+            return CommitContext(
+                subject,
+                certificate.context,
+                CandidateState(
+                    request.workflow_id,
+                    request.node_id,
+                    request.attempt_id,
+                    CandidateLifecycle(_row_text(candidate[0])),
+                ),
+                logical,
+                certificate.bindings.predecessors,
+                _row_text(candidate[4]),
+            )
+
+    def replay_commit(self, request: ReplayCommitRequest) -> CommitResult:
+        with self._read_transaction() as connection:
+            return _replay(connection, request.commit_id, request.request_digest)
+
+    def get_certificate(self, commit_id: str) -> bytes | None:
+        with self._read_transaction() as connection:
+            row = connection.execute(
+                "SELECT envelope FROM certificates WHERE commit_id = ?", (commit_id,)
+            ).fetchone()
+            return None if row is None else _row_bytes(row[0])
+
+    def get_outbox_event(self, commit_id: str) -> PersistedOutboxEvent:
+        with self._read_transaction() as connection:
+            row = connection.execute(
+                "SELECT event_id, event_json, audit_event_id, delivered FROM apcc_outbox "
+                "WHERE event_kind='COMMIT' AND operation_id = ?",
+                (commit_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("no APCC outbox event for commit")
+            return PersistedOutboxEvent(
+                _row_text(row[0]),
+                _row_bytes(row[1]),
+                _row_text(row[2]),
+                not bool(row[3]),
+            )
+
+
+class SQLiteAuthorityReader(_AuthorityReaderCore):
+    """Signer-free SQLite APCC reader.  It never opens a writer transaction."""
 
     def __init__(self, path: Path, authority_store_id: str) -> None:
+        super().__init__(authority_store_id)
         self.database_path = Path(path)
-        self.authority_store_id = authority_store_id
 
     @classmethod
     def open(cls, path: Path) -> SQLiteAuthorityReader:
@@ -530,274 +1361,44 @@ class SQLiteAuthorityReader:
         finally:
             connection.close()
 
-    def read_logical_node(self, workflow_id: str, node_id: str) -> LogicalNodeState:
-        with self._read_transaction() as connection:
-            row = connection.execute(
-                "SELECT version, certificate_digest FROM logical_nodes "
-                "WHERE workflow_id = ? AND node_id = ?",
-                (workflow_id, node_id),
-            ).fetchone()
-            if row is None:
-                return LogicalNodeState(workflow_id, node_id, "0", None)
-            return LogicalNodeState(workflow_id, node_id, str(row[0]), row[1])
 
-    def read_commit_context(self, request: CommitContextRequest) -> CommitContext:
-        with self._read_transaction() as connection:
-            candidate = connection.execute(
-                "SELECT lifecycle, subject_json, context_json, predecessors_json, audit_event_id "
-                "FROM candidates WHERE workflow_id=? AND node_id=? AND attempt_id=?",
-                (request.workflow_id, request.node_id, request.attempt_id),
-            ).fetchone()
-            if candidate is None:
-                raise ValueError(FailureCode.CROSS_ATTEMPT_REPLAY.value)
-            subject = CommitCertificate.from_object(
-                _certificate_shell(
-                    _loads(candidate[1]), _loads(candidate[2]), _loads(candidate[3])
-                )
-            ).subject
-            certificate = CommitCertificate.from_object(
-                _certificate_shell(
-                    _loads(candidate[1]), _loads(candidate[2]), _loads(candidate[3])
-                )
-            )
-            logical_row = connection.execute(
-                "SELECT version, certificate_digest FROM logical_nodes "
-                "WHERE workflow_id=? AND node_id=?",
-                (request.workflow_id, request.node_id),
-            ).fetchone()
-            logical = (
-                LogicalNodeState(request.workflow_id, request.node_id, "0", None)
-                if logical_row is None
-                else LogicalNodeState(
-                    request.workflow_id,
-                    request.node_id,
-                    str(logical_row[0]),
-                    logical_row[1],
-                )
-            )
-            return CommitContext(
-                subject,
-                certificate.context,
-                CandidateState(
-                    request.workflow_id,
-                    request.node_id,
-                    request.attempt_id,
-                    CandidateLifecycle(candidate[0]),
-                ),
-                logical,
-                certificate.bindings.predecessors,
-                candidate[4],
-            )
+class _AuthorityStoreCore(_AuthorityReaderCore):
+    """Storage-neutral APCC state machine over one atomic write transaction."""
 
-    def replay_commit(self, request: ReplayCommitRequest) -> CommitResult:
-        with self._read_transaction() as connection:
-            return _replay(connection, request.commit_id, request.request_digest)
-
-    def get_certificate(self, commit_id: str) -> bytes | None:
-        with self._read_transaction() as connection:
-            row = connection.execute(
-                "SELECT envelope FROM certificates WHERE commit_id = ?", (commit_id,)
-            ).fetchone()
-            return None if row is None else bytes(row[0])
-
-    def get_outbox_event(self, commit_id: str) -> PersistedOutboxEvent:
-        with self._read_transaction() as connection:
-            row = connection.execute(
-                "SELECT event_id, event_json, audit_event_id, delivered FROM apcc_outbox "
-                "WHERE event_kind='COMMIT' AND operation_id = ?",
-                (commit_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("no APCC outbox event for commit")
-            return PersistedOutboxEvent(row[0], bytes(row[1]), row[2], not bool(row[3]))
-
-
-class SQLiteAuthorityStore(SQLiteAuthorityReader):
-    """Single-writer, ``BEGIN IMMEDIATE`` APCC authority store."""
-
-    def __init__(
-        self,
-        path: Path,
-        config: APCCAuthorityConfig,
-        runtime: AuthorityRuntime,
-        probe: _FaultProbe | None = None,
-    ) -> None:
-        super().__init__(path, config.authority_store_id)
+    def __init__(self, config: APCCAuthorityConfig, runtime: AuthorityRuntime) -> None:
+        super().__init__(config.authority_store_id)
         self._config = config
         self._runtime = runtime
-        self._probe = probe
 
-    @classmethod
-    def provision(
-        cls,
-        path: Path,
-        config: APCCAuthorityConfig,
-        initial_contexts: tuple[CommitContext, ...],
-    ) -> None:
-        path = Path(path)
-        if path.exists():
-            connection = _connect_reader(path)
-            try:
-                if connection.execute("PRAGMA application_id").fetchone() == (
-                    _APPLICATION_ID,
-                ):
-                    existing = connection.execute(
-                        "SELECT value FROM metadata WHERE key='config'"
-                    ).fetchone()
-                    if existing is not None and existing[0] != _json(
-                        _config_object(config)
-                    ):
-                        raise ValueError("APCC SQLite configuration is immutable")
-                    raise ValueError("APCC SQLite store is already provisioned")
-                raise ValueError("APCC SQLite store schema validation failed")
-            finally:
-                connection.close()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{secrets.token_hex(16)}.apcc-tmp")
-        try:
-            connection = _connect_create(temporary)
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                _schema(connection)
-                connection.execute(f"PRAGMA application_id={_APPLICATION_ID}")
-                connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
-                connection.execute(
-                    "INSERT INTO metadata(key, value) VALUES ('config', ?)",
-                    (_json(_config_object(config)),),
-                )
-                connection.execute(
-                    "INSERT INTO metadata(key, value) VALUES ('schema_fingerprint', ?)",
-                    (_SCHEMA_FINGERPRINT,),
-                )
-                for context in initial_contexts:
-                    _insert_context(connection, context)
-                connection.commit()
-                _validate_schema(connection)
-                checkpoint = connection.execute(
-                    "PRAGMA wal_checkpoint(TRUNCATE)"
-                ).fetchone()
-                if checkpoint != (0, 0, 0):
-                    raise ValueError("APCC SQLite WAL checkpoint is incomplete")
-            except Exception:
-                connection.rollback()
-                raise
-            finally:
-                connection.close()
-            if Path(f"{temporary}-wal").exists() or Path(f"{temporary}-shm").exists():
-                raise ValueError("APCC SQLite WAL checkpoint left sidecar state")
-            validation = _connect_reader(temporary)
-            try:
-                _validate_schema(validation)
-            finally:
-                validation.close()
-            with temporary.open("rb") as handle:
-                os.fsync(handle.fileno())
-            attempted_inode = temporary.stat()
-            os.link(temporary, path)
-            try:
-                directory_fd = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-            except Exception:
-                try:
-                    published_inode = path.stat()
-                    if (
-                        published_inode.st_dev == attempted_inode.st_dev
-                        and published_inode.st_ino == attempted_inode.st_ino
-                    ):
-                        path.unlink()
-                        retry_fd = os.open(path.parent, os.O_RDONLY)
-                        try:
-                            os.fsync(retry_fd)
-                        except Exception:
-                            pass
-                        finally:
-                            os.close(retry_fd)
-                except FileNotFoundError:
-                    pass
-                raise
-        finally:
-            for created in (
-                temporary,
-                Path(f"{temporary}-wal"),
-                Path(f"{temporary}-shm"),
-            ):
-                try:
-                    created.unlink()
-                except FileNotFoundError:
-                    pass
+    def _transaction(self) -> AbstractContextManager[_AuthorityConnection]:
+        raise NotImplementedError
 
-    @classmethod
-    def open(  # type: ignore[override]
-        cls, path: Path, config: APCCAuthorityConfig, runtime: AuthorityRuntime
-    ) -> SQLiteAuthorityStore:
-        return cls._open(path, config, runtime, None)
-
-    @classmethod
-    def _open_with_probe(
-        cls,
-        path: Path,
-        config: APCCAuthorityConfig,
-        runtime: AuthorityRuntime,
-        probe: _FaultProbe,
-    ) -> SQLiteAuthorityStore:
-        return cls._open(path, config, runtime, probe)
-
-    @classmethod
-    def _open(
-        cls,
-        path: Path,
-        config: APCCAuthorityConfig,
-        runtime: AuthorityRuntime,
-        probe: _FaultProbe | None,
-    ) -> SQLiteAuthorityStore:
-        reader = SQLiteAuthorityReader.open(path)
-        connection = _connect(path)
-        try:
-            row = connection.execute(
-                "SELECT value FROM metadata WHERE key='config'"
-            ).fetchone()
-            if row is None or row[0] != _json(_config_object(config)):
-                raise ValueError(
-                    "APCC SQLite configuration does not match provisioned store"
-                )
-        finally:
-            connection.close()
-        if reader.authority_store_id != config.authority_store_id:
-            raise ValueError("APCC authority store identity mismatch")
-        for role, binding in (
-            (AuthoritySigningRole.COMMIT, config.commit_trust),
-            (AuthoritySigningRole.STATUS, config.status_trust),
-        ):
-            if (
-                bytes(runtime.key_provider.public_key(role, binding.key_id))
-                != binding.public_key
-            ):
-                raise ValueError(
-                    "APCC runtime signer does not match public configuration"
-                )
-        return cls(Path(path), config, runtime, probe)
+    def _connection(self) -> _AuthorityConnection:
+        raise NotImplementedError
 
     def _hit(self, point: str) -> None:
-        if self._probe is not None:
-            self._probe.hit(point)
+        del point
 
-    @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
-        connection = _connect(self.database_path)
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+    def _run_projection(
+        self,
+        connection: _AuthorityConnection,
+        request: AtomicCommitRequest,
+        result: CommitResult,
+        plan: _GCBProjectionPlan | None,
+    ) -> None:
+        del connection, request, result
+        if plan is not None:
+            raise TypeError("GCB projection requires the SQLite authority store")
 
     def stage_result(self, request: StageResultRequest) -> StageResultResult:
+        audit = _audit_id(
+            "stage",
+            request.subject.workflow_id,
+            request.subject.node_id,
+            request.subject.attempt_id,
+            request.subject.output_digest,
+            request.expected_node_version,
+        )
         quarantined = False
         with self._transaction() as connection:
             row = connection.execute(
@@ -871,7 +1472,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
                 raise ValueError(FailureCode.STAGED_RESULT_CONFLICT.value)
             if (
                 row[0] == CandidateLifecycle.RESULT_STAGED.value
-                and bytes(row[1]) != request.result_bytes
+                and _row_bytes(row[1]) != request.result_bytes
             ):
                 connection.execute(
                     "UPDATE candidates SET lifecycle=? WHERE workflow_id=? AND node_id=? AND attempt_id=?",
@@ -884,14 +1485,6 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
                 )
                 quarantined = True
             else:
-                audit = _audit_id(
-                    "stage",
-                    request.subject.workflow_id,
-                    request.subject.node_id,
-                    request.subject.attempt_id,
-                    request.subject.output_digest,
-                    request.expected_node_version,
-                )
                 connection.execute(
                     "UPDATE candidates SET lifecycle=?, result=?, audit_event_id=? "
                     "WHERE workflow_id=? AND node_id=? AND attempt_id=?",
@@ -1031,10 +1624,13 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             return result_type(value, audit)
 
     def atomic_commit(self, request: AtomicCommitRequest) -> CommitResult:
-        return self._commit(request, supersede_old=None)
+        return self._commit(request, supersede_old=None, projection_plan=None)
 
     def _commit(
-        self, request: AtomicCommitRequest, supersede_old: str | None
+        self,
+        request: AtomicCommitRequest,
+        supersede_old: str | None,
+        projection_plan: _GCBProjectionPlan | None = None,
     ) -> CommitResult:
         prefix = "supersession_" if supersede_old is not None else ""
         request_digest = _operation_identity(request, supersede_old)
@@ -1045,6 +1641,10 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             ).fetchone()
             if existing is not None:
                 if existing[0] == request_digest:
+                    if projection_plan is not None:
+                        _attest_gcb_projection_replay(
+                            connection, request, projection_plan
+                        )
                     return _replay(connection, request.commit_id, request_digest)
                 return self._conflict(
                     connection,
@@ -1063,6 +1663,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
                 )
             self._hit(f"before_{prefix}verification")
             certificate: CommitCertificate | None = None
+            sequence: str | None = None
             error: FailureCode | None
             if connection.execute(
                 "SELECT 1 FROM nonce_ledger WHERE nonce=?", (request.nonce,)
@@ -1080,6 +1681,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             if error is not None:
                 return self._negative(connection, request, error, supersede_old)
             assert certificate is not None
+            assert sequence is not None
             self._hit(f"before_{prefix}seal")
             payload, envelope, digest = self._seal(certificate)
             self._hit(f"after_{prefix}seal")
@@ -1247,13 +1849,15 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
                 digest,
                 audit,
             )
+            if supersede_old is None:
+                self._run_projection(connection, request, result, projection_plan)
         if supersede_old is None:
             self._hit("after_commit_before_response")
         return result
 
     def _preflight(
         self,
-        connection: sqlite3.Connection,
+        connection: _AuthorityConnection,
         request: AtomicCommitRequest,
         supersede_old: str | None,
         certificate: CommitCertificate,
@@ -1297,7 +1901,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             "SELECT generation FROM actor_revocations WHERE workflow_id=? AND actor_id=?",
             (request.subject.workflow_id, request.subject.agent_id),
         ).fetchone()
-        if actor_generation is not None and int(actor_generation[0]) > int(
+        if actor_generation is not None and _row_int(actor_generation[0]) > int(
             request.context.agent_revocation_generation
         ):
             return FailureCode.ACTOR_REVOKED
@@ -1305,7 +1909,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             "SELECT generation FROM workflow_revocations WHERE workflow_id=?",
             (request.subject.workflow_id,),
         ).fetchone()
-        if workflow_generation is not None and int(workflow_generation[0]) > int(
+        if workflow_generation is not None and _row_int(workflow_generation[0]) > int(
             request.context.workflow_revocation_generation
         ):
             return FailureCode.WORKFLOW_REVOKED
@@ -1334,7 +1938,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             ):
                 return FailureCode.INVALID_PREDECESSOR
             try:
-                payload = bytes(row[3])
+                payload = _row_bytes(row[3])
                 certificate = decode_certificate(payload)
             except Exception:
                 return FailureCode.INVALID_PREDECESSOR
@@ -1420,7 +2024,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
 
     def _negative(
         self,
-        connection: sqlite3.Connection,
+        connection: _AuthorityConnection,
         request: AtomicCommitRequest,
         reason: FailureCode,
         supersede_old: str | None = None,
@@ -1487,7 +2091,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
 
     def _conflict(
         self,
-        connection: sqlite3.Connection,
+        connection: _AuthorityConnection,
         commit_id: str,
         digest: str,
         public_request_digest: str,
@@ -1510,7 +2114,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
                 None,
                 None,
                 None,
-                existing[0],
+                _row_text(existing[0]),
             )
         original = connection.execute(
             "SELECT request_digest, workflow_id FROM commit_index WHERE commit_id=?",
@@ -1528,7 +2132,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
                 public_request_digest,
                 str(original[1]) if original else "",
                 conflicting_workflow_id,
-                int(sequence[0]) + 1 if sequence else 1,
+                _row_int(sequence[0]) + 1 if sequence else 1,
                 audit,
                 conflict_claim_json,
             ),
@@ -1578,6 +2182,13 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
         return replay
 
     def revoke(self, request: RevocationRequest) -> RevocationResult:
+        with self._transaction() as connection:
+            return self._revoke_on_connection(connection, request)
+
+    def _revoke_on_connection(
+        self, connection: _AuthorityConnection, request: RevocationRequest
+    ) -> RevocationResult:
+        """Apply a typed revocation within an existing authority transaction."""
         generation = None
         if request.scope is not RevocationScope.CERTIFICATE:
             generation = str(
@@ -1592,114 +2203,113 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             request.target_id,
             request.next_generation,
         )
-        with self._transaction() as connection:
-            if connection.execute(
-                "SELECT 1 FROM audit_events WHERE audit_event_id=?", (audit,)
-            ).fetchone():
-                return RevocationResult(
-                    request.scope, request.target_id, request.next_generation, audit
-                )
-            self._hit("before_revocation_fence")
-            if request.scope is RevocationScope.CERTIFICATE:
-                disposition = _latest_disposition(connection, request.target_id)
-                if disposition is not CertificateDisposition.CURRENT:
-                    raise ValueError("certificate revocation target is not current")
-                self._hit("before_revocation_disposition_write")
-                connection.execute(
-                    "INSERT INTO certificate_dispositions VALUES (?, 2, ?)",
-                    (request.target_id, CertificateDisposition.REVOKED.value),
-                )
-                self._hit("after_revocation_disposition_write")
-            elif request.scope is RevocationScope.ACTOR:
-                existing = connection.execute(
-                    "SELECT generation FROM actor_revocations WHERE workflow_id=? AND actor_id=?",
-                    (request.workflow_id, request.target_id),
-                ).fetchone()
-                prior_generation = int(existing[0]) if existing is not None else 0
-                assert generation is not None
-                if int(generation) <= prior_generation:
-                    raise ValueError("revocation generation must increase")
-                self._hit("before_revocation_generation_write")
-                connection.execute(
-                    "INSERT OR REPLACE INTO actor_revocations(workflow_id, actor_id, generation) VALUES (?, ?, ?)",
-                    (request.workflow_id, request.target_id, generation),
-                )
-                self._hit("after_revocation_generation_write")
-            else:
-                existing = connection.execute(
-                    "SELECT generation FROM workflow_revocations WHERE workflow_id=?",
-                    (request.workflow_id,),
-                ).fetchone()
-                prior_generation = int(existing[0]) if existing is not None else 0
-                assert generation is not None
-                if int(generation) <= prior_generation:
-                    raise ValueError("revocation generation must increase")
-                self._hit("before_revocation_generation_write")
-                connection.execute(
-                    "INSERT OR REPLACE INTO workflow_revocations VALUES (?, ?)",
-                    (request.workflow_id, generation),
-                )
-                self._hit("after_revocation_generation_write")
-            self._hit("after_revocation_fence")
-            self._hit("before_revocation_audit_write")
-            control_object = {
-                "scope": request.scope.value,
-                "workflow_id": request.workflow_id,
-                "target_id": request.target_id,
-                "generation": generation,
-                "claimed_generation": request.next_generation,
-                "reason": request.reason,
-                "audit_event_id": audit,
-            }
-            control_payload = _json(control_object).encode("utf-8")
-            control_digest = sha256_digest(control_payload)
-            _write_audit(
-                connection,
+        if connection.execute(
+            "SELECT 1 FROM audit_events WHERE audit_event_id=?", (audit,)
+        ).fetchone():
+            return RevocationResult(
+                request.scope, request.target_id, request.next_generation, audit
+            )
+        self._hit("before_revocation_fence")
+        if request.scope is RevocationScope.CERTIFICATE:
+            disposition = _latest_disposition(connection, request.target_id)
+            if disposition is not CertificateDisposition.CURRENT:
+                raise ValueError("certificate revocation target is not current")
+            self._hit("before_revocation_disposition_write")
+            connection.execute(
+                "INSERT INTO certificate_dispositions VALUES (?, 2, ?)",
+                (request.target_id, CertificateDisposition.REVOKED.value),
+            )
+            self._hit("after_revocation_disposition_write")
+        elif request.scope is RevocationScope.ACTOR:
+            existing = connection.execute(
+                "SELECT generation FROM actor_revocations WHERE workflow_id=? AND actor_id=?",
+                (request.workflow_id, request.target_id),
+            ).fetchone()
+            prior_generation = _row_int(existing[0]) if existing is not None else 0
+            assert generation is not None
+            if int(generation) <= prior_generation:
+                raise ValueError("revocation generation must increase")
+            self._hit("before_revocation_generation_write")
+            connection.execute(
+                "INSERT OR REPLACE INTO actor_revocations(workflow_id, actor_id, generation) VALUES (?, ?, ?)",
+                (request.workflow_id, request.target_id, generation),
+            )
+            self._hit("after_revocation_generation_write")
+        else:
+            existing = connection.execute(
+                "SELECT generation FROM workflow_revocations WHERE workflow_id=?",
+                (request.workflow_id,),
+            ).fetchone()
+            prior_generation = _row_int(existing[0]) if existing is not None else 0
+            assert generation is not None
+            if int(generation) <= prior_generation:
+                raise ValueError("revocation generation must increase")
+            self._hit("before_revocation_generation_write")
+            connection.execute(
+                "INSERT OR REPLACE INTO workflow_revocations VALUES (?, ?)",
+                (request.workflow_id, generation),
+            )
+            self._hit("after_revocation_generation_write")
+        self._hit("after_revocation_fence")
+        self._hit("before_revocation_audit_write")
+        control_object = {
+            "scope": request.scope.value,
+            "workflow_id": request.workflow_id,
+            "target_id": request.target_id,
+            "generation": generation,
+            "claimed_generation": request.next_generation,
+            "reason": request.reason,
+            "audit_event_id": audit,
+        }
+        control_payload = _json(control_object).encode("utf-8")
+        control_digest = sha256_digest(control_payload)
+        _write_audit(
+            connection,
+            audit,
+            "revoked",
+            request.target_id,
+            scope=request.scope.value,
+            workflow_id=request.workflow_id,
+            **({"generation": generation} if generation is not None else {}),
+        )
+        connection.execute(
+            "INSERT INTO control_events(operation_id,scope,workflow_id,target_id,generation,claimed_generation,reason,audit_event_id,payload,payload_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
                 audit,
-                "revoked",
+                request.scope.value,
+                request.workflow_id,
                 request.target_id,
-                scope=request.scope.value,
-                workflow_id=request.workflow_id,
-                **({"generation": generation} if generation is not None else {}),
-            )
-            connection.execute(
-                "INSERT INTO control_events(operation_id,scope,workflow_id,target_id,generation,claimed_generation,reason,audit_event_id,payload,payload_digest) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    audit,
-                    request.scope.value,
-                    request.workflow_id,
-                    request.target_id,
-                    generation,
-                    request.next_generation,
-                    request.reason,
-                    audit,
-                    control_payload,
-                    control_digest,
-                ),
-            )
-            self._hit("after_revocation_audit_write")
-            self._hit("before_revocation_trust_log_write")
-            trust_sequence, _trust_head = self._append_trust(
-                connection, "control", audit, audit
-            )
-            self._hit("after_revocation_trust_log_write")
-            self._hit("before_revocation_outbox_write")
-            event_id = _audit_id("outbox", "CONTROL", audit, control_digest)
-            connection.execute(
-                "INSERT INTO apcc_outbox(event_sequence,event_id,event_kind,operation_id,event_json,audit_event_id,trust_sequence,state,lease_token,lease_until_ms,delivered) "
-                "VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 'PENDING', NULL, NULL, 0)",
-                (
-                    trust_sequence,
-                    event_id,
-                    audit,
-                    control_payload,
-                    audit,
-                    trust_sequence,
-                ),
-            )
-            self._hit("after_revocation_outbox_write")
-            self._hit("before_revocation_commit")
+                generation,
+                request.next_generation,
+                request.reason,
+                audit,
+                control_payload,
+                control_digest,
+            ),
+        )
+        self._hit("after_revocation_audit_write")
+        self._hit("before_revocation_trust_log_write")
+        trust_sequence, _trust_head = self._append_trust(
+            connection, "control", audit, audit
+        )
+        self._hit("after_revocation_trust_log_write")
+        self._hit("before_revocation_outbox_write")
+        event_id = _audit_id("outbox", "CONTROL", audit, control_digest)
+        connection.execute(
+            "INSERT INTO apcc_outbox(event_sequence,event_id,event_kind,operation_id,event_json,audit_event_id,trust_sequence,state,lease_token,lease_until_ms,delivered) "
+            "VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 'PENDING', NULL, NULL, 0)",
+            (
+                trust_sequence,
+                event_id,
+                audit,
+                control_payload,
+                audit,
+                trust_sequence,
+            ),
+        )
+        self._hit("after_revocation_outbox_write")
+        self._hit("before_revocation_commit")
         return RevocationResult(
             request.scope, request.target_id, request.next_generation, audit
         )
@@ -1717,14 +2327,16 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             ).fetchone()
             if row is None:
                 raise ValueError("unknown APCC certificate")
-            historical = verify_historical(bytes(row[5]), trust=_trust(self._config))
+            historical = verify_historical(
+                _row_bytes(row[5]), trust=_trust(self._config)
+            )
             if not historical.ok or historical.certificate is None:
                 code = (
                     historical.code or FailureCode.AUTHORITY_STATUS_CERTIFICATE_MISMATCH
                 )
                 raise ValueError(code.value)
             certificate = historical.certificate
-            payload = bytes(row[4])
+            payload = _row_bytes(row[4])
             if (
                 sha256_digest(payload) != certificate_digest
                 or encode_certificate(certificate) != payload
@@ -1764,7 +2376,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             if latest is None:
                 seq, head = "0", sha256_digest(b"APCC-1/trust-log/genesis")
             else:
-                seq, head = str(latest[0]), latest[1]
+                seq, head = str(latest[0]), _row_text(latest[1])
             now_value = _trusted_now(self._runtime.clock)
             lifetime = int(self._config.freshness.issued_status_lifetime_ms)
             if now_value > _MAX_SAFE_INTEGER - lifetime:
@@ -1814,7 +2426,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
             return replace(unsigned, signature=signature)
 
     def _request_causal_error(
-        self, connection: sqlite3.Connection, root: CommitCertificate
+        self, connection: _AuthorityConnection, root: CommitCertificate
     ) -> FailureCode | None:
         limits = CausalClosureLimits()
         root_payload = encode_certificate(root)
@@ -1825,7 +2437,7 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
         )
         if len(root_envelope) > limits.max_total_bytes:
             return FailureCode.SIZE_LIMIT_EXCEEDED
-        resolver = _SQLitePredecessorResolver(connection)
+        resolver = _AuthorityPredecessorResolver(connection)
         cache: dict[str, CommitCertificate] = {}
         active: set[str] = {sha256_digest(root_payload)}
         complete: set[str] = set()
@@ -1895,9 +2507,9 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
         return None
 
     def _persisted_causal_error(
-        self, connection: sqlite3.Connection, digest: str
+        self, connection: _AuthorityConnection, digest: str
     ) -> FailureCode | None:
-        resolver = _SQLitePredecessorResolver(connection)
+        resolver = _AuthorityPredecessorResolver(connection)
         root_envelope = resolver.resolve_predecessor(digest)
         if root_envelope is None:
             return FailureCode.INVALID_PREDECESSOR
@@ -1981,6 +2593,469 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
                     ),
                 )
             return _replay(connection, request.commit_id, request.request_digest)
+
+    def recover_outbox(self, request: OutboxRecoveryRequest) -> OutboxRecoveryResult:
+        del request
+        raise NotImplementedError
+
+    def _next_sequence(self, connection: _AuthorityConnection) -> str:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM certificates"
+        ).fetchone()
+        if row is None:
+            raise ValueError("APCC authority sequence query returned no row")
+        sequence = _row_int(row[0]) + 1
+        if sequence > _MAX_SAFE_INTEGER:
+            raise ValueError(FailureCode.SIZE_LIMIT_EXCEEDED.value)
+        return str(sequence)
+
+    def _append_trust(
+        self,
+        connection: _AuthorityConnection,
+        kind: str,
+        subject: str,
+        audit_event_id: str,
+    ) -> tuple[str, str]:
+        previous = connection.execute(
+            "SELECT sequence, entry_digest FROM trust_log ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        sequence = _row_int(previous[0]) + 1 if previous else 1
+        prior = (
+            _row_text(previous[1])
+            if previous
+            else sha256_digest(b"APCC-1/trust-log/genesis")
+        )
+        entry_json = _json(
+            {
+                "sequence": str(sequence),
+                "prior_digest": prior,
+                "kind": kind,
+                "subject": subject,
+                "audit_event_id": audit_event_id,
+            }
+        )
+        head = sha256_digest(entry_json.encode("utf-8"))
+        connection.execute(
+            "INSERT INTO trust_log(sequence,audit_event_id,prior_digest,entry_digest,entry_json) VALUES (?, ?, ?, ?, ?)",
+            (sequence, audit_event_id, prior, head, entry_json),
+        )
+        return str(sequence), head
+
+
+class SQLiteAuthorityStore(_AuthorityStoreCore):
+    """Single-writer, ``BEGIN IMMEDIATE`` SQLite APCC authority store."""
+
+    def __init__(
+        self,
+        path: Path,
+        config: APCCAuthorityConfig,
+        runtime: AuthorityRuntime,
+    ) -> None:
+        _AuthorityStoreCore.__init__(self, config, runtime)
+        self.database_path = Path(path)
+        self.authority_store_id = config.authority_store_id
+        self._probe: _FaultProbe | None = None
+        self._gcb_attached = False
+        self._gcb_projection_fault: _GCBProjectionCheckpoint | None = None
+        self._gcb_projection_fault_fired = False
+        raise ValueError("use SQLiteAuthorityStore.open on a provisioned store")
+
+    @classmethod
+    def provision(
+        cls,
+        path: Path,
+        config: APCCAuthorityConfig,
+        initial_contexts: tuple[CommitContext, ...],
+    ) -> None:
+        path = Path(path)
+        if path.exists():
+            connection = _connect_reader(path)
+            try:
+                if connection.execute("PRAGMA application_id").fetchone() == (
+                    _APPLICATION_ID,
+                ):
+                    existing = connection.execute(
+                        "SELECT value FROM metadata WHERE key='config'"
+                    ).fetchone()
+                    if existing is not None and existing[0] != _json(
+                        _config_object(config)
+                    ):
+                        raise ValueError("APCC SQLite configuration is immutable")
+                    raise ValueError("APCC SQLite store is already provisioned")
+                raise ValueError("APCC SQLite store schema validation failed")
+            finally:
+                connection.close()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(16)}.apcc-tmp")
+        try:
+            connection = _connect_create(temporary)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                _schema(connection)
+                connection.execute(f"PRAGMA application_id={_APPLICATION_ID}")
+                connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+                connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES ('config', ?)",
+                    (_json(_config_object(config)),),
+                )
+                connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES ('schema_fingerprint', ?)",
+                    (_SCHEMA_FINGERPRINT,),
+                )
+                for context in initial_contexts:
+                    _insert_context(connection, context)
+                connection.commit()
+                _validate_schema(connection)
+                checkpoint = connection.execute(
+                    "PRAGMA wal_checkpoint(TRUNCATE)"
+                ).fetchone()
+                if checkpoint != (0, 0, 0):
+                    raise ValueError("APCC SQLite WAL checkpoint is incomplete")
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+            if Path(f"{temporary}-wal").exists() or Path(f"{temporary}-shm").exists():
+                raise ValueError("APCC SQLite WAL checkpoint left sidecar state")
+            validation = _connect_reader(temporary)
+            try:
+                _validate_schema(validation)
+            finally:
+                validation.close()
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            attempted_inode = temporary.stat()
+            os.link(temporary, path)
+            try:
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except Exception:
+                try:
+                    published_inode = path.stat()
+                    if (
+                        published_inode.st_dev == attempted_inode.st_dev
+                        and published_inode.st_ino == attempted_inode.st_ino
+                    ):
+                        path.unlink()
+                        retry_fd = os.open(path.parent, os.O_RDONLY)
+                        try:
+                            os.fsync(retry_fd)
+                        except Exception:
+                            pass
+                        finally:
+                            os.close(retry_fd)
+                except FileNotFoundError:
+                    pass
+                raise
+        finally:
+            for created in (
+                temporary,
+                Path(f"{temporary}-wal"),
+                Path(f"{temporary}-shm"),
+            ):
+                try:
+                    created.unlink()
+                except FileNotFoundError:
+                    pass
+
+    @classmethod
+    def open(
+        cls, path: Path, config: APCCAuthorityConfig, runtime: AuthorityRuntime
+    ) -> SQLiteAuthorityStore:
+        return cls._open(path, config, runtime, None, gcb_attached=False)
+
+    @classmethod
+    def _open_with_probe(
+        cls,
+        path: Path,
+        config: APCCAuthorityConfig,
+        runtime: AuthorityRuntime,
+        probe: _FaultProbe,
+    ) -> SQLiteAuthorityStore:
+        return cls._open(path, config, runtime, probe, gcb_attached=False)
+
+    @classmethod
+    def _open_gcb(
+        cls,
+        path: Path,
+        config: APCCAuthorityConfig,
+        runtime: AuthorityRuntime,
+        *,
+        projection_fault: _GCBProjectionCheckpoint | None = None,
+    ) -> SQLiteAuthorityStore:
+        if projection_fault is not None and not isinstance(
+            projection_fault, _GCBProjectionCheckpoint
+        ):
+            raise TypeError("GCB projection fault must be a fixed checkpoint")
+        return cls._open(
+            path,
+            config,
+            runtime,
+            None,
+            gcb_attached=True,
+            projection_fault=projection_fault,
+        )
+
+    @classmethod
+    def _open(
+        cls,
+        path: Path,
+        config: APCCAuthorityConfig,
+        runtime: AuthorityRuntime,
+        probe: _FaultProbe | None,
+        *,
+        gcb_attached: bool,
+        projection_fault: _GCBProjectionCheckpoint | None = None,
+    ) -> SQLiteAuthorityStore:
+        reader = SQLiteAuthorityReader.open(path)
+        connection = _connect(path)
+        try:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key='config'"
+            ).fetchone()
+            if row is None or row[0] != _json(_config_object(config)):
+                raise ValueError(
+                    "APCC SQLite configuration does not match provisioned store"
+                )
+            gcb_tables = {
+                str(item[0])
+                for item in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            required_gcb_tables = {
+                "agents",
+                "decisions",
+                "nodes",
+                "outbox",
+                "receipt_evidence",
+                "staged_artifacts",
+                "store_seal",
+                "workflows",
+            }
+            has_gcb_marker = required_gcb_tables.issubset(gcb_tables)
+            if gcb_attached and not required_gcb_tables.issubset(gcb_tables):
+                raise ValueError("GCB projection schema is incomplete")
+            if not gcb_attached and has_gcb_marker:
+                raise ValueError(
+                    "GCB-attached APCC store requires typed governance bootstrap"
+                )
+        finally:
+            connection.close()
+        if reader.authority_store_id != config.authority_store_id:
+            raise ValueError("APCC authority store identity mismatch")
+        for role, binding in (
+            (AuthoritySigningRole.COMMIT, config.commit_trust),
+            (AuthoritySigningRole.STATUS, config.status_trust),
+        ):
+            if (
+                bytes(runtime.key_provider.public_key(role, binding.key_id))
+                != binding.public_key
+            ):
+                raise ValueError(
+                    "APCC runtime signer does not match public configuration"
+                )
+        store = object.__new__(cls)
+        _AuthorityStoreCore.__init__(store, config, runtime)
+        store.database_path = Path(path)
+        store.authority_store_id = config.authority_store_id
+        store._probe = probe
+        store._gcb_attached = gcb_attached
+        store._gcb_projection_fault = projection_fault
+        store._gcb_projection_fault_fired = False
+        return store
+
+    def atomic_commit(self, request: AtomicCommitRequest) -> CommitResult:
+        if self._gcb_attached:
+            if type(request) is not _GCBAtomicCommitRequest:
+                raise _GCBProjectionDenied("unprojected_gcb_commit_denied")
+            return self._commit(
+                request,
+                supersede_old=None,
+                projection_plan=request._gcb_projection_plan,
+            )
+        if type(request) is _GCBAtomicCommitRequest:
+            raise _GCBProjectionDenied("gcb_projection_requires_attached_store")
+        return self._commit(request, supersede_old=None, projection_plan=None)
+
+    def _connection(self) -> sqlite3.Connection:
+        return _connect_reader(self.database_path)
+
+    @contextmanager
+    def _read_transaction(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _hit(self, point: str) -> None:
+        if self._probe is not None:
+            self._probe.hit(point)
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        connection = _connect(self.database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _run_projection(
+        self,
+        connection: _AuthorityConnection,
+        request: AtomicCommitRequest,
+        result: CommitResult,
+        plan: _GCBProjectionPlan | None,
+    ) -> None:
+        if plan is None:
+            if self._gcb_attached:
+                raise _GCBProjectionDenied("unprojected_gcb_commit_denied")
+            return
+        if not self._gcb_attached:
+            raise _GCBProjectionDenied("gcb_projection_requires_attached_store")
+        if not isinstance(connection, sqlite3.Connection):
+            raise TypeError("SQLite APCC projection requires a SQLite transaction")
+        validated = _validate_gcb_projection_plan(
+            connection, self._config, self._runtime.clock, request, plan
+        )
+        self._gcb_checkpoint(_GCBProjectionCheckpoint.BEFORE_LEGACY_WRITE)
+        changed = connection.execute(
+            "UPDATE nodes SET status='governed_committed',version=version+1,"
+            "commit_id=?,receipt_digest=? WHERE workflow_id=? AND node_id=? "
+            "AND status='result_produced' AND version=? AND attempt_id=? "
+            "AND claimed_by=? AND result_digest=? AND tainted=0",
+            (
+                plan.commit_id,
+                plan.receipt_digest,
+                plan.workflow_id,
+                plan.node_id,
+                validated.legacy_node_version,
+                plan.attempt_id,
+                plan.agent_id,
+                request.subject.output_digest,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise _GCBProjectionDenied("legacy_projection_state_conflict")
+        self._gcb_checkpoint(_GCBProjectionCheckpoint.AFTER_NODE_WRITE)
+        changed = connection.execute(
+            "UPDATE workflows SET state_version=? WHERE workflow_id=? AND state_version=?",
+            (
+                validated.next_workflow_state_version,
+                plan.workflow_id,
+                plan.expected_workflow_state_version,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise _GCBProjectionDenied("legacy_projection_state_conflict")
+        self._gcb_checkpoint(_GCBProjectionCheckpoint.AFTER_WORKFLOW_WRITE)
+        connection.execute(
+            "INSERT INTO decisions(commit_id,request_hash,outcome,reason,workflow_id,"
+            "node_id,state_version,nonce) VALUES (?,?,'committed','verified',?,?,?,?)",
+            (
+                plan.commit_id,
+                plan.request_hash,
+                plan.workflow_id,
+                plan.node_id,
+                validated.next_workflow_state_version,
+                plan.nonce,
+            ),
+        )
+        self._gcb_checkpoint(_GCBProjectionCheckpoint.AFTER_DECISION_WRITE)
+        connection.execute(
+            "INSERT INTO receipt_evidence(commit_id,receipt_material,receipt_digest,"
+            "verdict_material,verdict_digest) VALUES (?,?,?,?,?)",
+            (
+                plan.commit_id,
+                plan.receipt_material,
+                plan.receipt_digest,
+                plan.verdict_material,
+                plan.verdict_digest,
+            ),
+        )
+        self._gcb_checkpoint(_GCBProjectionCheckpoint.AFTER_EVIDENCE_WRITE)
+        connection.execute(
+            "INSERT INTO outbox(commit_id,workflow_id,node_id,artifact_json) "
+            "VALUES (?,?,?,?)",
+            (
+                plan.commit_id,
+                plan.workflow_id,
+                plan.node_id,
+                validated.artifact_json,
+            ),
+        )
+        self._gcb_checkpoint(_GCBProjectionCheckpoint.AFTER_OUTBOX_WRITE)
+        unlocked: list[tuple[str, int]] = []
+        children = connection.execute(
+            "SELECT node_id,version,predecessors FROM nodes "
+            "WHERE workflow_id=? AND status='blocked'",
+            (plan.workflow_id,),
+        ).fetchall()
+        for child_id_value, child_version_value, predecessors_json in children:
+            child_id = str(child_id_value)
+            predecessors = _gcb_string_list(
+                json.loads(str(predecessors_json)), label="predecessors"
+            )
+            if plan.node_id not in predecessors or _gcb_revoked_closure(
+                connection, plan.workflow_id, child_id
+            ):
+                continue
+            predecessor_states = [
+                connection.execute(
+                    "SELECT status,commit_id FROM nodes "
+                    "WHERE workflow_id=? AND node_id=?",
+                    (plan.workflow_id, predecessor_id),
+                ).fetchone()
+                for predecessor_id in predecessors
+            ]
+            if not all(
+                state is not None
+                and state[0] == "governed_committed"
+                and isinstance(state[1], str)
+                and bool(state[1])
+                for state in predecessor_states
+            ):
+                continue
+            child_version = _gcb_exact_int(
+                child_version_value, label="child_node_version"
+            )
+            changed = connection.execute(
+                "UPDATE nodes SET status='ready',version=version+1 "
+                "WHERE workflow_id=? AND node_id=? AND status='blocked' AND version=?",
+                (plan.workflow_id, child_id, child_version),
+            ).rowcount
+            if changed != 1:
+                raise _GCBProjectionDenied("legacy_projection_state_conflict")
+            unlocked.append((child_id, child_version + 1))
+        self._gcb_checkpoint(_GCBProjectionCheckpoint.AFTER_CHILD_UNLOCK)
+        _validate_semantic_integrity(connection, self._config)
+        _attest_gcb_projection(
+            connection, request, result, plan, validated, tuple(unlocked)
+        )
+        self._gcb_checkpoint(_GCBProjectionCheckpoint.AFTER_ATTESTATION)
+
+    def _gcb_checkpoint(self, checkpoint: _GCBProjectionCheckpoint) -> None:
+        if (
+            self._gcb_projection_fault is checkpoint
+            and not self._gcb_projection_fault_fired
+        ):
+            self._gcb_projection_fault_fired = True
+            raise _GCBProjectionFault(checkpoint.value)
 
     def recover_outbox(self, request: OutboxRecoveryRequest) -> OutboxRecoveryResult:
         maximum = _canonical_positive_decimal(request.max_items, maximum=1000)
@@ -2079,43 +3154,6 @@ class SQLiteAuthorityStore(SQLiteAuthorityReader):
         finally:
             connection.close()
         return OutboxRecoveryResult(str(len(delivered_ids)), str(pending), audit)
-
-    def _next_sequence(self, connection: sqlite3.Connection) -> str:
-        row = connection.execute(
-            "SELECT COALESCE(MAX(sequence), 0) FROM certificates"
-        ).fetchone()
-        sequence = int(row[0]) + 1
-        if sequence > _MAX_SAFE_INTEGER:
-            raise ValueError(FailureCode.SIZE_LIMIT_EXCEEDED.value)
-        return str(sequence)
-
-    def _append_trust(
-        self,
-        connection: sqlite3.Connection,
-        kind: str,
-        subject: str,
-        audit_event_id: str,
-    ) -> tuple[str, str]:
-        previous = connection.execute(
-            "SELECT sequence, entry_digest FROM trust_log ORDER BY sequence DESC LIMIT 1"
-        ).fetchone()
-        sequence = int(previous[0]) + 1 if previous else 1
-        prior = previous[1] if previous else sha256_digest(b"APCC-1/trust-log/genesis")
-        entry_json = _json(
-            {
-                "sequence": str(sequence),
-                "prior_digest": prior,
-                "kind": kind,
-                "subject": subject,
-                "audit_event_id": audit_event_id,
-            }
-        )
-        head = sha256_digest(entry_json.encode("utf-8"))
-        connection.execute(
-            "INSERT INTO trust_log(sequence,audit_event_id,prior_digest,entry_digest,entry_json) VALUES (?, ?, ?, ?, ?)",
-            (sequence, audit_event_id, prior, head, entry_json),
-        )
-        return str(sequence), head
 
 
 _SCHEMA_STATEMENTS = (
@@ -2313,7 +3351,7 @@ def _validate_schema(connection: sqlite3.Connection) -> str:
 
 
 def _validate_semantic_integrity(
-    connection: sqlite3.Connection, config: APCCAuthorityConfig
+    connection: _AuthorityConnection, config: APCCAuthorityConfig
 ) -> None:
     invalid = ValueError("APCC SQLite store semantic validation failed")
     certificates: dict[str, CommitCertificate] = {}
@@ -2335,15 +3373,17 @@ def _validate_semantic_integrity(
         ):
             raise invalid
         try:
-            detached = decode_envelope(bytes(envelope))
+            payload_bytes = _row_bytes(payload)
+            envelope_bytes = _row_bytes(envelope)
+            detached = decode_envelope(envelope_bytes)
             if (
-                detached.payload != bytes(payload)
+                detached.payload != payload_bytes
                 or detached.payload_sha256 != digest
-                or sha256_digest(bytes(payload)) != digest
+                or sha256_digest(payload_bytes) != digest
             ):
                 raise invalid
-            certificate = decode_certificate(bytes(payload))
-            historical = verify_historical(bytes(envelope), trust=_trust(config))
+            certificate = decode_certificate(payload_bytes)
+            historical = verify_historical(envelope_bytes, trust=_trust(config))
             if not historical.ok or historical.certificate != certificate:
                 raise invalid
         except Exception as error:
@@ -2363,7 +3403,7 @@ def _validate_semantic_integrity(
     ):
         if digest not in certificates:
             raise invalid
-        current = CertificateDisposition(disposition)
+        current = CertificateDisposition(_row_text(disposition))
         prior = latest.get(str(digest))
         if (event_sequence, current, prior) == (
             1,
@@ -2474,7 +3514,9 @@ def _validate_semantic_integrity(
                 or proposal_json is not None
             ):
                 raise invalid
-        elif result is None or sha256_digest(bytes(result)) != subject.output_digest:
+        elif (
+            result is None or sha256_digest(_row_bytes(result)) != subject.output_digest
+        ):
             raise invalid
         if state in {
             CandidateLifecycle.EVIDENCE_ASSEMBLED,
@@ -2525,11 +3567,11 @@ def _validate_semantic_integrity(
         elif state is CandidateLifecycle.RESULT_STAGED:
             if audit_event_id != _audit_id(
                 "stage",
-                workflow,
-                node,
-                attempt,
+                _row_text(workflow),
+                _row_text(node),
+                _row_text(attempt),
                 subject.output_digest,
-                expected_version,
+                _row_text(expected_version),
             ):
                 raise invalid
         elif proposal_digest is not None or proposal_json is not None:
@@ -2552,6 +3594,7 @@ def _validate_semantic_integrity(
         1,
     ):
         sequence, audit_id, prior_digest, entry_digest, entry_json = row
+        entry_json_text = _row_text(entry_json)
         if (
             not isinstance(sequence, int)
             or sequence != expected
@@ -2561,20 +3604,20 @@ def _validate_semantic_integrity(
         ):
             raise invalid
         try:
-            entry = _loads(entry_json)
+            entry = _loads(entry_json_text)
         except Exception as error:
             raise invalid from error
         if (
             not isinstance(entry, dict)
             or set(entry)
             != {"sequence", "prior_digest", "kind", "subject", "audit_event_id"}
-            or entry_json != _json(entry)
+            or entry_json_text != _json(entry)
             or entry.get("sequence") != str(sequence)
             or entry.get("prior_digest") != trust_prior
             or entry.get("audit_event_id") != audit_id
             or entry.get("kind") not in {"commit", "control"}
             or not isinstance(entry.get("subject"), str)
-            or sha256_digest(entry_json.encode("utf-8")) != entry_digest
+            or sha256_digest(entry_json_text.encode("utf-8")) != entry_digest
         ):
             raise invalid
         trust_by_sequence[sequence] = (
@@ -2782,9 +3825,13 @@ def _validate_semantic_integrity(
     superseded_new: set[str] = set()
     outgoing: dict[str, str] = {}
     incoming: dict[str, str] = {}
-    for edge_id, old_digest, new_digest, nonce in connection.execute(
+    for edge_row in connection.execute(
         "SELECT edge_id,old_digest,new_digest,nonce FROM supersession_edges"
     ):
+        edge_id = _row_text(edge_row[0])
+        old_digest = _row_text(edge_row[1])
+        new_digest = _row_text(edge_row[2])
+        nonce = _row_text(edge_row[3])
         old = certificates.get(str(old_digest))
         new = certificates.get(str(new_digest))
         if old is None or new is None:
@@ -2794,7 +3841,7 @@ def _validate_semantic_integrity(
             audit_object = _loads(audits[decision[2]]) if decision is not None else None
         except Exception as error:
             raise invalid from error
-        operation = commit_index[new.decision.commit_id]
+        supersession_operation = commit_index[new.decision.commit_id]
         if (
             edge_id != _audit_id("replace", str(old_digest), str(new_digest))
             or nonce != new.decision.nonce
@@ -2809,7 +3856,7 @@ def _validate_semantic_integrity(
             }
             or int(new.bindings.committed_node_version)
             != int(old.bindings.committed_node_version) + 1
-            or operation[3] != old_digest
+            or supersession_operation[3] != old_digest
             or not isinstance(audit_object, dict)
             or audit_object.get("old_certificate_digest") != old_digest
             or str(old_digest) in outgoing
@@ -2836,73 +3883,76 @@ def _validate_semantic_integrity(
     for row in connection.execute(
         "SELECT operation_id,scope,workflow_id,target_id,generation,claimed_generation,reason,audit_event_id,payload,payload_digest FROM control_events"
     ):
-        (
-            operation,
-            scope,
-            workflow,
-            target,
-            generation,
-            claimed_generation,
-            reason,
-            audit,
-            payload,
-            digest,
-        ) = row
-        payload_bytes = bytes(payload)
+        control_operation = _row_text(row[0])
+        control_scope = _row_text(row[1])
+        control_workflow = _row_text(row[2])
+        control_target = _row_text(row[3])
+        control_generation = _row_optional_text(row[4])
+        control_claimed_generation = _row_text(row[5])
+        control_reason = _row_text(row[6])
+        control_audit = _row_text(row[7])
+        payload_bytes = _row_bytes(row[8])
+        control_digest = _row_text(row[9])
         control_object = {
-            "scope": scope,
-            "workflow_id": workflow,
-            "target_id": target,
-            "generation": generation,
-            "claimed_generation": claimed_generation,
-            "reason": reason,
-            "audit_event_id": audit,
+            "scope": control_scope,
+            "workflow_id": control_workflow,
+            "target_id": control_target,
+            "generation": control_generation,
+            "claimed_generation": control_claimed_generation,
+            "reason": control_reason,
+            "audit_event_id": control_audit,
         }
         expected_audit = _audit_id(
             "revoke",
-            str(scope),
-            str(workflow),
-            str(target),
-            str(claimed_generation),
+            control_scope,
+            control_workflow,
+            control_target,
+            control_claimed_generation,
         )
         expected_audit_object = {
             "kind": "revoked",
-            "subject": target,
-            "scope": scope,
-            "workflow_id": workflow,
-            **({"generation": generation} if generation is not None else {}),
+            "subject": control_target,
+            "scope": control_scope,
+            "workflow_id": control_workflow,
+            **(
+                {"generation": control_generation}
+                if control_generation is not None
+                else {}
+            ),
         }
         if (
-            operation != expected_audit
-            or audit != expected_audit
-            or audits.get(str(audit)) != _json(expected_audit_object)
+            control_operation != expected_audit
+            or control_audit != expected_audit
+            or audits.get(control_audit) != _json(expected_audit_object)
             or payload_bytes != _json(control_object).encode("utf-8")
-            or sha256_digest(payload_bytes) != digest
+            or sha256_digest(payload_bytes) != control_digest
         ):
             raise invalid
-        if scope == RevocationScope.CERTIFICATE.value:
+        if control_scope == RevocationScope.CERTIFICATE.value:
             if (
-                generation is not None
-                or latest.get(str(target)) is not CertificateDisposition.REVOKED
+                control_generation is not None
+                or latest.get(control_target) is not CertificateDisposition.REVOKED
             ):
                 raise invalid
         else:
             try:
                 canonical = str(
-                    _canonical_positive_decimal(generation, maximum=_MAX_SAFE_INTEGER)
+                    _canonical_positive_decimal(
+                        control_generation, maximum=_MAX_SAFE_INTEGER
+                    )
                 )
             except ValueError as error:
                 raise invalid from error
-            if canonical != generation:
+            if canonical != control_generation:
                 raise invalid
-        controls[str(operation)] = (
-            str(scope),
-            str(workflow),
-            str(target),
-            generation,
-            str(audit),
+        controls[control_operation] = (
+            control_scope,
+            control_workflow,
+            control_target,
+            control_generation,
+            control_audit,
             payload_bytes,
-            str(digest),
+            control_digest,
         )
 
     expected_actor: dict[tuple[str, str], int] = {}
@@ -2925,13 +3975,13 @@ def _validate_semantic_integrity(
                 expected_workflow.get(workflow, 0), int(generation)
             )
     actual_actor = {
-        (str(workflow), str(actor)): int(generation)
+        (str(workflow), str(actor)): _row_int(generation)
         for workflow, actor, generation in connection.execute(
             "SELECT workflow_id,actor_id,generation FROM actor_revocations"
         )
     }
     actual_workflow = {
-        str(workflow): int(generation)
+        str(workflow): _row_int(generation)
         for workflow, generation in connection.execute(
             "SELECT workflow_id,generation FROM workflow_revocations"
         )
@@ -2944,80 +3994,82 @@ def _validate_semantic_integrity(
     for row in connection.execute(
         "SELECT event_sequence,event_id,event_kind,operation_id,event_json,audit_event_id,trust_sequence,state,lease_token,lease_claimed_ms,lease_until_ms,delivered FROM apcc_outbox"
     ):
-        (
-            sequence,
-            event_id,
-            kind,
-            operation,
-            payload,
-            audit,
-            trust_sequence,
-            state,
-            token,
-            claimed,
-            lease,
-            delivered,
-        ) = row
-        if sequence != trust_sequence or trust_by_sequence.get(int(sequence)) is None:
+        outbox_sequence = _row_int(row[0])
+        outbox_event_id = _row_text(row[1])
+        outbox_kind = _row_text(row[2])
+        outbox_operation = _row_text(row[3])
+        outbox_payload = _row_bytes(row[4])
+        outbox_audit = _row_text(row[5])
+        outbox_trust_sequence = _row_int(row[6])
+        outbox_state = _row_text(row[7])
+        outbox_token = _row_optional_text(row[8])
+        outbox_claimed = None if row[9] is None else _row_int(row[9])
+        outbox_lease = None if row[10] is None else _row_int(row[10])
+        outbox_delivered = _row_int(row[11])
+        if (
+            outbox_sequence != outbox_trust_sequence
+            or trust_by_sequence.get(outbox_sequence) is None
+        ):
             raise invalid
-        trust_kind, trust_subject, trust_audit = trust_by_sequence[int(sequence)]
-        if audit != trust_audit:
+        trust_kind, trust_subject, trust_audit = trust_by_sequence[outbox_sequence]
+        if outbox_audit != trust_audit:
             raise invalid
-        if kind == "COMMIT":
-            decision = decisions.get(str(operation))
+        if outbox_kind == "COMMIT":
+            decision = decisions.get(outbox_operation)
             if decision is None or decision[0] != RequestOutcome.COMMITTED.value:
                 raise invalid
             digest = str(decision[3])
             certificate = certificates[digest]
             expected_payload = encode_certificate(certificate)
             if (
-                audit != decision[2]
+                outbox_audit != decision[2]
                 or trust_kind != "commit"
                 or trust_subject != digest
-                or event_id != _audit_id("outbox", "COMMIT", str(operation), digest)
+                or outbox_event_id
+                != _audit_id("outbox", "COMMIT", outbox_operation, digest)
             ):
                 raise invalid
-            seen_commits.add(str(operation))
+            seen_commits.add(outbox_operation)
         else:
-            control = controls.get(str(operation))
+            control = controls.get(outbox_operation)
             if control is None:
                 raise invalid
             expected_payload = control[5]
             if (
-                audit != control[4]
+                outbox_audit != control[4]
                 or trust_kind != "control"
-                or trust_subject != operation
-                or event_id
-                != _audit_id("outbox", "CONTROL", str(operation), control[6])
+                or trust_subject != outbox_operation
+                or outbox_event_id
+                != _audit_id("outbox", "CONTROL", outbox_operation, control[6])
             ):
                 raise invalid
-            seen_controls.add(str(operation))
-        if bytes(payload) != expected_payload or not (
+            seen_controls.add(outbox_operation)
+        if outbox_payload != expected_payload or not (
             (
-                state == "PENDING"
-                and delivered == 0
-                and token is None
-                and claimed is None
-                and lease is None
+                outbox_state == "PENDING"
+                and outbox_delivered == 0
+                and outbox_token is None
+                and outbox_claimed is None
+                and outbox_lease is None
             )
             or (
-                state == "CLAIMED"
-                and delivered == 0
-                and token is not None
-                and claimed is not None
-                and lease is not None
-                and lease >= claimed
+                outbox_state == "CLAIMED"
+                and outbox_delivered == 0
+                and outbox_token is not None
+                and outbox_claimed is not None
+                and outbox_lease is not None
+                and outbox_lease >= outbox_claimed
             )
             or (
-                state == "DELIVERED"
-                and delivered == 1
-                and token is None
-                and claimed is None
-                and lease is None
+                outbox_state == "DELIVERED"
+                and outbox_delivered == 1
+                and outbox_token is None
+                and outbox_claimed is None
+                and outbox_lease is None
             )
         ):
             raise invalid
-        for timestamp in (claimed, lease):
+        for timestamp in (outbox_claimed, outbox_lease):
             if timestamp is not None and (
                 isinstance(timestamp, bool)
                 or not isinstance(timestamp, int)
@@ -3112,7 +4164,7 @@ def _schema(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
-def _insert_context(connection: sqlite3.Connection, context: CommitContext) -> None:
+def _insert_context(connection: _AuthorityConnection, context: CommitContext) -> None:
     connection.execute(
         "INSERT INTO logical_nodes VALUES (?, ?, ?, ?)",
         (
@@ -3246,7 +4298,7 @@ def _certificate_shell(
 
 
 def _replay(
-    connection: sqlite3.Connection, commit_id: str, request_digest: str
+    connection: _AuthorityConnection, commit_id: str, request_digest: str
 ) -> CommitResult:
     row = connection.execute(
         "SELECT request_digest FROM commit_index WHERE commit_id=?", (commit_id,)
@@ -3280,7 +4332,7 @@ def _replay(
             None,
             None,
             None,
-            conflict[0]
+            _row_text(conflict[0])
             if conflict is not None
             else _audit_id("conflict", commit_id, request_digest),
         )
@@ -3290,14 +4342,14 @@ def _replay(
     ).fetchone()
     if decision is None:
         raise ValueError("APCC commit index has no decision")
-    outcome = RequestOutcome(decision[0])
+    outcome = RequestOutcome(_row_text(decision[0]))
     if outcome is not RequestOutcome.COMMITTED:
         return CommitResult(
-            CommitDecision(commit_id, outcome, FailureCode(decision[1])),
+            CommitDecision(commit_id, outcome, FailureCode(_row_text(decision[1]))),
             None,
             None,
             None,
-            decision[2],
+            _row_text(decision[2]),
         )
     certificate = connection.execute(
         "SELECT certificate_json, envelope, certificate_digest FROM certificates WHERE commit_id=?",
@@ -3306,16 +4358,16 @@ def _replay(
     if certificate is None:
         raise ValueError("committed APCC decision has no certificate")
     return CommitResult(
-        CommitDecision(commit_id, outcome, decision[1]),
-        bytes(certificate[0]),
-        bytes(certificate[1]),
-        certificate[2],
-        decision[2],
+        CommitDecision(commit_id, outcome, _row_text(decision[1])),
+        _row_bytes(certificate[0]),
+        _row_bytes(certificate[1]),
+        _row_optional_text(certificate[2]),
+        _row_text(decision[2]),
     )
 
 
 def _supersession_replay(
-    connection: sqlite3.Connection, commit_id: str, request_digest: str
+    connection: _AuthorityConnection, commit_id: str, request_digest: str
 ) -> SupersessionResult:
     conflict = connection.execute(
         "SELECT audit_event_id FROM commit_conflicts WHERE commit_id=? AND conflicting_request_digest=?",
@@ -3331,19 +4383,19 @@ def _supersession_replay(
             None,
             None,
             None,
-            conflict[0],
+            _row_text(conflict[0]),
         )
     else:
+        indexed = connection.execute(
+            "SELECT request_digest FROM commit_index WHERE commit_id=?",
+            (commit_id,),
+        ).fetchone()
+        if indexed is None:
+            raise ValueError("APCC supersession has no durable commit identity")
         result = _replay(
             connection,
             commit_id,
-            cast(
-                str,
-                connection.execute(
-                    "SELECT request_digest FROM commit_index WHERE commit_id=?",
-                    (commit_id,),
-                ).fetchone()[0],
-            ),
+            _row_text(indexed[0]),
         )
     audit = connection.execute(
         "SELECT event_json FROM audit_events WHERE audit_event_id=?",
@@ -3351,7 +4403,9 @@ def _supersession_replay(
     ).fetchone()
     if audit is None:
         raise ValueError("APCC supersession has no durable audit identity")
-    event = cast("dict[str, object]", _loads(audit[0]))
+    event = _loads(_row_text(audit[0]))
+    if not isinstance(event, dict):
+        raise ValueError("APCC supersession audit payload is invalid")
     old = event.get("old_certificate_digest")
     if not isinstance(old, str):
         raise ValueError("APCC result is not a supersession")
@@ -3371,7 +4425,11 @@ def _supersession_replay(
     if edge is None or outbox is None:
         raise ValueError("committed supersession has incomplete durable identities")
     return SupersessionCommitted(
-        result, old, result.certificate_digest, edge[0], outbox[0]
+        result,
+        old,
+        result.certificate_digest,
+        _row_text(edge[0]),
+        _row_text(outbox[0]),
     )
 
 

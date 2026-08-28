@@ -19,12 +19,18 @@ from constitutional_swarm.dna import AgentDNA, constitutional_dna
 from constitutional_swarm.execution import ExecutionStatus, WorkReceipt
 from constitutional_swarm.governed_commit import (
     GovernanceBypassDenied,
-    TrustedGovernanceBootstrap,
     sign_attempt_authorization,
     sign_governed_receipt,
 )
 from constitutional_swarm.mesh import ConstitutionalMesh
 from constitutional_swarm.swarm import NodeStatus, SwarmExecutor, TaskDAG, TaskNode
+from tests.gcb_apcc_support import (
+    InProcessExecutionClientHarness,
+    TrustedAuthorityLifecycleHarness,
+    compose_test_executor,
+    provision_executor_workflow,
+    typed_bootstrap,
+)
 
 
 def _governed_submit(executor, boundary, private_key, node_id, artifact) -> None:
@@ -33,6 +39,7 @@ def _governed_submit(executor, boundary, private_key, node_id, artifact) -> None
         boundary.build_request(sign_governed_receipt(payload, private_key))
     )
     assert decision.reason == "verified"
+    executor._test_authority_lifecycle.dispatch_after_commit()
 
 
 def _governed_claim(executor, private_key, node_id, agent_id) -> None:
@@ -565,11 +572,6 @@ class TestSwarmExecutor:
         )
 
         store = ArtifactStore()
-        boundary = TrustedGovernanceBootstrap(
-            verifier_key=Ed25519PrivateKey.generate()
-        ).provision(tmp_path / "authority.sqlite3")
-        executor = SwarmExecutor(registry, store, boundary, policy_version="policy-v1")
-
         # Build DAG: A → B,C → D
         dag = TaskDAG(goal="Build feature")
         dag = dag.add_node(TaskNode(node_id="A", title="Design", domain="architecture"))
@@ -583,11 +585,23 @@ class TestSwarmExecutor:
         )
         dag = dag.add_node(
             TaskNode(
-                node_id="D", title="Integration", domain="qa", depends_on=("B", "C")
+                node_id="D", title="Integration", domain="qa", depends_on=("C", "B")
             )
         )
-        executor.load_dag(dag)
         keys = {agent_id: Ed25519PrivateKey.generate() for agent_id in registry.agents}
+        bootstrap = typed_bootstrap(policy_versions=(("1", 1),), producers=keys)
+        boundary = bootstrap.provision(tmp_path / "authority.sqlite3")
+        provision_executor_workflow(boundary, dag, policy_version="1")
+        executor = compose_test_executor(
+            registry,
+            store,
+            InProcessExecutionClientHarness(boundary),
+            policy_version="1",
+        )
+        executor._test_authority_lifecycle = TrustedAuthorityLifecycleHarness(
+            boundary, dag.dag_id, store
+        )
+        executor.load_dag(dag)
         for agent_id, private_key in keys.items():
             boundary.register_agent(
                 workflow_id=dag.dag_id,

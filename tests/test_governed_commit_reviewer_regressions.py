@@ -7,7 +7,6 @@ from dataclasses import replace
 import sqlite3
 import threading
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from constitutional_swarm.artifact import Artifact, ArtifactEvent, ArtifactStore
@@ -22,8 +21,15 @@ from constitutional_swarm.governed_commit import (
     CommitOutcome,
     GovernanceBypassDenied,
     GovernedCommitBoundary,
-    TrustedGovernanceBootstrap,
+    _GCBFaultCheckpoint,
+    _GCBInjectedFault,
     sign_attempt_authorization,
+)
+from tests.gcb_apcc_support import (
+    canonical_nonce,
+    configure_test_seams,
+    producer_key,
+    typed_bootstrap,
 )
 
 
@@ -34,21 +40,20 @@ def _authorize(port, key, workflow_id: str, node_id: str, attempt_id: str):
             node_id=node_id,
             attempt_id=attempt_id,
             agent_id="agent",
-            nonce=f"claim:{workflow_id}:{node_id}:{attempt_id}",
+            nonce=canonical_nonce(f"claim:{workflow_id}:{node_id}:{attempt_id}"),
         ),
         key,
     )
 
 
 def _provision(path):
-    verifier_key = Ed25519PrivateKey.generate()
-    bootstrap = TrustedGovernanceBootstrap(
-        verifier_key=verifier_key,
+    bootstrap = typed_bootstrap(
         policy_id="review-policy",
+        policy_versions=(("1", 1), ("2", 2)),
     )
     admin = bootstrap.provision(path)
-    admin.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="p1")
-    agent_key = Ed25519PrivateKey.generate()
+    admin.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="1")
+    agent_key = producer_key()
     admin.register_agent(
         workflow_id="wf",
         agent_id="agent",
@@ -78,9 +83,10 @@ def test_existing_authority_rejects_replacement_or_truthy_verifier(tmp_path) -> 
     bootstrap, _admin, _port, _agent_key = _provision(tmp_path / "sealed.sqlite3")
 
     with pytest.raises(GovernanceBypassDenied, match="authority_store_already_exists"):
-        TrustedGovernanceBootstrap(
-            verifier_key=Ed25519PrivateKey.generate(),
+        typed_bootstrap(
             policy_id="review-policy",
+            policy_versions=(("1", 1),),
+            authority_store_id="replacement-store",
         ).provision(tmp_path / "sealed.sqlite3")
 
     with pytest.raises(GovernanceBypassDenied, match="sealed store"):
@@ -92,7 +98,7 @@ def test_existing_authority_rejects_replacement_or_truthy_verifier(tmp_path) -> 
         attempt_id="a1",
         agent_id="agent",
         commit_id="c1",
-        nonce="n1",
+        nonce=canonical_nonce("review-existing-authority"),
     )
     receipt = bootstrap.sign_agent_receipt(payload, _agent_key)
     assert isinstance(bootstrap.verdict_for(receipt), AuthoritativeVerdict)
@@ -114,12 +120,10 @@ def test_agent_commit_port_cannot_administer_authority(tmp_path) -> None:
 
 
 def test_claim_and_stage_require_agent_proof_of_possession(tmp_path) -> None:
-    bootstrap = TrustedGovernanceBootstrap(
-        verifier_key=Ed25519PrivateKey.generate(), policy_id="attempt-proof"
-    )
+    bootstrap = typed_bootstrap(policy_id="attempt-proof", policy_versions=(("1", 1),))
     admin = bootstrap.provision(tmp_path / "attempt-proof.sqlite3")
-    admin.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="p")
-    key = Ed25519PrivateKey.generate()
+    admin.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="1")
+    key = producer_key()
     admin.register_agent(
         workflow_id="wf", agent_id="agent", public_key=key.public_key(), capabilities=()
     )
@@ -169,9 +173,9 @@ def test_signed_expected_node_version_fences_reviewer_race(tmp_path) -> None:
         attempt_id="a1",
         agent_id="agent",
         commit_id="c1",
-        nonce="n1",
+        nonce=canonical_nonce("version-fence"),
     )
-    assert payload.expected_node_state_version == 2
+    assert payload.expected_node_state_version == 0
 
     # A trusted authority mutation changes the node version after signing.
     admin.fence_node_for_review(workflow_id="wf", node_id="root")
@@ -202,13 +206,10 @@ def test_governed_projection_is_monotonic_namespaced_and_fail_closed(tmp_path) -
 
 
 def test_arbitrary_truthy_authoritative_verdict_is_denied(tmp_path) -> None:
-    bootstrap = TrustedGovernanceBootstrap(
-        verifier_key=Ed25519PrivateKey.generate(),
-        policy_id="typed",
-    )
+    bootstrap = typed_bootstrap(policy_id="typed", policy_versions=(("1", 1),))
     admin = bootstrap.provision(tmp_path / "truthy.sqlite3")
-    admin.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="p")
-    key = Ed25519PrivateKey.generate()
+    admin.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="1")
+    key = producer_key()
     admin.register_agent(
         workflow_id="wf", agent_id="agent", public_key=key.public_key(), capabilities=()
     )
@@ -234,7 +235,7 @@ def test_arbitrary_truthy_authoritative_verdict_is_denied(tmp_path) -> None:
         attempt_id="a",
         agent_id="agent",
         commit_id="c",
-        nonce="n",
+        nonce=canonical_nonce("truthy-verdict"),
     )
     receipt = bootstrap.sign_agent_receipt(payload, key)
     decision = port.commit(port.build_request(receipt, {"allow": True}))  # type: ignore[arg-type]
@@ -249,7 +250,7 @@ def test_expected_node_version_tampering_is_signature_covered(tmp_path) -> None:
         attempt_id="a1",
         agent_id="agent",
         commit_id="c1",
-        nonce="n1",
+        nonce=canonical_nonce("expected-version-tamper"),
     )
     receipt = bootstrap.sign_agent_receipt(payload, agent_key)
     tampered = replace(
@@ -294,7 +295,7 @@ def test_each_verdict_context_binding_rejects_one_field_tamper(
         attempt_id="a1",
         agent_id="agent",
         commit_id="c1",
-        nonce="n1",
+        nonce=canonical_nonce(f"verdict-tamper:{field}"),
     )
     receipt = bootstrap.sign_agent_receipt(payload, agent_key)
     verdict = replace(bootstrap.verdict_for(receipt), **{field: value})
@@ -312,12 +313,12 @@ def test_recovery_reverifies_persisted_receipt_evidence(tmp_path) -> None:
         attempt_id="a1",
         agent_id="agent",
         commit_id="c1",
-        nonce="n1",
+        nonce=canonical_nonce("recovery-evidence"),
     )
     receipt = bootstrap.sign_agent_receipt(payload, agent_key)
     decision = port.commit(port.build_request(receipt, bootstrap.verdict_for(receipt)))
     assert decision.outcome is CommitOutcome.COMMITTED
-    admin.attach_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="p1")
+    admin.attach_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="1")
 
     with sqlite3.connect(path) as conn:
         conn.execute(
@@ -326,7 +327,7 @@ def test_recovery_reverifies_persisted_receipt_evidence(tmp_path) -> None:
     with pytest.raises(
         GovernanceBypassDenied, match="recovery_receipt_digest_mismatch"
     ):
-        GovernedCommitBoundary.open(path)
+        bootstrap.open_admin(path)
 
 
 def test_legacy_completed_requires_governed_revalidation() -> None:
@@ -350,20 +351,20 @@ def test_response_loss_after_sqlite_commit_is_idempotently_recoverable(
         attempt_id="a1",
         agent_id="agent",
         commit_id="c1",
-        nonce="n1",
+        nonce=canonical_nonce("response-loss"),
     )
     receipt = bootstrap.sign_agent_receipt(payload, agent_key)
     request = port.build_request(receipt, bootstrap.verdict_for(receipt))
 
-    def lose_response(point: str) -> None:
-        if point == "after_durable_commit":
-            raise RuntimeError("response lost")
-
-    crashing = bootstrap.open_admin(path, fault_injector=lose_response).commit_port
-    with pytest.raises(RuntimeError, match="response lost"):
+    crashing_admin = configure_test_seams(
+        bootstrap.open_admin(path),
+        fault_checkpoint=_GCBFaultCheckpoint.AFTER_DURABLE_COMMIT,
+    )
+    crashing = crashing_admin.commit_port
+    with pytest.raises(_GCBInjectedFault, match="^after_durable_commit$"):
         crashing.commit(request)
 
-    recovered = GovernedCommitBoundary.open(path)
+    recovered = bootstrap.open_admin(path).commit_port
     assert recovered.node_state("wf", "root").status == "governed_committed"
     retry = recovered.commit(request)
     assert retry.outcome is CommitOutcome.COMMITTED
@@ -382,11 +383,11 @@ def test_commit_competes_with_signed_control_transition_on_real_connections(
         attempt_id="a1",
         agent_id="agent",
         commit_id="c1",
-        nonce="n1",
+        nonce=canonical_nonce(f"control-race:{control}"),
     )
     receipt = bootstrap.sign_agent_receipt(payload, agent_key)
     request = port.build_request(receipt, bootstrap.verdict_for(receipt))
-    committing = GovernedCommitBoundary.open(path)
+    committing = bootstrap.open_admin(path).commit_port
     barrier = threading.Barrier(2)
 
     def do_commit():
@@ -396,7 +397,7 @@ def test_commit_competes_with_signed_control_transition_on_real_connections(
     def do_control():
         barrier.wait()
         if control == "policy":
-            return admin.update_policy(workflow_id="wf", policy_version="p2")
+            return admin.update_policy(workflow_id="wf", policy_version="2")
         return admin.revoke_agent(workflow_id="wf", agent_id="agent")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -428,15 +429,12 @@ def test_predecessor_generation_replacement_competes_atomically_with_commit(
     tmp_path,
 ) -> None:
     path = tmp_path / "generation-race.sqlite3"
-    verifier_key = Ed25519PrivateKey.generate()
-    bootstrap = TrustedGovernanceBootstrap(
-        verifier_key=verifier_key, policy_id="review-policy"
-    )
+    bootstrap = typed_bootstrap(policy_id="review-policy", policy_versions=(("1", 1),))
     admin = bootstrap.provision(path)
     admin.create_workflow(
-        workflow_id="wf", nodes={"root": (), "child": ("root",)}, policy_version="p1"
+        workflow_id="wf", nodes={"root": (), "child": ("root",)}, policy_version="1"
     )
-    agent_key = Ed25519PrivateKey.generate()
+    agent_key = producer_key()
     admin.register_agent(
         workflow_id="wf",
         agent_id="agent",
@@ -467,7 +465,7 @@ def test_predecessor_generation_replacement_competes_atomically_with_commit(
             attempt_id=attempt,
             agent_id="agent",
             commit_id=f"{node_id}-commit",
-            nonce=f"{node_id}-nonce",
+            nonce=canonical_nonce(f"generation:{node_id}"),
         )
         receipt = bootstrap.sign_agent_receipt(payload, agent_key)
         request = port.build_request(receipt, bootstrap.verdict_for(receipt))
@@ -477,7 +475,7 @@ def test_predecessor_generation_replacement_competes_atomically_with_commit(
             child_request = request
 
     barrier = threading.Barrier(2)
-    committing = GovernedCommitBoundary.open(path)
+    committing = bootstrap.open_admin(path).commit_port
 
     def do_commit():
         barrier.wait()
@@ -502,18 +500,16 @@ def test_predecessor_generation_replacement_competes_atomically_with_commit(
 
 
 def test_governed_artifact_reads_and_watchers_are_workflow_scoped(tmp_path) -> None:
-    bootstrap = TrustedGovernanceBootstrap(
-        verifier_key=Ed25519PrivateKey.generate(), policy_id="scoped"
-    )
+    bootstrap = typed_bootstrap(policy_id="scoped", policy_versions=(("1", 1),))
     admin = bootstrap.provision(tmp_path / "scoped.sqlite3")
-    key = Ed25519PrivateKey.generate()
+    key = producer_key()
     store = ArtifactStore()
     events_a: list[ArtifactEvent] = []
     events_b: list[ArtifactEvent] = []
 
     for workflow_id, content in (("wf-a", "a"), ("wf-b", "b")):
         admin.create_workflow(
-            workflow_id=workflow_id, nodes={"root": ()}, policy_version="p"
+            workflow_id=workflow_id, nodes={"root": ()}, policy_version="1"
         )
         admin.register_agent(
             workflow_id=workflow_id,
@@ -547,7 +543,7 @@ def test_governed_artifact_reads_and_watchers_are_workflow_scoped(tmp_path) -> N
             attempt_id="attempt",
             agent_id="agent",
             commit_id=f"commit-{workflow_id}",
-            nonce=f"nonce-{workflow_id}",
+            nonce=canonical_nonce(f"scoped:{workflow_id}"),
         )
         receipt = bootstrap.sign_agent_receipt(payload, key)
         assert (
@@ -588,7 +584,7 @@ def test_open_quarantines_schema_damage_without_repair(tmp_path, damage: str) ->
                 "CREATE TRIGGER forbidden AFTER UPDATE ON nodes BEGIN SELECT 1; END"
             )
     with pytest.raises(GovernanceBypassDenied, match="authority_schema_shape_mismatch"):
-        GovernedCommitBoundary.open(path)
+        _bootstrap.open_admin(path)
     with sqlite3.connect(path) as conn:
         names = {
             row[0]

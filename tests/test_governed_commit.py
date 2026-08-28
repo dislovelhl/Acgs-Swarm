@@ -9,7 +9,6 @@ from pathlib import Path
 import sqlite3
 import threading
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from constitutional_swarm.artifact import Artifact, ArtifactStore
@@ -17,16 +16,29 @@ from constitutional_swarm.governed_commit import (
     GCB_TLA_ACTION_MAP,
     CommitOutcome,
     CommitRequest,
-    GovernedCommitBoundary as RuntimeGovernedCommitBoundary,
     GovernedReceiptPayload,
     TrustedGovernanceBootstrap,
     VerdictDecision,
+    _GCBFaultCheckpoint,
+    _GCBInjectedFault,
     sign_attempt_authorization,
     sign_governed_receipt,
 )
+from constitutional_swarm.apcc.sqlite_store import _GCBProjectionCheckpoint
 from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.execution import ExecutionStatus
-from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
+from constitutional_swarm.swarm import TaskDAG, TaskNode
+from tests.gcb_apcc_support import (
+    InProcessExecutionClientHarness,
+    TrustedAuthorityLifecycleHarness,
+    canonical_nonce,
+    compose_test_executor,
+    configure_test_seams,
+    open_typed_admin,
+    producer_key,
+    provision_executor_workflow,
+    typed_bootstrap,
+)
 
 
 _TEST_BOOTSTRAPS: dict[str, TrustedGovernanceBootstrap] = {}
@@ -46,7 +58,7 @@ def _attempt_authorization(
         node_id=node_id,
         attempt_id=attempt_id,
         agent_id=agent_id,
-        nonce=f"claim:{attempt_id}",
+        nonce=canonical_nonce(f"claim:{attempt_id}"),
     )
     return sign_attempt_authorization(payload, private_key)
 
@@ -65,44 +77,60 @@ def _trusted_admin(
     path,
     *,
     default_verdict: VerdictDecision = VerdictDecision.ALLOW,
-    fault_injector=None,
+    policy_version: str = "1",
+    fault_checkpoint: _GCBFaultCheckpoint | None = None,
+    projection_checkpoint: _GCBProjectionCheckpoint | None = None,
     busy_timeout_ms=5_000,
 ):
     """Explicit trusted provisioning fixture for production GCB surfaces."""
     resolved = str(path)
     if resolved in _TEST_BOOTSTRAPS:
-        return _TEST_BOOTSTRAPS[resolved].open_admin(
+        return open_typed_admin(
+            _TEST_BOOTSTRAPS[resolved],
             path,
-            fault_injector=fault_injector,
+            fault_checkpoint=fault_checkpoint,
             busy_timeout_ms=busy_timeout_ms,
         )
     if Path(path).exists() and Path(path).stat().st_size > 0:
-        return RuntimeGovernedCommitBoundary.open(path, busy_timeout_ms=busy_timeout_ms)
-    bootstrap = TrustedGovernanceBootstrap(
-        verifier_key=Ed25519PrivateKey.generate(), default_verdict=default_verdict
-    )
+        bootstrap = typed_bootstrap(policy_versions=(("1", 1), ("2", 2)))
+        _TEST_BOOTSTRAPS[resolved] = bootstrap
+        return open_typed_admin(
+            bootstrap,
+            path,
+            fault_checkpoint=fault_checkpoint,
+            busy_timeout_ms=busy_timeout_ms,
+        )
+    bootstrap = typed_bootstrap(policy_versions=(("1", 1), ("2", 2)))
+    bootstrap.default_verdict = default_verdict
     _TEST_BOOTSTRAPS[resolved] = bootstrap
-    return bootstrap.provision(
-        path,
-        fault_injector=fault_injector,
+    admin = (
+        bootstrap._provision_with_projection_fault(
+            path, checkpoint=projection_checkpoint
+        )
+        if projection_checkpoint is not None
+        else bootstrap.provision(path)
+    )
+    return configure_test_seams(
+        admin,
+        fault_checkpoint=fault_checkpoint,
         busy_timeout_ms=busy_timeout_ms,
     )
 
 
 def _multiprocess_commit(path, request, start, results) -> None:
-    boundary = RuntimeGovernedCommitBoundary.open(path)
+    boundary = typed_bootstrap(policy_versions=(("1", 1), ("2", 2))).open_admin(path)
     start.wait()
     decision = boundary.commit(request)
     results.put((decision.outcome.value, decision.reason))
 
 
 def _configured_boundary(tmp_path):
-    private_key = Ed25519PrivateKey.generate()
+    private_key = producer_key()
     boundary = _trusted_admin(tmp_path / "authority.sqlite3")
     boundary.create_workflow(
         workflow_id="wf",
         nodes={"root": (), "child": ("root",)},
-        policy_version="policy-v1",
+        policy_version="1",
     )
     boundary.register_agent(
         workflow_id="wf",
@@ -149,7 +177,7 @@ def _request(boundary, private_key, *, commit_id="commit-1"):
         attempt_id="attempt-1",
         agent_id="agent",
         commit_id=commit_id,
-        nonce="nonce-1",
+        nonce=canonical_nonce("nonce-1"),
     )
     return boundary.build_request(sign_governed_receipt(payload, private_key))
 
@@ -276,12 +304,12 @@ def test_unique_commit_bindings_are_covered_by_the_signature(tmp_path, field) ->
 
 
 def test_claim_requires_registered_capability_and_current_revocation(tmp_path) -> None:
-    boundary = _trusted_admin(tmp_path / "claim.sqlite3")
-    private_key = Ed25519PrivateKey.generate()
+    boundary = _trusted_admin(tmp_path / "claim.sqlite3", policy_version="1")
+    private_key = producer_key()
     boundary.create_workflow(
         workflow_id="wf",
         nodes={"root": ()},
-        policy_version="p",
+        policy_version="1",
         required_capabilities={"root": ("deploy",)},
     )
     boundary.register_agent(
@@ -312,7 +340,7 @@ def test_claim_requires_registered_capability_and_current_revocation(tmp_path) -
             node_id="root",
             attempt_id="b",
             agent_id="agent",
-            nonce="revoked",
+            nonce=canonical_nonce("revoked"),
         )
 
 
@@ -325,7 +353,7 @@ def test_concurrent_double_commit_has_one_authoritative_winner(tmp_path) -> None
         attempt_id="attempt-1",
         agent_id="agent",
         commit_id="commit-b",
-        nonce="nonce-2",
+        nonce=canonical_nonce("nonce-2"),
     )
     second = boundary.build_request(sign_governed_receipt(second_payload, private_key))
 
@@ -345,7 +373,7 @@ def test_multiprocess_multiconnection_commit_has_one_winner(tmp_path) -> None:
         attempt_id="attempt-1",
         agent_id="agent",
         commit_id="process-b",
-        nonce="process-nonce-b",
+        nonce=canonical_nonce("process-nonce-b"),
     )
     second = boundary.build_request(sign_governed_receipt(second_payload, private_key))
     context = multiprocessing.get_context("spawn")
@@ -404,7 +432,7 @@ def test_identical_commit_retry_is_idempotent_but_conflict_denies(tmp_path) -> N
 def test_stale_policy_and_revoked_agent_are_fenced(tmp_path) -> None:
     boundary, private_key, _ = _configured_boundary(tmp_path)
     stale_policy = _request(boundary, private_key, commit_id="stale-policy")
-    boundary.update_policy(workflow_id="wf", policy_version="policy-v2")
+    boundary.update_policy(workflow_id="wf", policy_version="2")
     assert boundary.commit(stale_policy).reason == "stale_or_mismatched_policy_version"
 
     fresh = boundary.prepare_receipt_payload(
@@ -413,7 +441,7 @@ def test_stale_policy_and_revoked_agent_are_fenced(tmp_path) -> None:
         attempt_id="attempt-1",
         agent_id="agent",
         commit_id="revoked",
-        nonce="nonce-revoked",
+        nonce=canonical_nonce("nonce-revoked"),
     )
     boundary.revoke_agent(workflow_id="wf", agent_id="agent")
     assert boundary.commit(
@@ -428,7 +456,7 @@ def test_stale_policy_and_revoked_agent_are_fenced(tmp_path) -> None:
 def test_authority_change_and_revocation_taint_descendants(tmp_path) -> None:
     boundary, private_key, _ = _configured_boundary(tmp_path)
     stale_authority = _request(boundary, private_key, commit_id="stale-authority")
-    other_key = Ed25519PrivateKey.generate()
+    other_key = producer_key("other")
     boundary.register_agent(
         workflow_id="wf",
         agent_id="other",
@@ -452,7 +480,7 @@ def test_missing_or_untyped_verdict_fails_closed(tmp_path) -> None:
             attempt_id="attempt-1",
             agent_id="agent",
             commit_id="missing-verdict",
-            nonce="n",
+            nonce=canonical_nonce("missing-verdict"),
         ),
         private_key,
     )
@@ -464,10 +492,12 @@ def test_missing_or_untyped_verdict_fails_closed(tmp_path) -> None:
 
 def test_signed_policy_denial_is_an_immutable_denial(tmp_path) -> None:
     boundary = _trusted_admin(
-        tmp_path / "missing.sqlite3", default_verdict=VerdictDecision.DENY
+        tmp_path / "missing.sqlite3",
+        default_verdict=VerdictDecision.DENY,
+        policy_version="1",
     )
-    private_key = Ed25519PrivateKey.generate()
-    boundary.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="p")
+    private_key = producer_key()
+    boundary.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="1")
     boundary.register_agent(
         workflow_id="wf",
         agent_id="agent",
@@ -497,7 +527,7 @@ def test_signed_policy_denial_is_an_immutable_denial(tmp_path) -> None:
         attempt_id="a",
         agent_id="agent",
         commit_id="missing",
-        nonce="n",
+        nonce=canonical_nonce("policy-denial"),
     )
     request = boundary.build_request(sign_governed_receipt(payload, private_key))
     first = boundary.commit(request)
@@ -548,18 +578,22 @@ def test_legacy_schema_is_quarantined_without_partial_migration(tmp_path) -> Non
 
 
 @pytest.mark.parametrize(
-    "fault_point", ("after_authority_update", "after_decision_before_outbox")
+    "projection_checkpoint",
+    (
+        _GCBProjectionCheckpoint.AFTER_NODE_WRITE,
+        _GCBProjectionCheckpoint.AFTER_DECISION_WRITE,
+    ),
 )
 def test_crash_between_authority_update_and_outbox_rolls_back(
-    tmp_path, fault_point
+    tmp_path, projection_checkpoint: _GCBProjectionCheckpoint
 ) -> None:
-    def crash(point: str) -> None:
-        if point == fault_point:
-            raise RuntimeError("simulated crash")
-
-    private_key = Ed25519PrivateKey.generate()
-    boundary = _trusted_admin(tmp_path / "crash.sqlite3", fault_injector=crash)
-    boundary.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="p")
+    private_key = producer_key()
+    boundary = _trusted_admin(
+        tmp_path / "crash.sqlite3",
+        policy_version="1",
+        projection_checkpoint=projection_checkpoint,
+    )
+    boundary.create_workflow(workflow_id="wf", nodes={"root": ()}, policy_version="1")
     boundary.register_agent(
         workflow_id="wf",
         agent_id="agent",
@@ -589,7 +623,7 @@ def test_crash_between_authority_update_and_outbox_rolls_back(
         attempt_id="a",
         agent_id="agent",
         commit_id="crash",
-        nonce="n",
+        nonce=canonical_nonce(f"crash:{projection_checkpoint.value}"),
     )
     decision = boundary.commit(
         boundary.build_request(sign_governed_receipt(payload, private_key))
@@ -650,7 +684,7 @@ def test_policy_cache_cannot_override_newer_sqlite_policy_state(tmp_path) -> Non
     boundary, private_key, _ = _configured_boundary(tmp_path)
     stale = _request(boundary, private_key, commit_id="stale-other-connection")
     other_connection = _trusted_admin(boundary.path)
-    other_connection.update_policy(workflow_id="wf", policy_version="policy-v2")
+    other_connection.update_policy(workflow_id="wf", policy_version="2")
 
     decision = boundary.commit(stale)
 
@@ -662,10 +696,10 @@ def test_commit_and_retroactive_revoke_race_never_leaves_consumable_descendant(
     tmp_path,
 ) -> None:
     path = tmp_path / "revoke-race.sqlite3"
-    key = Ed25519PrivateKey.generate()
-    setup = _trusted_admin(path)
+    key = producer_key()
+    setup = _trusted_admin(path, policy_version="1")
     setup.create_workflow(
-        workflow_id="wf", nodes={"root": (), "child": ("root",)}, policy_version="p"
+        workflow_id="wf", nodes={"root": (), "child": ("root",)}, policy_version="1"
     )
     setup.register_agent(
         workflow_id="wf", agent_id="agent", public_key=key.public_key(), capabilities=()
@@ -698,7 +732,7 @@ def test_commit_and_retroactive_revoke_race_never_leaves_consumable_descendant(
             attempt_id=f"{node_id}-attempt",
             agent_id="agent",
             commit_id=f"{node_id}-commit",
-            nonce=f"{node_id}-nonce",
+            nonce=canonical_nonce(f"{node_id}-nonce"),
         )
         request = setup.build_request(sign_governed_receipt(payload, key))
         if node_id == "root":
@@ -734,14 +768,21 @@ def test_commit_and_retroactive_revoke_race_never_leaves_consumable_descendant(
 def test_executor_unlocks_only_after_governed_commit(tmp_path) -> None:
     registry = CapabilityRegistry()
     registry.register("agent", [Capability(name="work", domain="d")])
-    boundary = _trusted_admin(tmp_path / "executor.sqlite3")
+    boundary = _trusted_admin(tmp_path / "executor.sqlite3", policy_version="1")
     store = ArtifactStore()
-    executor = SwarmExecutor(registry, store, boundary, policy_version="p1")
+    executor = compose_test_executor(
+        registry,
+        store,
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
+    )
     dag = TaskDAG(dag_id="dag", goal="g")
     dag = dag.add_node(TaskNode(node_id="root", required_capabilities=("work",)))
     dag = dag.add_node(TaskNode(node_id="child", depends_on=("root",)))
+    provision_executor_workflow(boundary, dag, policy_version="1")
+    lifecycle = TrustedAuthorityLifecycleHarness(boundary, dag.dag_id, store)
     executor.load_dag(dag)
-    private_key = Ed25519PrivateKey.generate()
+    private_key = producer_key()
     boundary.register_agent(
         workflow_id="dag",
         agent_id="agent",
@@ -759,6 +800,7 @@ def test_executor_unlocks_only_after_governed_commit(tmp_path) -> None:
         boundary.build_request(sign_governed_receipt(payload, private_key))
     )
     assert decision.outcome is CommitOutcome.COMMITTED
+    assert lifecycle.dispatch_after_commit() == 1
     assert [node.node_id for node in executor.available_tasks("agent")] == ["child"]
     assert executor.authoritative_artifact("art") is not None
     assert store.get("art", workflow_id="dag") is not None
@@ -773,8 +815,9 @@ def test_executor_unlocks_only_after_governed_commit(tmp_path) -> None:
     assert binding.node_id == "root"
     assert binding.node_version == root_state.version
     assert binding.commit_id == root_state.commit_id
-    assert len(binding.receipt_digest) == 64
-    assert len(binding.authoritative_result_digest) == 64
+    for digest in (binding.receipt_digest, binding.authoritative_result_digest):
+        assert len(digest) == 43
+        assert len(base64.b64decode(f"{digest}=", altchars=b"-_", validate=True)) == 32
 
     for field, value in (
         ("node_id", "other-node"),
@@ -787,7 +830,7 @@ def test_executor_unlocks_only_after_governed_commit(tmp_path) -> None:
             child_payload,
             predecessor_bindings=(replace(binding, **{field: value}),),
             commit_id=f"tampered-predecessor-{field}",
-            nonce=f"tampered-predecessor-{field}",
+            nonce=canonical_nonce(f"tampered-predecessor-{field}"),
         )
         assert (
             boundary.commit(
@@ -803,14 +846,18 @@ def test_executor_response_loss_retry_does_not_double_count_completion(
     registry = CapabilityRegistry()
     registry.register("agent", [Capability(name="work", domain="d")])
     boundary = _trusted_admin(tmp_path / "retry.sqlite3")
-    executor = SwarmExecutor(
-        registry, ArtifactStore(), boundary, policy_version="policy-v1"
+    executor = compose_test_executor(
+        registry,
+        ArtifactStore(),
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
     )
     dag = TaskDAG(dag_id="retry-dag", goal="g")
     dag = dag.add_node(TaskNode(node_id="root", required_capabilities=("work",)))
     dag = dag.add_node(TaskNode(node_id="child", depends_on=("root",)))
+    provision_executor_workflow(boundary, dag, policy_version="1")
     executor.load_dag(dag)
-    private_key = Ed25519PrivateKey.generate()
+    private_key = producer_key()
     boundary.register_agent(
         workflow_id="retry-dag",
         agent_id="agent",
@@ -837,17 +884,22 @@ def test_executor_recovery_attaches_to_existing_authority_without_promotion(
     path = tmp_path / "recovery.sqlite3"
     registry = CapabilityRegistry()
     registry.register("agent", [Capability(name="work", domain="d")])
-    private_key = Ed25519PrivateKey.generate()
+    private_key = producer_key()
 
     def build_dag() -> TaskDAG:
         dag = TaskDAG(dag_id="recover-dag", goal="g")
         return dag.add_node(TaskNode(node_id="root", required_capabilities=("work",)))
 
     first_boundary = _trusted_admin(path)
-    first_executor = SwarmExecutor(
-        registry, ArtifactStore(), first_boundary, policy_version="policy-v1"
+    first_executor = compose_test_executor(
+        registry,
+        ArtifactStore(),
+        InProcessExecutionClientHarness(first_boundary),
+        policy_version="1",
     )
-    first_executor.load_dag(build_dag())
+    dag = build_dag()
+    provision_executor_workflow(first_boundary, dag, policy_version="1")
+    first_executor.load_dag(dag)
     first_boundary.register_agent(
         workflow_id="recover-dag",
         agent_id="agent",
@@ -861,8 +913,15 @@ def test_executor_recovery_attaches_to_existing_authority_without_promotion(
 
     recovered_boundary = _trusted_admin(path)
     recovered_store = ArtifactStore()
-    recovered_executor = SwarmExecutor(
-        registry, recovered_store, recovered_boundary, policy_version="policy-v1"
+    lifecycle = TrustedAuthorityLifecycleHarness(
+        recovered_boundary, "recover-dag", recovered_store
+    )
+    assert lifecycle.recover_on_startup() == (0, 0, 0)
+    recovered_executor = compose_test_executor(
+        registry,
+        recovered_store,
+        InProcessExecutionClientHarness(recovered_boundary),
+        policy_version="1",
     )
     recovered_executor.load_dag(build_dag())
 
@@ -875,12 +934,13 @@ def test_executor_recovery_attaches_to_existing_authority_without_promotion(
         attempt_id=state.attempt_id or "",
         agent_id="agent",
         commit_id="recovery-commit",
-        nonce="recovery-nonce",
+        nonce=canonical_nonce("recovery-nonce"),
     )
     decision = recovered_executor.commit(
         recovered_boundary.build_request(sign_governed_receipt(payload, private_key))
     )
     assert decision.outcome is CommitOutcome.COMMITTED
+    assert lifecycle.dispatch_after_commit() == 1
     assert recovered_store.get("recover-art", workflow_id="recover-dag") is not None
 
 
@@ -889,13 +949,17 @@ def test_executor_recovery_requires_retained_signed_attempt_capability_to_stage(
 ) -> None:
     path = tmp_path / "claimed-recovery.sqlite3"
     registry = CapabilityRegistry()
-    private_key = Ed25519PrivateKey.generate()
+    private_key = producer_key()
     dag = TaskDAG(dag_id="claimed-recovery").add_node(TaskNode(node_id="root"))
 
     first = _trusted_admin(path)
-    first_executor = SwarmExecutor(
-        registry, ArtifactStore(), first, policy_version="policy-v1"
+    first_executor = compose_test_executor(
+        registry,
+        ArtifactStore(),
+        InProcessExecutionClientHarness(first),
+        policy_version="1",
     )
+    provision_executor_workflow(first, dag, policy_version="1")
     first_executor.load_dag(dag)
     first.register_agent(
         workflow_id=dag.dag_id,
@@ -909,8 +973,11 @@ def test_executor_recovery_requires_retained_signed_attempt_capability_to_stage(
     first_executor.claim("root", "agent", authorization)
 
     recovered = _trusted_admin(path)
-    recovered_executor = SwarmExecutor(
-        registry, ArtifactStore(), recovered, policy_version="policy-v1"
+    recovered_executor = compose_test_executor(
+        registry,
+        ArtifactStore(),
+        InProcessExecutionClientHarness(recovered),
+        policy_version="1",
     )
     recovered_executor.load_dag(dag)
 
@@ -928,26 +995,39 @@ def test_executor_recovery_rejects_topology_and_policy_mismatch(tmp_path) -> Non
     registry = CapabilityRegistry()
     boundary = _trusted_admin(path)
     original = TaskDAG(dag_id="wf", goal="g").add_node(TaskNode(node_id="root"))
-    SwarmExecutor(
-        registry, ArtifactStore(), boundary, policy_version="policy-v1"
+    provision_executor_workflow(boundary, original, policy_version="1")
+    compose_test_executor(
+        registry,
+        ArtifactStore(),
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
     ).load_dag(original)
 
     with pytest.raises(PermissionError, match="recovery_policy_mismatch"):
-        SwarmExecutor(
-            registry, ArtifactStore(), boundary, policy_version="policy-v2"
+        compose_test_executor(
+            registry,
+            ArtifactStore(),
+            InProcessExecutionClientHarness(boundary),
+            policy_version="2",
         ).load_dag(original)
 
     changed = original.add_node(TaskNode(node_id="extra"))
     with pytest.raises(PermissionError, match="recovery_topology_mismatch"):
-        SwarmExecutor(
-            registry, ArtifactStore(), boundary, policy_version="policy-v1"
+        compose_test_executor(
+            registry,
+            ArtifactStore(),
+            InProcessExecutionClientHarness(boundary),
+            policy_version="1",
         ).load_dag(changed)
 
 
 def test_fresh_load_quarantines_legacy_completed_state(tmp_path) -> None:
     boundary = _trusted_admin(tmp_path / "legacy.sqlite3")
-    executor = SwarmExecutor(
-        CapabilityRegistry(), ArtifactStore(), boundary, policy_version="policy-v1"
+    executor = compose_test_executor(
+        CapabilityRegistry(),
+        ArtifactStore(),
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
     )
     legacy = TaskDAG(dag_id="legacy", goal="g")
     legacy = legacy.add_node(
@@ -959,6 +1039,7 @@ def test_fresh_load_quarantines_legacy_completed_state(tmp_path) -> None:
     )
     legacy = legacy.add_node(TaskNode(node_id="child", depends_on=("root",)))
 
+    provision_executor_workflow(boundary, legacy, policy_version="1")
     executor.load_dag(legacy)
 
     assert executor.progress == {"ready": 1, "blocked": 1}
@@ -969,15 +1050,21 @@ def test_fresh_load_quarantines_legacy_completed_state(tmp_path) -> None:
 def test_revoke_root_fences_immediately_and_resumes_materialization(tmp_path) -> None:
     registry = CapabilityRegistry()
     registry.register("agent", [Capability(name="work", domain="d")])
-    boundary = _trusted_admin(tmp_path / "retro.sqlite3")
+    boundary = _trusted_admin(tmp_path / "retro.sqlite3", policy_version="1")
     store = ArtifactStore()
-    executor = SwarmExecutor(registry, store, boundary, policy_version="p")
+    executor = compose_test_executor(
+        registry,
+        store,
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
+    )
     dag = TaskDAG(dag_id="retro", goal="g")
     dag = dag.add_node(TaskNode(node_id="root", required_capabilities=("work",)))
     dag = dag.add_node(TaskNode(node_id="child", depends_on=("root",)))
     dag = dag.add_node(TaskNode(node_id="leaf", depends_on=("child",)))
+    provision_executor_workflow(boundary, dag, policy_version="1")
     executor.load_dag(dag)
-    key = Ed25519PrivateKey.generate()
+    key = producer_key()
     boundary.register_agent(
         workflow_id="retro",
         agent_id="agent",
@@ -1041,10 +1128,10 @@ def test_revocation_fence_survives_response_loss_and_propagation_crash(
     tmp_path,
 ) -> None:
     path = tmp_path / "revoke-crash.sqlite3"
-    key = Ed25519PrivateKey.generate()
-    setup = _trusted_admin(path)
+    key = producer_key()
+    setup = _trusted_admin(path, policy_version="1")
     setup.create_workflow(
-        workflow_id="wf", nodes={"root": (), "child": ("root",)}, policy_version="p"
+        workflow_id="wf", nodes={"root": (), "child": ("root",)}, policy_version="1"
     )
     setup.register_agent(
         workflow_id="wf",
@@ -1075,30 +1162,28 @@ def test_revocation_fence_survives_response_loss_and_propagation_crash(
         attempt_id="a",
         agent_id="agent",
         commit_id="commit",
-        nonce="nonce",
+        nonce=canonical_nonce("revocation-fence"),
     )
     assert (
         setup.commit(setup.build_request(sign_governed_receipt(payload, key))).outcome
         is CommitOutcome.COMMITTED
     )
 
-    def lose_response(point: str) -> None:
-        if point == "after_revocation_fence_commit":
-            raise RuntimeError("response lost")
-
-    boundary = _trusted_admin(path, fault_injector=lose_response)
-    with pytest.raises(RuntimeError, match="response lost"):
+    boundary = _trusted_admin(
+        path,
+        fault_checkpoint=_GCBFaultCheckpoint.AFTER_REVOCATION_FENCE_COMMIT,
+    )
+    with pytest.raises(_GCBInjectedFault, match="^after_revocation_fence_commit$"):
         boundary.revoke_root(
             workflow_id="wf", node_id="root", event_id="event", reason="fraud"
         )
     assert boundary.node_state("wf", "child").status == "blocked"
 
-    def crash_propagation(point: str) -> None:
-        if point == "during_revocation_propagation":
-            raise RuntimeError("propagation crash")
-
-    crashing = _trusted_admin(path, fault_injector=crash_propagation)
-    with pytest.raises(RuntimeError, match="propagation crash"):
+    crashing = _trusted_admin(
+        path,
+        fault_checkpoint=_GCBFaultCheckpoint.DURING_REVOCATION_PROPAGATION,
+    )
+    with pytest.raises(_GCBInjectedFault, match="^during_revocation_propagation$"):
         crashing.resume_revocation_propagation()
     assert crashing.node_state("wf", "child").status == "blocked"
     assert crashing.pending_revocations() == 1
@@ -1111,14 +1196,21 @@ def test_executor_revocation_refreshes_projection_and_blocks_descendants(
     tmp_path,
 ) -> None:
     registry = CapabilityRegistry()
-    boundary = _trusted_admin(tmp_path / "executor-revoke.sqlite3")
+    boundary = _trusted_admin(tmp_path / "executor-revoke.sqlite3", policy_version="1")
     store = ArtifactStore()
-    executor = SwarmExecutor(registry, store, boundary, policy_version="p")
+    executor = compose_test_executor(
+        registry,
+        store,
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
+    )
     dag = TaskDAG(dag_id="executor-revoke")
     dag = dag.add_node(TaskNode(node_id="root"))
     dag = dag.add_node(TaskNode(node_id="child", depends_on=("root",)))
+    provision_executor_workflow(boundary, dag, policy_version="1")
+    lifecycle = TrustedAuthorityLifecycleHarness(boundary, dag.dag_id, store)
     executor.load_dag(dag)
-    key = Ed25519PrivateKey.generate()
+    key = producer_key()
     boundary.register_agent(
         workflow_id=dag.dag_id,
         agent_id="agent",
@@ -1135,8 +1227,15 @@ def test_executor_revocation_refreshes_projection_and_blocks_descendants(
         ).outcome
         is CommitOutcome.COMMITTED
     )
+    assert lifecycle.dispatch_after_commit() == 1
 
-    executor.revoke_root("root", event_id="event", reason="invalid result")
+    boundary.revoke_root(
+        workflow_id=dag.dag_id,
+        node_id="root",
+        event_id="event",
+        reason="invalid result",
+    )
+    assert lifecycle.complete_control_transition() == (1, 1)
 
     assert executor.progress == {"revoked": 1, "blocked": 1}
     assert executor.available_tasks("agent") == []
@@ -1147,13 +1246,19 @@ def test_executor_revocation_refreshes_projection_and_blocks_descendants(
 def test_external_revocation_fence_invalidates_executor_ready_cache(tmp_path) -> None:
     registry = CapabilityRegistry()
     store = ArtifactStore()
-    boundary = _trusted_admin(tmp_path / "stale-ready.sqlite3")
-    executor = SwarmExecutor(registry, store, boundary, policy_version="p")
+    boundary = _trusted_admin(tmp_path / "stale-ready.sqlite3", policy_version="1")
+    executor = compose_test_executor(
+        registry,
+        store,
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
+    )
     dag = TaskDAG(dag_id="stale-ready")
     dag = dag.add_node(TaskNode(node_id="root"))
     dag = dag.add_node(TaskNode(node_id="child", depends_on=("root",)))
+    provision_executor_workflow(boundary, dag, policy_version="1")
     executor.load_dag(dag)
-    key = Ed25519PrivateKey.generate()
+    key = producer_key()
     boundary.register_agent(
         workflow_id=dag.dag_id,
         agent_id="agent",
@@ -1193,10 +1298,17 @@ def test_executor_recovery_resumes_pending_revocation_and_retracts_artifact(
     registry = CapabilityRegistry()
     path = tmp_path / "executor-revoke-recovery.sqlite3"
     store = ArtifactStore()
-    key = Ed25519PrivateKey.generate()
-    first = _trusted_admin(path)
+    key = producer_key()
+    first = _trusted_admin(path, policy_version="1")
     dag = TaskDAG(dag_id="recover-revoke").add_node(TaskNode(node_id="root"))
-    executor = SwarmExecutor(registry, store, first, policy_version="p")
+    provision_executor_workflow(first, dag, policy_version="1")
+    first_lifecycle = TrustedAuthorityLifecycleHarness(first, dag.dag_id, store)
+    executor = compose_test_executor(
+        registry,
+        store,
+        InProcessExecutionClientHarness(first),
+        policy_version="1",
+    )
     executor.load_dag(dag)
     first.register_agent(
         workflow_id=dag.dag_id,
@@ -1214,6 +1326,7 @@ def test_executor_recovery_resumes_pending_revocation_and_retracts_artifact(
         ).outcome
         is CommitOutcome.COMMITTED
     )
+    assert first_lifecycle.dispatch_after_commit() == 1
     first.revoke_root(
         workflow_id=dag.dag_id,
         node_id="root",
@@ -1224,7 +1337,14 @@ def test_executor_recovery_resumes_pending_revocation_and_retracts_artifact(
     assert store.get("root-art", workflow_id=dag.dag_id) is None
 
     recovered = _trusted_admin(path)
-    recovered_executor = SwarmExecutor(registry, store, recovered, policy_version="p")
+    recovered_lifecycle = TrustedAuthorityLifecycleHarness(recovered, dag.dag_id, store)
+    assert recovered_lifecycle.recover_on_startup() == (0, 1, 1)
+    recovered_executor = compose_test_executor(
+        registry,
+        store,
+        InProcessExecutionClientHarness(recovered),
+        policy_version="1",
+    )
     recovered_executor.load_dag(dag)
 
     assert recovered.pending_revocations() == 0
@@ -1237,11 +1357,13 @@ def test_authority_sql_is_confined_to_boundary_module() -> None:
         __import__("pathlib").Path(__file__).parents[1] / "src" / "constitutional_swarm"
     )
     forbidden = ("status='governed_committed'", "INSERT INTO outbox")
+    authority_modules = {"governed_commit.py", "apcc/sqlite_store.py"}
     offenders = []
     for path in source_root.rglob("*.py"):
         text = path.read_text()
         ast.parse(text)
-        if path.name != "governed_commit.py" and any(
+        relative_path = path.relative_to(source_root).as_posix()
+        if relative_path not in authority_modules and any(
             token in text for token in forbidden
         ):
             offenders.append(path.name)
@@ -1374,7 +1496,16 @@ def test_runtime_contains_no_legacy_dag_completion_calls() -> None:
                         attribute = ast.literal_eval(node.args[1])
                     except (ValueError, TypeError):
                         attribute = None
-                    if attribute == "status":
+                    frozen_status_normalization = (
+                        name == "object.__setattr__"
+                        and len(node.args) == 3
+                        and isinstance(node.args[2], ast.Call)
+                        and isinstance(node.args[2].func, ast.Name)
+                        and node.args[2].func.id == "AuthorityStatusValue"
+                        and len(node.args[2].args) == 1
+                        and ast.unparse(node.args[2].args[0]) == "self.status"
+                    )
+                    if attribute == "status" and not frozen_status_normalization:
                         findings.append("dynamic-status-write")
                 if isinstance(node.func, ast.Attribute) and node.func.attr in {
                     "execute",
@@ -1421,7 +1552,10 @@ def test_runtime_contains_no_legacy_dag_completion_calls() -> None:
 
     offenders: list[str] = []
     for path in source_root.rglob("*.py"):
-        if path.name == "governed_commit.py":
+        if path.relative_to(source_root).as_posix() in {
+            "governed_commit.py",
+            "apcc/sqlite_store.py",
+        }:
             continue
         findings = bypass_sinks(path.read_text())
         if findings:
@@ -1541,10 +1675,17 @@ def test_public_dag_and_available_task_projections_are_defensive_copies(
     tmp_path,
 ) -> None:
     registry = CapabilityRegistry()
-    boundary = _trusted_admin(tmp_path / "projection.sqlite3")
-    executor = SwarmExecutor(registry, ArtifactStore(), boundary, policy_version="p")
-    executor.load_dag(TaskDAG(dag_id="projection").add_node(TaskNode(node_id="root")))
-    key = Ed25519PrivateKey.generate()
+    boundary = _trusted_admin(tmp_path / "projection.sqlite3", policy_version="1")
+    executor = compose_test_executor(
+        registry,
+        ArtifactStore(),
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
+    )
+    dag = TaskDAG(dag_id="projection").add_node(TaskNode(node_id="root"))
+    provision_executor_workflow(boundary, dag, policy_version="1")
+    executor.load_dag(dag)
+    key = producer_key()
     boundary.register_agent(
         workflow_id="projection",
         agent_id="agent",

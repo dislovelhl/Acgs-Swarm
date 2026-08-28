@@ -35,23 +35,27 @@ from constitutional_swarm.execution import (
 )
 from constitutional_swarm.governed_commit import (
     GovernanceBypassDenied,
-    TrustedGovernanceBootstrap,
     sign_attempt_authorization,
     sign_governed_receipt,
 )
 from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
+from tests.gcb_apcc_support import (
+    InProcessExecutionClientHarness,
+    TrustedAuthorityLifecycleHarness,
+    compose_test_executor,
+    provision_executor_workflow,
+    typed_bootstrap,
+)
 
 
-def _configured_executor(tmp_path, registry, dag, store=None):
-    boundary = TrustedGovernanceBootstrap(
-        verifier_key=Ed25519PrivateKey.generate()
-    ).provision(tmp_path / f"{dag.dag_id}.sqlite3")
-    executor = SwarmExecutor(
-        registry, store or ArtifactStore(), boundary, policy_version="policy-v1"
-    )
-    executor.load_dag(dag)
+def _configured_executor(tmp_path, registry, dag, store=None, predeclared_keys=None):
     keys = {agent_id: Ed25519PrivateKey.generate() for agent_id in registry.agents}
-    for agent_id, private_key in keys.items():
+    keys.update(predeclared_keys or {})
+    bootstrap = typed_bootstrap(policy_versions=(("1", 1),), producers=keys)
+    boundary = bootstrap.provision(tmp_path / f"{dag.dag_id}.sqlite3")
+    provision_executor_workflow(boundary, dag, policy_version="1")
+    for agent_id in registry.agents:
+        private_key = keys[agent_id]
         boundary.register_agent(
             workflow_id=dag.dag_id,
             agent_id=agent_id,
@@ -61,6 +65,17 @@ def _configured_executor(tmp_path, registry, dag, store=None):
                 for capability in registry.get_agent_capabilities(agent_id)
             ),
         )
+    resolved_store = store if store is not None else ArtifactStore()
+    executor = compose_test_executor(
+        registry,
+        resolved_store,
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
+    )
+    executor._test_authority_lifecycle = TrustedAuthorityLifecycleHarness(
+        boundary, dag.dag_id, resolved_store
+    )
+    executor.load_dag(dag)
     return executor, boundary, keys
 
 
@@ -70,6 +85,7 @@ def _commit(executor, boundary, private_key, node_id, artifact) -> None:
         boundary.build_request(sign_governed_receipt(payload, private_key))
     )
     assert decision.reason == "verified"
+    executor._test_authority_lifecycle.dispatch_after_commit()
 
 
 def _claim(executor, private_key, node_id, agent_id):
@@ -1198,7 +1214,14 @@ class TestDynamicAgentArrival:
         dag = dag.add_node(
             TaskNode(node_id="B", title="B", domain="d", depends_on=("A",))
         )
-        executor, boundary, keys = _configured_executor(tmp_path, registry, dag, store)
+        future_key = Ed25519PrivateKey.generate()
+        executor, boundary, keys = _configured_executor(
+            tmp_path,
+            registry,
+            dag,
+            store,
+            predeclared_keys={"agent-02": future_key},
+        )
 
         # agent-01 completes A
         _claim(executor, keys["agent-01"], "A", "agent-01")
@@ -1218,7 +1241,6 @@ class TestDynamicAgentArrival:
 
         # NEW agent arrives and registers
         registry.register("agent-02", [Capability(name="work", domain="d")])
-        keys["agent-02"] = Ed25519PrivateKey.generate()
         boundary.register_agent(
             workflow_id=dag.dag_id,
             agent_id="agent-02",

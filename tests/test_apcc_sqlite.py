@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 import constitutional_swarm.governed_commit as governed_commit_module
 import constitutional_swarm.swarm as swarm_module
 import constitutional_swarm.apcc.sqlite_store as sqlite_store_module
+import constitutional_swarm.authority_service as authority_service_module
 from constitutional_swarm.apcc.codec import (
     decode_certificate,
     encode_certificate,
@@ -70,6 +71,9 @@ from constitutional_swarm.apcc.service import APCCCommitService
 from constitutional_swarm.apcc.sqlite_store import (
     SQLiteAuthorityReader,
     SQLiteAuthorityStore,
+    _GCBAtomicCommitRequest,
+    _GCBProjectionCheckpoint,
+    _GCBProjectionPlan,
 )
 from constitutional_swarm.apcc.verifier import (
     ScopedTrust,
@@ -125,6 +129,12 @@ from tests.apcc_conformance import (
     assert_supersession_fault_is_atomic,
     assert_transitive_ancestor_revocation_admission_conforms,
 )
+from tests.gcb_apcc_support import (
+    InProcessExecutionClientHarness,
+    TrustedAuthorityLifecycleHarness,
+    compose_test_executor,
+    provision_executor_workflow,
+)
 from tests.test_apcc_verifier import (
     DOMAINS,
     SEEDS,
@@ -175,8 +185,15 @@ class _GCBNodeState(Protocol):
 
 class _GCBCommitPort(Protocol):
     path: str | Path
+    _apcc_store: SQLiteAuthorityStore
 
     def commit(self, request: GovernedCommitRequest) -> GovernedCommitDecision: ...
+
+    def _to_apcc_request(
+        self, request: GovernedCommitRequest
+    ) -> AtomicCommitRequest: ...
+
+    def _prepare_apcc_candidate(self, request: AtomicCommitRequest) -> None: ...
 
     def current_status(
         self, certificate_digest: str, request_nonce: str
@@ -209,8 +226,8 @@ class _GCBBootstrap(Protocol):
 
     def open_admin(self, path: Path) -> _GCBAdmin: ...
 
-    def _provision_with_projection_probe(
-        self, path: Path, *, probe: FaultProbe
+    def _provision_with_projection_fault(
+        self, path: Path, *, checkpoint: _GCBProjectionCheckpoint
     ) -> _GCBAdmin: ...
 
 
@@ -391,13 +408,13 @@ def _gcb_config(
     producer_public_key: bytes, authority_store_id: str = "dispatcher-store"
 ) -> APCCAuthorityConfig:
     """Caller-chosen exact GCB scopes; control is a sixth external key."""
-    authority_root = "dispatcher-authority-root"
+    authority_root = _digest(b"dispatcher-authority-root")
     return APCCAuthorityConfig(
         authority_store_id=authority_store_id,
         producer_trust=(
             TrustBinding(
                 role=TrustRole.PRODUCER,
-                scope=("agent", "dispatcher-actor-authority", authority_root),
+                scope=("agent", "authority:dispatcher:actor-authority", authority_root),
                 key_id="dispatcher-producer-key",
                 public_key=producer_public_key,
             ),
@@ -405,7 +422,7 @@ def _gcb_config(
         policy_trust=(
             TrustBinding(
                 role=TrustRole.POLICY,
-                scope=("dispatcher-policy", "apcc-policy", "1"),
+                scope=("dispatcher-policy", "1", "1"),
                 key_id="dispatcher-policy-key",
                 public_key=_public_key(SEEDS["policy"]),
             ),
@@ -641,12 +658,13 @@ def _snapshot(store: SQLiteAuthorityStore) -> AuthoritySnapshot:
     """Test-only canonical observer over every authority/control table."""
     semantic_names = {"apcc_decisions": "decisions", "apcc_outbox": "outbox"}
     with sqlite3.connect(store.database_path) as connection:
-        tables = tuple(
-            name
-            for (name,) in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-            )
-        )
+        tables: list[str] = []
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ):
+            assert isinstance(name, str)
+            tables.append(name)
         contents = {
             semantic_names.get(name, name): tuple(
                 repr(row).encode("utf-8")
@@ -997,41 +1015,330 @@ class _SQLiteStoreFactory:
         )
 
 
-class _OneShotProjectionProbe:
-    """Private GCB seam proving APCC and compatibility projection are atomic."""
-
-    def __init__(self) -> None:
-        self.triggered = False
-
-    def hit(self, point: str) -> None:
-        if (
-            point == "after_apcc_authority_write_before_legacy_projection"
-            and not self.triggered
-        ):
-            self.triggered = True
-            raise _InjectedFault(point)
-
-
 class _GCBFactory:
     @staticmethod
-    def provision_with_projection_probe(
+    def provision_with_projection_fault(
         bootstrap: _GCBBootstrap,
         path: Path,
-        probe: FaultProbe,
+        checkpoint: _GCBProjectionCheckpoint,
     ) -> _GCBAdmin:
-        return bootstrap._provision_with_projection_probe(path, probe=probe)
+        return bootstrap._provision_with_projection_fault(path, checkpoint=checkpoint)
 
 
-def test_public_sqlite_open_has_no_fault_injection_parameter() -> None:
+def _prepared_gcb_projection_case(
+    tmp_path: Path,
+) -> tuple[
+    _GCBBootstrap,
+    _GCBAdmin,
+    GovernedCommitRequest,
+    _GCBAtomicCommitRequest,
+    APCCAuthorityConfig,
+    AuthorityRuntime,
+]:
+    agent_key = Ed25519PrivateKey.from_private_bytes(SEEDS["producer"])
+    config = _gcb_config(
+        agent_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+    )
+    runtime = _runtime()
+    bootstrap = _GCB_BOOTSTRAP(
+        config=config,
+        runtime=runtime,
+        policy_signer=_DetachedSigner(SEEDS["policy"]),
+        registry_signer=_DetachedSigner(SEEDS["authority"]),
+        control_signer=_DetachedSigner(_CONTROL_SEED),
+    )
+    admin = bootstrap.provision(tmp_path / "closed-gcb-projection.sqlite3")
+    registry = CapabilityRegistry()
+    registry.register("agent", [Capability(name="work", domain="d")])
+    dag = TaskDAG(dag_id="dispatcher", goal="g").add_node(
+        TaskNode(node_id="root", required_capabilities=("work",))
+    )
+    provision_executor_workflow(admin, dag, policy_version="1")
+    admin.register_agent(
+        workflow_id="dispatcher",
+        agent_id="agent",
+        public_key=agent_key.public_key(),
+        capabilities=("work",),
+    )
+    executor = compose_test_executor(
+        registry,
+        ArtifactStore(),
+        InProcessExecutionClientHarness(admin),
+        policy_version="1",
+    )
+    executor.load_dag(dag)
+    authorization = sign_attempt_authorization(
+        executor.prepare_claim("root", "agent"), agent_key
+    )
+    executor.claim("root", "agent", authorization)
+    payload = executor.produce_result(
+        "root", Artifact("closed-plan", "root", "agent", "text", "result")
+    )
+    governed = admin.build_request(sign_governed_receipt(payload, agent_key))
+    atomic = admin.commit_port._to_apcc_request(governed)
+    assert type(atomic) is _GCBAtomicCommitRequest
+    admin.commit_port._prepare_apcc_candidate(atomic)
+    return bootstrap, admin, governed, atomic, config, runtime
+
+
+def test_gcb_projection_has_no_callback_sql_or_connection_capability_surface() -> None:
+    assert not hasattr(SQLiteAuthorityStore, "_open_with_projection")
+    assert not hasattr(sqlite_store_module, "SQLiteProjectionConnection")
+    assert not hasattr(sqlite_store_module, "SQLiteProjectionCursor")
+    assert not hasattr(sqlite_store_module, "_RestrictedProjectionConnection")
+    assert not hasattr(sqlite_store_module, "_RestrictedProjectionCursor")
+    assert not hasattr(sqlite_store_module, "_PROJECTION_ALLOWED_SQL_DIGESTS")
+
+
+def test_gcb_projection_plan_is_frozen_data_only() -> None:
+    annotations = get_type_hints(_GCBProjectionPlan)
+    assert set(annotations.values()) <= {str, int}
+    assert not any(
+        fragment in field_name
+        for field_name in annotations
+        for fragment in (
+            "callback",
+            "callable",
+            "connection",
+            "cursor",
+            "operation",
+            "sql",
+        )
+    )
+
+
+def _tampered_gcb_projection_plan(
+    plan: _GCBProjectionPlan, mutation: str
+) -> _GCBProjectionPlan:
+    if mutation == "predecessor":
+        receipt = json.loads(plan.receipt_material)
+        receipt["payload"]["predecessor_bindings"] = [
+            {
+                "node_id": "victim-predecessor",
+                "node_version": 1,
+                "commit_id": "victim-commit",
+                "receipt_digest": "0" * 64,
+                "authoritative_result_digest": "1" * 64,
+            }
+        ]
+        material = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        return replace(
+            plan,
+            receipt_material=material,
+            receipt_digest=sha256_digest(material.encode()),
+        )
+    if mutation == "output_digest":
+        receipt = json.loads(plan.receipt_material)
+        receipt["payload"]["output_digest"] = "0" * 64
+        material = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        return replace(
+            plan,
+            receipt_material=material,
+            receipt_digest=sha256_digest(material.encode()),
+        )
+    if mutation == "workflow_id":
+        return replace(plan, workflow_id="victim-workflow")
+    if mutation == "node_id":
+        return replace(plan, node_id="victim-node")
+    if mutation == "attempt_id":
+        return replace(plan, attempt_id="victim-attempt")
+    if mutation == "agent_id":
+        return replace(plan, agent_id="victim-agent")
+    if mutation == "commit_id":
+        return replace(plan, commit_id="victim-commit")
+    if mutation == "nonce":
+        return replace(plan, nonce=_nonce(221))
+    if mutation == "expected_node_version":
+        return replace(plan, expected_node_version=plan.expected_node_version + 1)
+    if mutation == "committed_node_version":
+        return replace(plan, committed_node_version=plan.committed_node_version + 1)
+    if mutation == "expected_workflow_state_version":
+        return replace(
+            plan,
+            expected_workflow_state_version=plan.expected_workflow_state_version + 1,
+        )
+    if mutation == "policy_digest":
+        return replace(plan, policy_digest="0" * 64)
+    if mutation == "request_hash":
+        return replace(plan, request_hash="1" * 64)
+    if mutation == "receipt_digest":
+        return replace(plan, receipt_digest="2" * 64)
+    if mutation == "verdict_digest":
+        return replace(plan, verdict_digest="3" * 64)
+    raise AssertionError(f"unknown GCB projection mutation: {mutation}")
+
+
+_GCB_PLAN_MUTATIONS = (
+    "workflow_id",
+    "node_id",
+    "attempt_id",
+    "agent_id",
+    "commit_id",
+    "nonce",
+    "expected_node_version",
+    "committed_node_version",
+    "expected_workflow_state_version",
+    "policy_digest",
+    "request_hash",
+    "receipt_digest",
+    "verdict_digest",
+    "predecessor",
+    "output_digest",
+)
+
+
+@pytest.mark.parametrize("mutation", _GCB_PLAN_MUTATIONS)
+def test_gcb_projection_rejects_substituted_plan_without_mutation(
+    tmp_path: Path, mutation: str
+) -> None:
+    _bootstrap, admin, _governed, request, _config_value, _runtime_value = (
+        _prepared_gcb_projection_case(tmp_path)
+    )
+    before = _gcb_authority_snapshot(admin)
+    tampered = replace(
+        request,
+        _gcb_projection_plan=_tampered_gcb_projection_plan(
+            request._gcb_projection_plan, mutation
+        ),
+    )
+    with pytest.raises(sqlite_store_module._GCBProjectionDenied):
+        admin.commit_port._apcc_store.atomic_commit(tampered)
+    assert _gcb_authority_snapshot(admin) == before
+    reader = SQLiteAuthorityReader.open(Path(admin.commit_port.path))
+    assert reader.get_certificate(request.commit_id) is None
+    node = reader.read_logical_node("dispatcher", "root")
+    assert node.current_node_version == "0"
+    assert node.current_certificate_digest is None
+    assert admin.node_state("dispatcher", "root").commit_id is None
+
+
+@pytest.mark.parametrize("mutation", _GCB_PLAN_MUTATIONS)
+def test_gcb_replay_rejects_same_commit_id_with_different_plan(
+    tmp_path: Path, mutation: str
+) -> None:
+    _bootstrap, admin, _governed, request, _config_value, _runtime_value = (
+        _prepared_gcb_projection_case(tmp_path)
+    )
+    store = admin.commit_port._apcc_store
+    committed = store.atomic_commit(request)
+    assert committed.certificate_digest is not None
+    before = _gcb_authority_snapshot(admin)
+    tampered = replace(
+        request,
+        _gcb_projection_plan=_tampered_gcb_projection_plan(
+            request._gcb_projection_plan, mutation
+        ),
+    )
+    with pytest.raises(
+        sqlite_store_module._GCBProjectionDenied,
+        match="^projection_replay_mismatch$",
+    ):
+        store.atomic_commit(tampered)
+    assert _gcb_authority_snapshot(admin) == before
+
+
+def test_gcb_attached_store_rejects_unprojected_raw_atomic_commit(
+    tmp_path: Path,
+) -> None:
+    _bootstrap, admin, _governed, request, config, runtime = (
+        _prepared_gcb_projection_case(tmp_path)
+    )
+    assert not hasattr(admin.commit_port, "_fault_injector")
+    assert not hasattr(admin.commit_port, "_governed_requests")
+    raw_request = AtomicCommitRequest(
+        request.subject,
+        request.context,
+        request.evidence,
+        request.bindings,
+        request.signatures,
+        request.commit_id,
+        request.nonce,
+        request.request_digest,
+    )
+    before = _gcb_authority_snapshot(admin)
+    with pytest.raises(
+        sqlite_store_module._GCBProjectionDenied,
+        match="^unprojected_gcb_commit_denied$",
+    ):
+        admin.commit_port._apcc_store.atomic_commit(raw_request)
+    assert _gcb_authority_snapshot(admin) == before
+    with pytest.raises(ValueError, match="requires typed governance bootstrap"):
+        SQLiteAuthorityStore.open(
+            Path(admin.commit_port.path), config=config, runtime=runtime
+        )
+
+
+def test_gcb_concurrent_commit_is_one_atomic_tuple_and_survives_reopen(
+    tmp_path: Path,
+) -> None:
+    bootstrap, admin, governed, request, _config_value, _runtime_value = (
+        _prepared_gcb_projection_case(tmp_path)
+    )
+    store = admin.commit_port._apcc_store
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = tuple(pool.map(lambda _index: store.atomic_commit(request), range(8)))
+    assert len({result.certificate_digest for result in results}) == 1
+    assert results.count(results[0]) == len(results)
+    reopened = bootstrap.open_admin(Path(admin.commit_port.path))
+    replay = reopened.commit(governed)
+    assert replay.commit_id == request.commit_id
+    with sqlite3.connect(admin.commit_port.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM certificates WHERE commit_id=?", (request.commit_id,)
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM decisions WHERE commit_id=?", (request.commit_id,)
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipt_evidence WHERE commit_id=?",
+            (request.commit_id,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM outbox WHERE commit_id=?", (request.commit_id,)
+        ).fetchone() == (1,)
+
+
+def test_gcb_ipc_commit_payload_contains_no_projection_capability(
+    tmp_path: Path,
+) -> None:
+    _bootstrap, _admin, governed, _request_value, _config_value, _runtime_value = (
+        _prepared_gcb_projection_case(tmp_path)
+    )
+    encoded = authority_service_module._encode_commit_request(governed)
+    assert set(encoded) == {"receipt", "verdict"}
+    payload = json.dumps(encoded, sort_keys=True, separators=(",", ":"))
+    assert not any(
+        token in payload
+        for token in ("projection", "callback", "connection", "cursor", "sql")
+    )
+
+
+def test_public_sqlite_construction_has_no_fault_or_projection_parameter() -> None:
     public_parameters = inspect.signature(SQLiteAuthorityStore.open).parameters
+    constructor_parameters = inspect.signature(SQLiteAuthorityStore.__init__).parameters
     assert not {
         "fault_point",
         "fail_controller",
         "_fail_controller",
         "probe",
         "_probe",
+        "projection",
     } & set(public_parameters)
+    assert not {
+        "fault_point",
+        "fail_controller",
+        "_fail_controller",
+        "probe",
+        "_probe",
+        "projection",
+    } & set(constructor_parameters)
     assert object not in get_type_hints(SQLiteAuthorityStore.open).values()
+    with pytest.raises(
+        ValueError, match="use SQLiteAuthorityStore.open on a provisioned store"
+    ):
+        SQLiteAuthorityStore(Path("unused.db"), _config(), _runtime())
 
 
 def test_sqlite_open_never_creates_an_unprovisioned_path_and_reader_is_read_only(
@@ -1308,7 +1615,7 @@ def test_trusted_gcb_bootstrap_requires_explicit_apcc_config_and_runtime() -> No
         "optional_apcc",
         "authority_path",
         "apcc_path",
-        "projection_path",
+        "projection",
         "fault",
         "probe",
     )
@@ -1328,8 +1635,8 @@ def test_gcb_config_constructs_with_exact_typed_bindings() -> None:
         role=TrustRole.PRODUCER,
         scope=(
             "agent",
-            "dispatcher-actor-authority",
-            "dispatcher-authority-root",
+            "authority:dispatcher:actor-authority",
+            _digest(b"dispatcher-authority-root"),
         ),
         key_id="dispatcher-producer-key",
         public_key=producer_public_key,
@@ -3445,14 +3752,9 @@ def test_sqlite_trust_chain_is_canonical_contiguous_and_audit_linked(
         connection.execute("PRAGMA foreign_keys=OFF")
         _force_sql_mutation(connection, "trust_log", mutation)
         connection.commit()
-    provider = _KeyProvider()
-    reopened = object.__new__(SQLiteAuthorityStore)
-    SQLiteAuthorityStore.__init__(
-        reopened, path, _config(), AuthorityRuntime(provider, _Clock(), _OUTBOX_SINK)
-    )
     before_status_signatures = _KeyProvider.status_signature_count()
     with pytest.raises(ValueError):
-        reopened.current_status(committed.certificate_digest, _nonce(12))
+        store.current_status(committed.certificate_digest, _nonce(12))
     assert _KeyProvider.status_signature_count() == before_status_signatures
     with pytest.raises(ValueError, match="validation failed"):
         SQLiteAuthorityReader.open(path)
@@ -4006,8 +4308,11 @@ def test_sqlite_commit_outbox_causally_precedes_its_control_event(
         ).fetchall() == [("COMMIT",), ("CONTROL",)]
 
 
+@pytest.mark.parametrize("projection_checkpoint", tuple(_GCBProjectionCheckpoint))
 def test_executor_and_gcb_route_only_once_through_apcc_and_block_legacy_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    projection_checkpoint: _GCBProjectionCheckpoint,
 ) -> None:
     """Dispatcher-level RED: ordinary execution has one APCC authority path."""
     calls: list[AtomicCommitRequest] = []
@@ -4060,17 +4365,24 @@ def test_executor_and_gcb_route_only_once_through_apcc_and_block_legacy_paths(
         registry_signer=registry_signer,
         control_signer=control_signer,
     )
-    projection_probe = _OneShotProjectionProbe()
-    admin = _GCBFactory.provision_with_projection_probe(
-        bootstrap, authority_path, projection_probe
+    admin = _GCBFactory.provision_with_projection_fault(
+        bootstrap, authority_path, projection_checkpoint
     )
     assert Path(admin.commit_port.path) == authority_path
     artifacts = ArtifactStore()
-    executor = _SWARM_EXECUTOR(registry, artifacts, admin, policy_version="apcc-policy")
     dag = TaskDAG(dag_id="dispatcher", goal="g").add_node(
         TaskNode(node_id="root", required_capabilities=("work",))
     )
+    provision_executor_workflow(admin, dag, policy_version="1")
+    authority_lifecycle = TrustedAuthorityLifecycleHarness(admin, dag.dag_id, artifacts)
+    executor = compose_test_executor(
+        registry,
+        artifacts,
+        InProcessExecutionClientHarness(admin),
+        policy_version="1",
+    )
     executor.load_dag(dag)
+    assert authority_lifecycle.dispatch_after_commit() == 0
     admin.register_agent(
         workflow_id="dispatcher",
         agent_id="agent",
@@ -4085,15 +4397,32 @@ def test_executor_and_gcb_route_only_once_through_apcc_and_block_legacy_paths(
     payload = executor.produce_result("root", artifact)
     request = admin.build_request(sign_governed_receipt(payload, agent_key))
     before_atomic_commit = _gcb_authority_snapshot(admin)
-    with pytest.raises(
-        _InjectedFault,
-        match="after_apcc_authority_write_before_legacy_projection",
-    ):
-        executor.commit(request)
-    assert projection_probe.triggered
-    assert _gcb_authority_snapshot(admin) == before_atomic_commit
+    failed = executor.commit(request)
+    assert failed.outcome.value == "denied"
+    assert failed.reason == "persistence_error"
+    assert getattr(admin.commit_port, "_apcc_store")._gcb_projection_fault_fired
+    after_failed_commit = _gcb_authority_snapshot(admin)
+    preparation_tables = {"candidates", "logical_nodes"}
+    assert {
+        name: rows
+        for name, rows in after_failed_commit.tables.items()
+        if name not in preparation_tables
+    } == {
+        name: rows
+        for name, rows in before_atomic_commit.tables.items()
+        if name not in preparation_tables
+    }
+    with sqlite3.connect(authority_path) as connection:
+        candidate = connection.execute(
+            "SELECT lifecycle FROM candidates WHERE workflow_id=? AND node_id=?",
+            ("dispatcher", "root"),
+        ).fetchone()
+    assert candidate == (CandidateLifecycle.COMMIT_PENDING.value,)
     failed_reader = SQLiteAuthorityReader.open(authority_path)
     assert failed_reader.get_certificate(request.commit_id) is None
+    failed_node = failed_reader.read_logical_node("dispatcher", "root")
+    assert failed_node.current_node_version == "0"
+    assert failed_node.current_certificate_digest is None
     assert admin.node_state("dispatcher", "root").commit_id is None
     committed = executor.commit(request)
     assert isinstance(request, GovernedCommitRequest)
