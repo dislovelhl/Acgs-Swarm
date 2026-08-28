@@ -58,6 +58,9 @@ braintrust = ["braintrust==0.31.0"]
 # uv.lock known-good is 10.2.0.
 bittensor = ["bittensor>=7.0,<11"]
 transport = ["websockets>=12.0"]
+# PostgreSQL 17 APCC authority-store backend. The default SQLite backend and
+# package import surface do not require a PostgreSQL driver.
+postgres = ["psycopg[binary]>=3.2,<4"]
 # research: MCFS research stack (latent DNA steering, swarm ODE dynamics)
 research = ["torch>=2.0", "transformers>=4.40", "numpy>=1.24"]
 # deprecated alias — use research instead
@@ -155,9 +158,9 @@ follow_imports_for_stubs = true
 # Every extra in [project.optional-dependencies] must appear here so a new
 # extra-gated module cannot silently escape the type-check surface. See DECISIONS.md.
 #   "checked"  — type-bearing (ships py.typed, used in type positions); MUST be
-#                installed by a blocking typecheck CI job (typecheck-transport).
+#                installed by a blocking extra-specific typecheck CI job.
 #   "excepted" — not type-checked by the gate; each needs a reason.
-checked = ["transport"]
+checked = ["postgres", "transport"]
 
 [tool.constitutional_swarm.typecheck_coverage.excepted]
 dev = "tooling only (pytest/ruff/mypy/numpy/jsonschema/pyyaml for tests + agent-check); not imported by the default runtime"

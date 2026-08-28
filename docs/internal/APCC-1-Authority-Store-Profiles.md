@@ -21,13 +21,15 @@ response-loss, concurrent-writer, and multiprocess tests.
 
 ## PostgreSQL refinement
 
-A PostgreSQL implementation realizes this profile at `READ COMMITTED` with a
-locked workflow-authority row (`SELECT ... FOR UPDATE`) and explicit
-conditional writes inside one transaction. `SERIALIZABLE` is not an alternate
-APCC-1 PostgreSQL profile. Store-global `commit_id` and nonce constraints are
-coordinated with that guard without acquiring a second workflow guard, using a
-stable lock and reservation order for cross-workflow races. Transaction commit
-is the durable linearization point.
+A PostgreSQL implementation realizes this profile at `REPEATABLE READ`. Before
+the first snapshot-bearing query it acquires session admission locks in the
+global order workflow, optional certificate, then store-global trust head. A
+locked workflow-authority row (`SELECT ... FOR UPDATE`), full-store semantic
+attestation, and the requested conditional writes then execute against the
+same stable transaction snapshot. `SERIALIZABLE` is not an alternate APCC-1
+PostgreSQL profile. Store-global `commit_id` and nonce constraints are
+coordinated with that guard without acquiring a second workflow guard.
+Transaction commit is the durable linearization point.
 
 An aborted transaction whose server result is known may be retried on SQLSTATE
 `40001` (serialization failure) or `40P01` (deadlock detected), within the

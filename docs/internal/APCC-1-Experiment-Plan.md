@@ -18,7 +18,7 @@ requires a complete rerun of B0–B6 for every affected cell.
 | Repository baseline | `6e65db3e478fa315119038b616d78f4f171422db` |
 | Python | Repository environment: CPython 3.13.13 via `uv --no-sources`; record exact lock hash |
 | SQLite | Durable file; `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`, `page_size=4096`, `wal_autocheckpoint=1000` |
-| PostgreSQL | PostgreSQL 17.x; `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`, `max_connections=200`, `shared_buffers=4GB`; explicit workflow locks under `READ COMMITTED` |
+| PostgreSQL | PostgreSQL 17.x; `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`, `max_connections=200`, `shared_buffers=4GB`; ordered admission locks and full semantic attestation within one `REPEATABLE READ` snapshot |
 | Go | `go1.26.7` linux/amd64; standalone verifier |
 | Formal tool | TLC 1.7.4; record JAR SHA-256 and JVM flags |
 | Storage | Record filesystem, mount, free space, sync settings, database sizes, and cache state per run |
