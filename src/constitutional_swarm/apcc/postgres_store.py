@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import secrets
 import threading
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator, Protocol, TypeVar, cast
@@ -37,11 +38,16 @@ from .ports import (
 )
 from .crypto import sha256_digest
 from .sqlite_store import (
+    _AUTHORITY_SCHEMA_VERSION,
     _AuthorityReaderCore,
     _AuthorityStoreCore,
+    _SEMANTIC_CHECKPOINT_GENESIS,
+    _SemanticSnapshot,
+    _SCHEMA_VERSION_INCOMPATIBLE,
     _MAX_SAFE_INTEGER,
     _audit_id,
     _canonical_positive_decimal,
+    _checkpoint_semantic_snapshot,
     _config_from_object,
     _config_object,
     _insert_context,
@@ -49,14 +55,19 @@ from .sqlite_store import (
     _loads,
     _operation_identity,
     _replay,
+    _seal_semantic_checkpoint,
     _supersession_replay,
     _trusted_now,
     _validate_semantic_integrity,
+    _verify_semantic_checkpoint,
     _write_audit,
 )
 
 _SCHEMA_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]{0,62}\Z")
 _RESERVED_SCHEMAS = frozenset({"public", "pg_catalog", "information_schema"})
+_RESERVED_ROLES = frozenset(
+    {"public", "current_role", "current_user", "session_user", "none"}
+)
 _RETRYABLE_SQLSTATES = frozenset({"40001", "40P01"})
 _AMBIGUOUS_SQLSTATES = frozenset({"40003", "08007"})
 _LEASE_DURATION_MS = 30_000
@@ -101,6 +112,7 @@ class _Cursor:
 class _Connection:
     def __init__(self, raw: psycopg.Connection[tuple[object, ...]]) -> None:
         self.raw = raw
+        self.checkpoint_attested = False
 
     def execute(self, query: str, parameters: tuple[object, ...] = ()) -> _Cursor:
         adapted = _adapt_sql(query)
@@ -127,12 +139,30 @@ def _validate_schema_name(schema: str) -> None:
         raise ValueError("unsafe APCC PostgreSQL schema name")
 
 
+def _validate_role_name(role: str) -> None:
+    folded = role.casefold()
+    if (
+        _SCHEMA_RE.fullmatch(role) is None
+        or folded in _RESERVED_ROLES
+        or folded.startswith("pg_")
+    ):
+        raise ValueError("unsafe APCC PostgreSQL role name")
+
+
+def _quoted_identifier(identifier: str) -> str:
+    if _SCHEMA_RE.fullmatch(identifier) is None:
+        raise ValueError("unsafe APCC PostgreSQL identifier")
+    return f'"{identifier}"'
+
+
 def _connect(dsn: str, schema: str, *, autocommit: bool = False) -> _Connection:
     _validate_schema_name(schema)
     raw = psycopg.connect(dsn, autocommit=True)
     try:
         raw.execute(
-            sql.SQL("SET search_path TO {}, pg_catalog").format(sql.Identifier(schema))
+            sql.SQL("SET search_path TO {}, pg_catalog, pg_temp").format(
+                sql.Identifier(schema)
+            )
         )
         if not autocommit:
             raw.autocommit = False
@@ -472,17 +502,28 @@ _POSTGRES_TABLES = (
     """CREATE TABLE workflow_authority (
         workflow_id TEXT CONSTRAINT workflow_authority_pkey PRIMARY KEY
     )""",
+    f"""CREATE TABLE semantic_checkpoint (
+        singleton SMALLINT CONSTRAINT semantic_checkpoint_pkey PRIMARY KEY,
+        change_sequence BIGINT NOT NULL,
+        prior_digest TEXT NOT NULL,
+        checkpoint_digest TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        CONSTRAINT semantic_checkpoint_singleton_check CHECK (singleton=1),
+        CONSTRAINT semantic_checkpoint_sequence_check
+            CHECK (change_sequence BETWEEN 0 AND {_MAX_SAFE_INTEGER})
+    )""",
 )
 
 _POSTGRES_FUNCTIONS = (
     """CREATE FUNCTION apcc_reject_mutation() RETURNS trigger
-    LANGUAGE plpgsql AS $apcc$
+    LANGUAGE plpgsql SET search_path FROM CURRENT AS $apcc$
     BEGIN
         RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE='55000';
     END
     $apcc$""",
     """CREATE FUNCTION apcc_validate_disposition() RETURNS trigger
-    LANGUAGE plpgsql AS $apcc$
+    LANGUAGE plpgsql SET search_path FROM CURRENT AS $apcc$
     BEGIN
         IF NEW.event_sequence=1 AND NEW.disposition='CURRENT'
            AND NOT EXISTS (
@@ -510,7 +551,7 @@ _POSTGRES_FUNCTIONS = (
     END
     $apcc$""",
     """CREATE FUNCTION apcc_validate_outbox_identity() RETURNS trigger
-    LANGUAGE plpgsql AS $apcc$
+    LANGUAGE plpgsql SET search_path FROM CURRENT AS $apcc$
     BEGIN
         IF NEW.event_sequence IS DISTINCT FROM OLD.event_sequence
            OR NEW.event_id IS DISTINCT FROM OLD.event_id
@@ -524,6 +565,62 @@ _POSTGRES_FUNCTIONS = (
         RETURN NEW;
     END
     $apcc$""",
+    f"""CREATE FUNCTION apcc_mark_semantic_dirty() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $apcc$
+    BEGIN
+        UPDATE semantic_checkpoint SET
+            change_sequence=change_sequence+1,
+            prior_digest=CASE
+                WHEN checkpoint_digest<>'' THEN checkpoint_digest
+                ELSE prior_digest
+            END,
+            checkpoint_digest='',
+            signature=''
+        WHERE singleton=1 AND change_sequence < {_MAX_SAFE_INTEGER};
+        IF FOUND THEN
+            RETURN NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM semantic_checkpoint WHERE singleton=1) THEN
+            RAISE EXCEPTION 'semantic checkpoint missing'
+                USING ERRCODE='55000';
+        ELSE
+            RAISE EXCEPTION 'semantic checkpoint sequence exhausted'
+                USING ERRCODE='22003';
+        END IF;
+        RETURN NULL;
+    END
+    $apcc$""",
+)
+
+_POSTGRES_CHECKPOINT_TABLES = (
+    "metadata",
+    "logical_nodes",
+    "candidates",
+    "commit_index",
+    "request_index",
+    "nonce_ledger",
+    "evidence_refs",
+    "certificates",
+    "audit_events",
+    "decisions",
+    "certificate_dispositions",
+    "predecessor_edges",
+    "supersession_edges",
+    "workflow_revocations",
+    "actor_revocations",
+    "trust_log",
+    "control_events",
+    "outbox",
+    "commit_conflicts",
+    "workflow_authority",
+)
+
+_POSTGRES_CHECKPOINT_TRIGGERS = tuple(
+    "CREATE TRIGGER apcc_semantic_dirty_"
+    f"{table}_{operation.casefold()} AFTER {operation} ON {table} "
+    "FOR EACH STATEMENT EXECUTE FUNCTION apcc_mark_semantic_dirty()"
+    for table in _POSTGRES_CHECKPOINT_TABLES
+    for operation in ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
 )
 
 _POSTGRES_TRIGGERS = (
@@ -536,6 +633,7 @@ _POSTGRES_TRIGGERS = (
     "CREATE TRIGGER control_events_no_delete BEFORE DELETE ON control_events FOR EACH ROW EXECUTE FUNCTION apcc_reject_mutation()",
     "CREATE TRIGGER outbox_identity_no_update BEFORE UPDATE ON outbox FOR EACH ROW EXECUTE FUNCTION apcc_validate_outbox_identity()",
     "CREATE TRIGGER outbox_no_delete BEFORE DELETE ON outbox FOR EACH ROW EXECUTE FUNCTION apcc_reject_mutation()",
+    *_POSTGRES_CHECKPOINT_TRIGGERS,
 )
 
 _POSTGRES_INDEXES = (
@@ -552,36 +650,123 @@ _POSTGRES_SCHEMA_STATEMENTS = (
     *_POSTGRES_INDEXES,
 )
 
+_POSTGRES_BOOTSTRAP_STATEMENTS = (
+    *_POSTGRES_TABLES,
+    *_POSTGRES_FUNCTIONS,
+    *_POSTGRES_INDEXES,
+)
+
+
+def _apply_privilege_contract(
+    connection: _Connection,
+    schema: str,
+    runtime_role: str,
+) -> None:
+    _validate_schema_name(schema)
+    _validate_role_name(runtime_role)
+    quoted_schema = _quoted_identifier(schema)
+    quoted_runtime = _quoted_identifier(runtime_role)
+    checkpoint = f'{quoted_schema}."semantic_checkpoint"'
+    connection.execute(f"REVOKE ALL ON SCHEMA {quoted_schema} FROM PUBLIC")
+    connection.execute(f"GRANT USAGE ON SCHEMA {quoted_schema} TO {quoted_runtime}")
+    connection.execute(
+        f"REVOKE ALL ON ALL TABLES IN SCHEMA {quoted_schema} FROM PUBLIC"
+    )
+    connection.execute(
+        "GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA "
+        f"{quoted_schema} TO {quoted_runtime}"
+    )
+    connection.execute(f"REVOKE ALL ON TABLE {checkpoint} FROM {quoted_runtime}")
+    connection.execute(f"GRANT SELECT ON TABLE {checkpoint} TO {quoted_runtime}")
+    connection.execute(
+        "GRANT UPDATE(checkpoint_digest,signature) ON TABLE "
+        f"{checkpoint} TO {quoted_runtime}"
+    )
+    connection.execute(
+        f"REVOKE ALL ON ALL FUNCTIONS IN SCHEMA {quoted_schema} FROM PUBLIC"
+    )
+
 
 def _normalize_schema_sql(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip()).casefold()
 
 
 _POSTGRES_SCHEMA_FINGERPRINT = sha256_digest(
-    "\n".join(
-        _normalize_schema_sql(statement) for statement in _POSTGRES_SCHEMA_STATEMENTS
+    (
+        f"schema-version={_AUTHORITY_SCHEMA_VERSION}\n"
+        + "\n".join(
+            _normalize_schema_sql(statement)
+            for statement in _POSTGRES_SCHEMA_STATEMENTS
+        )
     ).encode("utf-8")
 )
 
 # PostgreSQL 17 pg_catalog signature of the native manifest above.  It covers
 # relation flags, every user column/default, every constraint definition, all
 # indexes (including constraint indexes), triggers, and function bodies.
-_POSTGRES_CATALOG_FINGERPRINT = "Ip9-ne8ue5Npj8TTvF2TtnlpC7ybrd17NQZJft5u5Qo"
+_POSTGRES_CATALOG_FINGERPRINT = "zqIOP3-8jllzLNmmaBP6ZjI1Mb8Op-XtY8Kp6aOTOYo"
 
 
-def _normalize_catalog_text(value: object, schema: str) -> object:
+def _normalize_catalog_text(
+    value: object, schema: str, owner_role: str, runtime_role: str
+) -> object:
     if not isinstance(value, str):
         return value
+    if value == schema:
+        return "<schema>"
     normalized = value.replace(f'"{schema}".', "<schema>.")
     normalized = re.sub(rf"\b{re.escape(schema)}\.", "<schema>.", normalized)
+    normalized = re.sub(
+        rf'(search_path=)"?{re.escape(schema)}"?(?=,|$)',
+        r"\1<schema>",
+        normalized,
+    )
+    for role, replacement in (
+        (owner_role, "<owner>"),
+        (runtime_role, "<runtime>"),
+    ):
+        normalized = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(role)}(?![A-Za-z0-9_])",
+            replacement,
+            normalized,
+        )
     return _normalize_schema_sql(normalized)
 
 
-def _catalog_manifest(connection: _Connection, schema: str) -> dict[str, object]:
+def _catalog_manifest(
+    connection: _Connection,
+    schema: str,
+    owner_role: str,
+    runtime_role: str,
+) -> dict[str, object]:
+    schema_identity = connection.execute(
+        "SELECT n.nspname,pg_get_userbyid(n.nspowner) FROM pg_namespace n "
+        "WHERE n.nspname=%s",
+        (schema,),
+    ).fetchall()
+    schema_acls = connection.execute(
+        "SELECT CASE WHEN x.grantee=0 THEN 'PUBLIC' "
+        "ELSE pg_get_userbyid(x.grantee) END,pg_get_userbyid(x.grantor),"
+        "x.privilege_type,x.is_grantable FROM pg_namespace n "
+        "CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,"
+        "acldefault('n',n.nspowner))) x WHERE n.nspname=%s",
+        (schema,),
+    ).fetchall()
     relations = connection.execute(
         "SELECT c.relname,c.relkind,c.relpersistence,c.relrowsecurity,"
-        "c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "c.relforcerowsecurity,pg_get_userbyid(c.relowner) "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
         "WHERE n.nspname=%s AND c.relkind IN ('r','p') ORDER BY c.relname",
+        (schema,),
+    ).fetchall()
+    relation_acls = connection.execute(
+        "SELECT c.relname,CASE WHEN x.grantee=0 THEN 'PUBLIC' "
+        "ELSE pg_get_userbyid(x.grantee) END,pg_get_userbyid(x.grantor),"
+        "x.privilege_type,x.is_grantable FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,"
+        "acldefault('r',c.relowner))) x WHERE n.nspname=%s "
+        "AND c.relkind IN ('r','p')",
         (schema,),
     ).fetchall()
     columns = connection.execute(
@@ -592,6 +777,17 @@ def _catalog_manifest(connection: _Connection, schema: str) -> dict[str, object]
         "LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum "
         "WHERE n.nspname=%s AND c.relkind IN ('r','p') AND a.attnum>0 "
         "AND NOT a.attisdropped ORDER BY c.relname,a.attnum",
+        (schema,),
+    ).fetchall()
+    column_acls = connection.execute(
+        "SELECT c.relname,a.attname,CASE WHEN x.grantee=0 THEN 'PUBLIC' "
+        "ELSE pg_get_userbyid(x.grantee) END,pg_get_userbyid(x.grantor),"
+        "x.privilege_type,x.is_grantable FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "JOIN pg_attribute a ON a.attrelid=c.oid "
+        "CROSS JOIN LATERAL aclexplode(a.attacl) x "
+        "WHERE n.nspname=%s AND c.relkind IN ('r','p') "
+        "AND a.attnum>0 AND NOT a.attisdropped AND a.attacl IS NOT NULL",
         (schema,),
     ).fetchall()
     constraints = connection.execute(
@@ -622,43 +818,160 @@ def _catalog_manifest(connection: _Connection, schema: str) -> dict[str, object]
     functions = connection.execute(
         "SELECT p.proname,p.prokind,p.provolatile,p.proparallel,p.prosecdef,"
         "p.proleakproof,coalesce(array_to_string(p.proconfig,','),''),l.lanname,"
-        "pg_get_function_result(p.oid),pg_get_function_arguments(p.oid),p.prosrc "
+        "pg_get_function_result(p.oid),pg_get_function_arguments(p.oid),p.prosrc,"
+        "pg_get_userbyid(p.proowner) "
         "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
         "JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname=%s ORDER BY p.proname",
         (schema,),
     ).fetchall()
+    function_acls = connection.execute(
+        "SELECT p.proname,CASE WHEN x.grantee=0 THEN 'PUBLIC' "
+        "ELSE pg_get_userbyid(x.grantee) END,pg_get_userbyid(x.grantor),"
+        "x.privilege_type,x.is_grantable FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid=p.pronamespace "
+        "CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,"
+        "acldefault('f',p.proowner))) x WHERE n.nspname=%s",
+        (schema,),
+    ).fetchall()
+    roles = connection.execute(
+        "SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,"
+        "rolreplication,rolbypassrls FROM pg_roles WHERE rolname IN (%s,%s)",
+        (owner_role, runtime_role),
+    ).fetchall()
 
     def normalized(rows: list[tuple[object, ...]]) -> list[list[object]]:
-        return [
-            [_normalize_catalog_text(value, schema) for value in row] for row in rows
+        normalized_rows = [
+            [
+                _normalize_catalog_text(value, schema, owner_role, runtime_role)
+                for value in row
+            ]
+            for row in rows
         ]
+        return sorted(normalized_rows, key=_json)
 
     return {
+        "schema": normalized(schema_identity),
+        "schema_acls": normalized(schema_acls),
         "relations": normalized(relations),
+        "relation_acls": normalized(relation_acls),
         "columns": normalized(columns),
+        "column_acls": normalized(column_acls),
         "constraints": normalized(constraints),
         "indexes": normalized(indexes),
         "triggers": normalized(triggers),
         "functions": normalized(functions),
+        "function_acls": normalized(function_acls),
+        "roles": normalized(roles),
     }
 
 
-def _catalog_fingerprint(connection: _Connection, schema: str) -> str:
-    return sha256_digest(_json(_catalog_manifest(connection, schema)).encode("utf-8"))
+def _catalog_fingerprint(
+    connection: _Connection,
+    schema: str,
+    owner_role: str,
+    runtime_role: str,
+) -> str:
+    manifest = _catalog_manifest(connection, schema, owner_role, runtime_role)
+    return sha256_digest(_json(manifest).encode("utf-8"))
 
 
-def _semantic_config(connection: _Connection, schema: str) -> APCCAuthorityConfig:
+def _validate_role_contract(
+    connection: _Connection,
+    schema: str,
+    owner_role: str,
+    runtime_role: str,
+    *,
+    allow_owner: bool,
+) -> None:
+    invalid = ValueError("APCC PostgreSQL privilege contract validation failed")
+    _validate_role_name(owner_role)
+    _validate_role_name(runtime_role)
+    if owner_role == runtime_role:
+        raise invalid
+    schema_owner = connection.execute(
+        "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname=%s",
+        (schema,),
+    ).fetchone()
+    if schema_owner != (owner_role,):
+        raise invalid
+    rows = {
+        str(row[0]): tuple(row[1:])
+        for row in connection.execute(
+            "SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,"
+            "rolcanlogin,rolreplication,rolbypassrls FROM pg_roles "
+            "WHERE rolname IN (%s,%s)",
+            (owner_role, runtime_role),
+        )
+    }
+    if rows != {
+        owner_role: (False, False, False, False, False, False, False),
+        runtime_role: (False, False, False, False, True, False, False),
+    }:
+        raise invalid
+    membership = connection.execute(
+        "SELECT 1 FROM pg_auth_members m "
+        "JOIN pg_roles member_role ON member_role.oid=m.member "
+        "JOIN pg_roles granted_role ON granted_role.oid=m.roleid "
+        "WHERE member_role.rolname IN (%s,%s) "
+        "OR granted_role.rolname IN (%s,%s) LIMIT 1",
+        (owner_role, runtime_role, owner_role, runtime_role),
+    ).fetchone()
+    if membership is not None:
+        raise invalid
+    expected = owner_role if allow_owner else runtime_role
+    identity = connection.execute("SELECT session_user,current_user").fetchone()
+    if (
+        identity is None
+        or identity[1] != expected
+        or (allow_owner and identity[0] == runtime_role)
+        or (not allow_owner and identity[0] != runtime_role)
+    ):
+        raise invalid
+    database_create = connection.execute(
+        "SELECT has_database_privilege(%s,current_database(),'CREATE')",
+        (runtime_role,),
+    ).fetchone()
+    if database_create != (False,):
+        raise invalid
+
+
+def _semantic_config(
+    connection: _Connection, schema: str, *, allow_owner: bool = False
+) -> APCCAuthorityConfig:
     invalid = ValueError("APCC authority store schema validation failed")
     try:
-        if _catalog_fingerprint(connection, schema) != _POSTGRES_CATALOG_FINGERPRINT:
-            raise invalid
         values = {
             str(key): str(value)
             for key, value in connection.execute(
                 "SELECT key,value FROM metadata ORDER BY key"
             )
         }
-        if set(values) != {"config", "schema_fingerprint"}:
+    except Exception as error:
+        raise invalid from error
+    if values.get("schema_version") != _AUTHORITY_SCHEMA_VERSION:
+        raise ValueError(_SCHEMA_VERSION_INCOMPATIBLE)
+    try:
+        if set(values) != {
+            "config",
+            "postgres_owner_role",
+            "postgres_runtime_role",
+            "schema_fingerprint",
+            "schema_version",
+        }:
+            raise invalid
+        owner_role = values["postgres_owner_role"]
+        runtime_role = values["postgres_runtime_role"]
+        _validate_role_contract(
+            connection,
+            schema,
+            owner_role,
+            runtime_role,
+            allow_owner=allow_owner,
+        )
+        if (
+            _catalog_fingerprint(connection, schema, owner_role, runtime_role)
+            != _POSTGRES_CATALOG_FINGERPRINT
+        ):
             raise invalid
         if values["schema_fingerprint"] != _POSTGRES_SCHEMA_FINGERPRINT:
             raise invalid
@@ -672,17 +985,72 @@ def _semantic_config(connection: _Connection, schema: str) -> APCCAuthorityConfi
         raise invalid from error
 
 
-def _validate_semantics(connection: _Connection, config: APCCAuthorityConfig) -> None:
+def _validate_semantics(
+    connection: _Connection, config: APCCAuthorityConfig
+) -> _SemanticSnapshot:
     try:
-        _validate_semantic_integrity(connection, config)
+        return _validate_semantic_integrity(connection, config)
     except Exception as error:
         raise ValueError("APCC authority store semantic validation failed") from error
 
 
-def _attest_store(connection: _Connection, schema: str) -> APCCAuthorityConfig:
-    config = _semantic_config(connection, schema)
+def _attest_store(
+    connection: _Connection,
+    schema: str,
+    *,
+    allow_owner: bool = False,
+) -> APCCAuthorityConfig:
+    config = _semantic_config(connection, schema, allow_owner=allow_owner)
     _validate_semantics(connection, config)
+    _verify_semantic_checkpoint(
+        connection,
+        config,
+        _POSTGRES_SCHEMA_FINGERPRINT,
+    )
     return config
+
+
+def _validate_runtime_signers(
+    config: APCCAuthorityConfig,
+    runtime: AuthorityRuntime,
+) -> None:
+    for role, binding in (
+        (AuthoritySigningRole.COMMIT, config.commit_trust),
+        (AuthoritySigningRole.STATUS, config.status_trust),
+    ):
+        if (
+            bytes(runtime.key_provider.public_key(role, binding.key_id))
+            != binding.public_key
+        ):
+            raise ValueError("APCC runtime signer does not match public configuration")
+
+
+def _attest_and_seal_fresh_bootstrap(
+    connection: _Connection,
+    schema: str,
+    expected_config: APCCAuthorityConfig,
+    runtime: AuthorityRuntime,
+) -> None:
+    config = _semantic_config(connection, schema, allow_owner=True)
+    if config != expected_config:
+        raise ValueError("APCC authority store configuration mismatch")
+    _validate_semantics(connection, config)
+    sealed = _verify_semantic_checkpoint(
+        connection,
+        config,
+        _POSTGRES_SCHEMA_FINGERPRINT,
+        allow_initial_unsealed=True,
+    )
+    if sealed:
+        raise ValueError("APCC authority bootstrap checkpoint was already sealed")
+    _seal_semantic_checkpoint(
+        connection,
+        config,
+        runtime,
+        _POSTGRES_SCHEMA_FINGERPRINT,
+    )
+    if _attest_store(connection, schema, allow_owner=True) != expected_config:
+        raise ValueError("APCC authority store configuration mismatch")
 
 
 class PostgresAuthorityReader(_AuthorityReaderCore):
@@ -723,9 +1091,14 @@ class PostgresAuthorityReader(_AuthorityReaderCore):
             connection.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
             )
-            config = _attest_store(connection, self.schema_name)
+            config = _semantic_config(connection, self.schema_name)
             if config.authority_store_id != self.authority_store_id:
                 raise ValueError("APCC authority store identity mismatch")
+            _verify_semantic_checkpoint(
+                connection,
+                config,
+                _POSTGRES_SCHEMA_FINGERPRINT,
+            )
             yield connection
             connection.commit()
         except Exception:
@@ -819,8 +1192,12 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
         schema: str,
         config: APCCAuthorityConfig,
         initial_contexts: tuple[CommitContext, ...],
+        runtime_role: str,
+        runtime: AuthorityRuntime,
     ) -> None:
         _validate_schema_name(schema)
+        _validate_role_name(runtime_role)
+        _validate_runtime_signers(config, runtime)
         connection = _connect(dsn, schema)
         try:
             connection.execute(
@@ -836,7 +1213,25 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
             ).fetchone()
             if occupied is not None:
                 raise ValueError("APCC PostgreSQL schema is already provisioned")
-            for statement in _POSTGRES_SCHEMA_STATEMENTS:
+            owner_row = connection.execute(
+                "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname=%s",
+                (schema,),
+            ).fetchone()
+            if owner_row is None or not isinstance(owner_row[0], str):
+                raise ValueError("APCC PostgreSQL privilege contract validation failed")
+            owner_role = owner_row[0]
+            _validate_role_name(owner_role)
+            if owner_role == runtime_role:
+                raise ValueError("APCC PostgreSQL privilege contract validation failed")
+            connection.execute(f"SET LOCAL ROLE {_quoted_identifier(owner_role)}")
+            _validate_role_contract(
+                connection,
+                schema,
+                owner_role,
+                runtime_role,
+                allow_owner=True,
+            )
+            for statement in _POSTGRES_BOOTSTRAP_STATEMENTS:
                 connection.execute(statement)
             connection.execute(
                 "INSERT INTO metadata(key,value) VALUES ('config',%s)",
@@ -845,6 +1240,15 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
             connection.execute(
                 "INSERT INTO metadata(key,value) VALUES ('schema_fingerprint',%s)",
                 (_POSTGRES_SCHEMA_FINGERPRINT,),
+            )
+            connection.execute(
+                "INSERT INTO metadata(key,value) VALUES ('schema_version',%s)",
+                (_AUTHORITY_SCHEMA_VERSION,),
+            )
+            connection.execute(
+                "INSERT INTO metadata(key,value) VALUES "
+                "('postgres_owner_role',%s),('postgres_runtime_role',%s)",
+                (owner_role, runtime_role),
             )
             workflows: set[str] = set()
             for context in initial_contexts:
@@ -855,9 +1259,16 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
                     "INSERT INTO workflow_authority(workflow_id) VALUES (%s)",
                     (workflow_id,),
                 )
-            provisioned = _attest_store(connection, schema)
-            if provisioned != config:
-                raise ValueError("APCC authority store configuration mismatch")
+            connection.execute(
+                "INSERT INTO semantic_checkpoint(singleton,change_sequence,"
+                "prior_digest,checkpoint_digest,key_id,signature) "
+                "VALUES (1,0,%s,'',%s,'')",
+                (_SEMANTIC_CHECKPOINT_GENESIS, config.commit_trust.key_id),
+            )
+            for statement in _POSTGRES_TRIGGERS:
+                connection.execute(statement)
+            _apply_privilege_contract(connection, schema, runtime_role)
+            _attest_and_seal_fresh_bootstrap(connection, schema, config, runtime)
             connection.commit()
         except Exception:
             try:
@@ -906,37 +1317,38 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
         probe: _Probe | None,
     ) -> PostgresAuthorityStore:
         _validate_schema_name(schema)
-        connection = _connect(dsn, schema)
-        try:
-            connection.execute(
-                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
-            )
-            provisioned = _attest_store(connection, schema)
-            if provisioned != config:
-                raise ValueError(
-                    "APCC authority configuration does not match provisioned store"
-                )
-            connection.commit()
-        except Exception:
+        _validate_runtime_signers(config, runtime)
+        store = cls(dsn, schema, config, runtime, retry_policy, probe)
+        store._open_and_ensure_semantic_checkpoint()
+        return store
+
+    def _open_and_ensure_semantic_checkpoint(self) -> None:
+        for attempt in range(1, self._retry_policy.max_attempts + 1):
+            connection = _connect(self._dsn, self.schema_name)
             try:
-                connection.rollback()
-            except Exception:
-                pass
-            raise
-        finally:
-            connection.close()
-        for role, binding in (
-            (AuthoritySigningRole.COMMIT, config.commit_trust),
-            (AuthoritySigningRole.STATUS, config.status_trust),
-        ):
-            if (
-                bytes(runtime.key_provider.public_key(role, binding.key_id))
-                != binding.public_key
-            ):
-                raise ValueError(
-                    "APCC runtime signer does not match public configuration"
-                )
-        return cls(dsn, schema, config, runtime, retry_policy, probe)
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                provisioned = _attest_store(connection, self.schema_name)
+                if provisioned != self._config:
+                    raise ValueError(
+                        "APCC authority configuration does not match provisioned store"
+                    )
+                connection.commit()
+                return
+            except Exception as error:
+                try:
+                    connection.rollback()
+                except Exception:
+                    pass
+                sqlstate = getattr(error, "sqlstate", None)
+                if sqlstate not in _RETRYABLE_SQLSTATES:
+                    raise
+                if attempt == self._retry_policy.max_attempts:
+                    raise RuntimeError(
+                        "PostgreSQL writer open transaction "
+                        f"{sqlstate} exhausted after {attempt} attempts"
+                    ) from error
+            finally:
+                connection.close()
 
     @contextmanager
     def _read_transaction(self) -> Iterator[_Connection]:
@@ -945,11 +1357,17 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
             connection.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
             )
-            provisioned = _attest_store(connection, self.schema_name)
+            provisioned = _semantic_config(connection, self.schema_name)
             if provisioned != self._config:
                 raise ValueError(
                     "APCC authority configuration does not match provisioned store"
                 )
+            _verify_semantic_checkpoint(
+                connection,
+                self._config,
+                _POSTGRES_SCHEMA_FINGERPRINT,
+            )
+            connection.checkpoint_attested = True
             yield connection
             connection.commit()
         except Exception:
@@ -960,6 +1378,42 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
             raise
         finally:
             connection.close()
+
+    def _attest_batch_snapshot(
+        self, connection: object, certificate_digests: Sequence[str] = ()
+    ) -> _SemanticSnapshot:
+        """The PostgreSQL read transaction attests before yielding its snapshot."""
+        if (
+            not isinstance(connection, _Connection)
+            or not connection.checkpoint_attested
+        ):
+            raise ValueError("APCC PostgreSQL batch snapshot was not attested")
+        return _checkpoint_semantic_snapshot(connection, certificate_digests)
+
+    def _validate_mutation_checkpoint(
+        self,
+        connection: _Connection,
+        provisioned: APCCAuthorityConfig | None = None,
+    ) -> None:
+        if provisioned is None:
+            provisioned = _semantic_config(connection, self.schema_name)
+        if provisioned != self._config:
+            raise ValueError(
+                "APCC authority configuration does not match provisioned store"
+            )
+        _verify_semantic_checkpoint(
+            connection,
+            self._config,
+            _POSTGRES_SCHEMA_FINGERPRINT,
+        )
+
+    def _seal_mutation_checkpoint(self, connection: _Connection) -> None:
+        _seal_semantic_checkpoint(
+            connection,
+            self._config,
+            self._runtime,
+            _POSTGRES_SCHEMA_FINGERPRINT,
+        )
 
     @contextmanager
     def _transaction(self) -> Iterator[_Connection]:
@@ -1014,14 +1468,16 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
                     "WHERE certificate_digest=%s FOR UPDATE",
                     (certificate_digest,),
                 ).fetchone()
+            checkpoint = connection.execute(
+                "SELECT singleton FROM semantic_checkpoint WHERE singleton=1 FOR UPDATE"
+            ).fetchone()
+            if checkpoint != (1,):
+                raise ValueError("APCC authority semantic checkpoint validation failed")
             if self._postgres_probe is not None:
                 self._postgres_probe.hit("before_mutation_attestation", connection)
-            provisioned = _attest_store(connection, self.schema_name)
-            if provisioned != self._config:
-                raise ValueError(
-                    "APCC authority configuration does not match provisioned store"
-                )
+            self._validate_mutation_checkpoint(connection)
             yield connection
+            self._seal_mutation_checkpoint(connection)
             connection.commit()
             if self._postgres_probe is not None:
                 self._postgres_probe.hit(
@@ -1430,14 +1886,20 @@ class PostgresAuthorityStore(_AuthorityStoreCore):
             try:
                 connection = _connect(self._dsn, self.schema_name)
                 connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                provisioned = _semantic_config(connection, self.schema_name)
+                checkpoint = connection.execute(
+                    "SELECT singleton FROM semantic_checkpoint "
+                    "WHERE singleton=1 FOR UPDATE"
+                ).fetchone()
+                if checkpoint != (1,):
+                    raise ValueError(
+                        "APCC authority semantic checkpoint validation failed"
+                    )
                 if self._postgres_probe is not None:
                     self._postgres_probe.hit("before_outbox_attestation", connection)
-                provisioned = _attest_store(connection, self.schema_name)
-                if provisioned != self._config:
-                    raise ValueError(
-                        "APCC authority configuration does not match provisioned store"
-                    )
+                self._validate_mutation_checkpoint(connection, provisioned)
                 result = operation(connection)
+                self._seal_mutation_checkpoint(connection)
                 connection.commit()
                 return result
             except Exception as error:

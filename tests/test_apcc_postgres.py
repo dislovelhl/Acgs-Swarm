@@ -28,6 +28,7 @@ from constitutional_swarm.apcc.model import (
     AuthorityStatusValue,
     FailureCode,
     RequestOutcome,
+    Signature,
     SupersessionValue,
 )
 from constitutional_swarm.apcc.ports import (
@@ -35,9 +36,12 @@ from constitutional_swarm.apcc.ports import (
     AtomicCommitRequest,
     AuthorityReader,
     AuthorityRuntime,
+    AuthoritySigningRole,
     AuthorityStore,
     CommitContextRequest,
     CommitResult,
+    CurrentStatusRequest,
+    LogicalNodeStatusRequest,
     OutboxRecoveryRequest,
     OutboxRecoveryResult,
     RecoveryRequest,
@@ -63,11 +67,34 @@ from tests.apcc_conformance import (
 
 _DSN_ENV = "APCC_POSTGRES_DSN"
 _SCHEMA_RE = re.compile(r"\Aapcc_test_[a-z0-9_]{1,48}\Z")
+_ROLE_RE = re.compile(r"\Aapcc_test_[0-9a-f]{24}_(?:owner|runtime)\Z")
 _RETRYABLE_SQLSTATES = ("40001", "40P01")
 _AMBIGUOUS_SQLSTATES: tuple[str | None, ...] = ("40003", "08007", None)
 _ROLE_SEEDS = tuple(bytes(range(start, start + 32)) for start in range(0, 192, 32))
 _MIN_MAX_CONNECTIONS = 105
 _BENCHMARK_MAX_CONNECTIONS = 200
+_CHECKPOINT_GUARDED_TABLES = (
+    "metadata",
+    "logical_nodes",
+    "candidates",
+    "commit_index",
+    "request_index",
+    "nonce_ledger",
+    "evidence_refs",
+    "certificates",
+    "audit_events",
+    "decisions",
+    "certificate_dispositions",
+    "predecessor_edges",
+    "supersession_edges",
+    "workflow_revocations",
+    "actor_revocations",
+    "trust_log",
+    "control_events",
+    "outbox",
+    "commit_conflicts",
+    "workflow_authority",
+)
 
 
 class _Cursor(Protocol):
@@ -82,6 +109,8 @@ class _Connection(Protocol):
     def close(self) -> None: ...
 
     def commit(self) -> None: ...
+
+    def rollback(self) -> None: ...
 
     def __enter__(self) -> _Connection: ...
 
@@ -123,6 +152,8 @@ class _PostgresStoreFactory(Protocol):
         schema: str,
         config: APCCAuthorityConfig,
         initial_contexts: tuple[object, ...],
+        runtime_role: str,
+        runtime: AuthorityRuntime,
     ) -> None: ...
 
     def open(
@@ -176,8 +207,11 @@ class _Modules:
 @dataclass(slots=True)
 class _PostgresEnvironment:
     dsn: str
+    runtime_dsn: str
     schema_prefix: str
     ownership_token: str
+    owner_role: str
+    runtime_role: str
     modules: _Modules
     created_schemas: set[str] = field(default_factory=set)
 
@@ -187,7 +221,9 @@ class _PostgresEnvironment:
         _validate_owned_schema(schema)
         with self.modules.psycopg.connect(self.dsn, autocommit=True) as connection:
             if schema not in self.created_schemas:
-                connection.execute(f'CREATE SCHEMA "{schema}"')
+                connection.execute(
+                    f'CREATE SCHEMA "{schema}" AUTHORIZATION "{self.owner_role}"'
+                )
                 owner_comment = _schema_owner_comment(self.ownership_token)
                 connection.execute(
                     f"COMMENT ON SCHEMA \"{schema}\" IS '{owner_comment}'"
@@ -206,10 +242,24 @@ def _validate_owned_schema(schema: str) -> None:
         raise AssertionError(f"unsafe PostgreSQL test schema: {schema!r}")
 
 
+def _validate_owned_role(role: str) -> None:
+    if _ROLE_RE.fullmatch(role) is None:
+        raise AssertionError(f"unsafe PostgreSQL test role: {role!r}")
+
+
 def _schema_owner_comment(token: str) -> str:
     if re.fullmatch(r"[0-9a-f]{24}", token) is None:
         raise AssertionError("unsafe PostgreSQL test ownership token")
     return f"apcc-test-owner:{token}"
+
+
+def _runtime_dsn(dsn: str, role: str) -> str:
+    _validate_owned_role(role)
+    make_conninfo = cast(
+        "Callable[..., str]",
+        getattr(importlib.import_module("psycopg.conninfo"), "make_conninfo"),
+    )
+    return make_conninfo(dsn, user=role)
 
 
 def _require_psycopg(module: ModuleType) -> _Psycopg:
@@ -258,8 +308,32 @@ def postgres_environment() -> Iterator[_PostgresEnvironment]:
     token = secrets.token_hex(12)
     prefix = f"apcc_test_{token}"
     _validate_owned_schema(prefix)
-    environment = _PostgresEnvironment(dsn, prefix, token, modules)
+    owner_role = f"{prefix}_owner"
+    runtime_role = f"{prefix}_runtime"
+    _validate_owned_role(owner_role)
+    _validate_owned_role(runtime_role)
+    created_roles: list[str] = []
     try:
+        with modules.psycopg.connect(dsn, autocommit=True) as connection:
+            for role, login in ((owner_role, False), (runtime_role, True)):
+                connection.execute(
+                    f'CREATE ROLE "{role}" '
+                    f"{'LOGIN' if login else 'NOLOGIN'} NOINHERIT NOSUPERUSER "
+                    "NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+                )
+                created_roles.append(role)
+                connection.execute(
+                    f"COMMENT ON ROLE \"{role}\" IS '{_schema_owner_comment(token)}'"
+                )
+        environment = _PostgresEnvironment(
+            dsn,
+            _runtime_dsn(dsn, runtime_role),
+            prefix,
+            token,
+            owner_role,
+            runtime_role,
+            modules,
+        )
         yield environment
     finally:
         with modules.psycopg.connect(dsn, autocommit=True) as connection:
@@ -280,6 +354,17 @@ def postgres_environment() -> Iterator[_PostgresEnvironment]:
                     f"{schema_name}"
                 )
                 connection.execute(f'DROP SCHEMA "{schema_name}" CASCADE')
+            for role in reversed(created_roles):
+                _validate_owned_role(role)
+                comment = connection.execute(
+                    "SELECT shobj_description(oid, 'pg_authid') FROM pg_roles "
+                    "WHERE rolname=%s",
+                    (role,),
+                ).fetchone()
+                assert comment == (_schema_owner_comment(token),), (
+                    f"refusing to drop role without exact ownership token: {role}"
+                )
+                connection.execute(f'DROP ROLE "{role}"')
 
 
 def _support(environment: _PostgresEnvironment, name: str) -> Callable[..., object]:
@@ -308,6 +393,10 @@ def _request(
     return value
 
 
+def _nonce(index: int) -> str:
+    return base64.urlsafe_b64encode(index.to_bytes(16, "big")).rstrip(b"=").decode()
+
+
 def _initial_contexts(environment: _PostgresEnvironment) -> tuple[object, ...]:
     value = _support(environment, "_initial_contexts")()
     assert isinstance(value, tuple)
@@ -331,6 +420,8 @@ def _snapshot(
         contents: dict[str, tuple[bytes, ...]] = {}
         for (table_name,) in table_rows:
             assert isinstance(table_name, str)
+            if table_name == "semantic_checkpoint":
+                continue
             rows = connection.execute(
                 f'SELECT * FROM "{schema}"."{table_name}" ORDER BY ctid'
             ).fetchall()
@@ -342,6 +433,27 @@ def _snapshot(
         for row in rows
     )
     return AuthoritySnapshot(contents, pointers)
+
+
+def _checkpoint_row(
+    environment: _PostgresEnvironment, schema: str
+) -> tuple[int, str, str, str, str]:
+    with environment.modules.psycopg.connect(
+        environment.dsn, autocommit=True
+    ) as connection:
+        row = connection.execute(
+            f"SELECT change_sequence,prior_digest,checkpoint_digest,key_id,signature "
+            f'FROM "{schema}"."semantic_checkpoint" WHERE singleton=1'
+        ).fetchone()
+    assert row is not None
+    assert len(row) == 5
+    sequence, prior_digest, checkpoint_digest, key_id, signature = row
+    assert isinstance(sequence, int) and not isinstance(sequence, bool)
+    assert isinstance(prior_digest, str)
+    assert isinstance(checkpoint_digest, str)
+    assert isinstance(key_id, str)
+    assert isinstance(signature, str)
+    return sequence, prior_digest, checkpoint_digest, key_id, signature
 
 
 def _harness(environment: _PostgresEnvironment) -> AuthorityStoreHarness:
@@ -356,17 +468,19 @@ def _harness(environment: _PostgresEnvironment) -> AuthorityStoreHarness:
                 schema=schema,
                 config=config,
                 initial_contexts=_initial_contexts(environment),
+                runtime_role=environment.runtime_role,
+                runtime=_runtime(environment),
             )
         if probe is None:
             store = environment.modules.store_factory.open(
-                environment.dsn,
+                environment.runtime_dsn,
                 schema=schema,
                 config=config,
                 runtime=_runtime(environment),
             )
         else:
             store = environment.modules.store_factory._open_with_probe(
-                environment.dsn,
+                environment.runtime_dsn,
                 schema=schema,
                 config=config,
                 runtime=_runtime(environment),
@@ -379,7 +493,7 @@ def _harness(environment: _PostgresEnvironment) -> AuthorityStoreHarness:
     def reopen_store(path: Path) -> _PostgresStore:
         schema = environment.schema(str(path))
         return environment.modules.store_factory.open(
-            environment.dsn,
+            environment.runtime_dsn,
             schema=schema,
             config=_config(environment),
             runtime=_runtime(environment),
@@ -445,6 +559,57 @@ def _corrupt_candidate_proposal_digest(
     assert corrupted == ("tampered",)
 
 
+def _apply_valid_test_mutation_and_reseal(
+    environment: _PostgresEnvironment,
+    schema: str,
+    query: str,
+    parameters: tuple[object, ...],
+) -> None:
+    """Apply test-only valid state setup through the authenticated checkpoint."""
+
+    store_module = importlib.import_module("constitutional_swarm.apcc.postgres_store")
+    connect = cast(
+        "Callable[[str, str], _Connection]", getattr(store_module, "_connect")
+    )
+    attest_store = cast(
+        "Callable[[_Connection, str], APCCAuthorityConfig]",
+        getattr(store_module, "_attest_store"),
+    )
+    validate_semantics = cast(
+        "Callable[[_Connection, APCCAuthorityConfig], object]",
+        getattr(store_module, "_validate_semantics"),
+    )
+    seal_checkpoint = cast(
+        "Callable[[_Connection, APCCAuthorityConfig, AuthorityRuntime, str], None]",
+        getattr(store_module, "_seal_semantic_checkpoint"),
+    )
+    schema_fingerprint = getattr(store_module, "_POSTGRES_SCHEMA_FINGERPRINT")
+    assert isinstance(schema_fingerprint, str)
+    connection = connect(environment.runtime_dsn, schema)
+    config = _config(environment)
+    try:
+        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        row = connection.execute(
+            "SELECT singleton FROM semantic_checkpoint WHERE singleton=1 FOR UPDATE"
+        ).fetchone()
+        assert row == (1,)
+        assert attest_store(connection, schema) == config
+        connection.execute(query, parameters)
+        validate_semantics(connection, config)
+        seal_checkpoint(
+            connection,
+            config,
+            _runtime(environment),
+            schema_fingerprint,
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def _single_store(
     environment: _PostgresEnvironment, label: str = "authority"
 ) -> tuple[str, _PostgresStore]:
@@ -455,9 +620,11 @@ def _single_store(
         schema=schema,
         config=config,
         initial_contexts=_initial_contexts(environment),
+        runtime_role=environment.runtime_role,
+        runtime=_runtime(environment),
     )
     return schema, environment.modules.store_factory.open(
-        environment.dsn,
+        environment.runtime_dsn,
         schema=schema,
         config=config,
         runtime=_runtime(environment),
@@ -497,7 +664,14 @@ def test_postgres_public_api_matches_the_sqlite_authority_contract(
     provision = inspect.signature(store_factory.provision).parameters
     writer_open = inspect.signature(store_factory.open).parameters
     reader_open = inspect.signature(reader_factory.open).parameters
-    assert set(provision) == {"dsn", "schema", "config", "initial_contexts"}
+    assert set(provision) == {
+        "dsn",
+        "schema",
+        "config",
+        "initial_contexts",
+        "runtime_role",
+        "runtime",
+    }
     assert set(writer_open) == {
         "dsn",
         "schema",
@@ -507,7 +681,8 @@ def test_postgres_public_api_matches_the_sqlite_authority_contract(
     }
     assert set(reader_open) == {"dsn", "schema"}
     assert provision["config"].default is inspect.Parameter.empty
-    assert "runtime" not in provision
+    assert provision["runtime_role"].default is inspect.Parameter.empty
+    assert provision["runtime"].default is inspect.Parameter.empty
     assert writer_open["config"].default is inspect.Parameter.empty
     assert writer_open["runtime"].default is inspect.Parameter.empty
     assert get_type_hints(store_factory.open)["return"] is not object
@@ -564,7 +739,7 @@ def test_postgres_uses_a_locked_workflow_guard(
             ).fetchall()
         assert rows
         contender = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -650,7 +825,7 @@ def test_postgres_global_idempotency_races_are_store_wide(
 
     def commit(request: AtomicCommitRequest) -> CommitResult:
         store = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -705,7 +880,7 @@ def test_postgres_distinct_requests_with_both_global_ids_still_conflict(
 
     def commit(request: AtomicCommitRequest) -> CommitResult:
         store = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -737,7 +912,7 @@ def test_postgres_one_hundred_connection_contention_has_one_exact_winner(
 
     def contend(_: int) -> CommitResult:
         store = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -772,7 +947,7 @@ def test_postgres_mutations_attest_inside_repeatable_read_transactions(
     schema, _ = _single_store(postgres_environment, "mutation_rr_probe")
     probe = _IsolationProbe("before_mutation_attestation")
     store = postgres_environment.modules.store_factory._open_with_probe(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -794,7 +969,7 @@ def test_postgres_outbox_attests_inside_repeatable_read_transactions(
     schema, _ = _single_store(postgres_environment, "outbox_rr_probe")
     probe = _IsolationProbe("before_outbox_attestation")
     store = postgres_environment.modules.store_factory._open_with_probe(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -844,7 +1019,7 @@ def test_postgres_known_aborts_retry_the_whole_transaction_with_a_bound(
     schema, _ = _single_store(postgres_environment, f"retry_{sqlstate}")
     probe = _SqlStateProbe(sqlstate, failures_remaining=2)
     store = postgres_environment.modules.store_factory._open_with_probe(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -867,7 +1042,7 @@ def test_postgres_retry_exhaustion_is_stable_and_writes_nothing(
     schema, setup = _single_store(postgres_environment, f"exhaust_{sqlstate}")
     probe = _SqlStateProbe(sqlstate, failures_remaining=4)
     store = postgres_environment.modules.store_factory._open_with_probe(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -917,7 +1092,7 @@ def test_postgres_23505_rolls_back_then_classifies_by_fresh_authoritative_read(
     request = _request(postgres_environment, commit_id="pg-23505", nonce_byte=107)
     probe = _RecordingProbe([], unique_failures_remaining=1)
     store = postgres_environment.modules.store_factory._open_with_probe(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -943,7 +1118,7 @@ def test_postgres_23505_rolls_back_then_classifies_by_fresh_authoritative_read(
     assert rereads[0][1] not in {observation[1] for observation in writes}
     assert rereads[0][2] not in {observation[2] for observation in writes}
     reader = postgres_environment.modules.reader_factory.open(
-        postgres_environment.dsn, schema=schema
+        postgres_environment.runtime_dsn, schema=schema
     )
     assert (
         reader.replay_commit(
@@ -1023,7 +1198,7 @@ def test_postgres_ambiguous_completion_recovers_on_a_fresh_connection(
     schema, _ = _single_store(postgres_environment, f"ambiguous_{sqlstate}")
     probe = _AmbiguousCompletionProbe(sqlstate)
     store = postgres_environment.modules.store_factory._open_with_probe(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -1044,7 +1219,7 @@ def test_postgres_ambiguous_completion_recovers_on_a_fresh_connection(
     assert len(probe.backend_pids) == 2
     assert probe.backend_pids[0] != probe.backend_pids[1]
     fresh = postgres_environment.modules.reader_factory.open(
-        postgres_environment.dsn, schema=schema
+        postgres_environment.runtime_dsn, schema=schema
     )
     assert fresh.authority_store_id == _config(postgres_environment).authority_store_id
     assert (
@@ -1054,7 +1229,7 @@ def test_postgres_ambiguous_completion_recovers_on_a_fresh_connection(
         == recovered
     )
     recovery_store = postgres_environment.modules.store_factory.open(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -1072,7 +1247,7 @@ def test_postgres_driver_commit_response_loss_uses_fresh_exact_recovery(
     schema, _ = _single_store(postgres_environment, "driver_commit_loss")
     probe = _CommitBoundaryResponseLossProbe()
     store = postgres_environment.modules.store_factory._open_with_probe(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -1089,7 +1264,7 @@ def test_postgres_driver_commit_response_loss_uses_fresh_exact_recovery(
     assert len(probe.backend_pids) == 2
     assert probe.backend_pids[0] != probe.backend_pids[1]
     reader = postgres_environment.modules.reader_factory.open(
-        postgres_environment.dsn, schema=schema
+        postgres_environment.runtime_dsn, schema=schema
     )
     assert (
         reader.replay_commit(
@@ -1122,7 +1297,7 @@ def test_postgres_concurrent_recovery_conflicts_are_serialized(
 
     def recover(index: int) -> CommitResult:
         concurrent_store = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -1223,7 +1398,7 @@ def test_postgres_cross_workflow_revocations_serialize_the_global_trust_head(
 
     def revoke(workflow_id: str) -> RevocationResult:
         store = postgres_environment.modules.store_factory._open_with_probe(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -1264,7 +1439,7 @@ def test_postgres_retries_the_whole_revocation_transaction(
     schema, _ = _single_store(postgres_environment, "control_retry")
     probe = _ControlRetryProbe(failures_remaining=1)
     store = postgres_environment.modules.store_factory._open_with_probe(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -1316,7 +1491,7 @@ def test_postgres_revocation_supersession_and_status_races_are_linearizable(
 
     def race(worker: int) -> object:
         store = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -1450,7 +1625,7 @@ def test_postgres_skip_locked_outbox_has_one_persisted_event_identity(
 
     def recover(_: int) -> OutboxRecoveryResult:
         store = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -1527,10 +1702,12 @@ def _store_with_sink(
         schema=schema,
         config=config,
         initial_contexts=_initial_contexts(environment),
+        runtime_role=environment.runtime_role,
+        runtime=_runtime(environment),
     )
     runtime = replace(_runtime(environment), outbox_sink=sink)
     store = environment.modules.store_factory.open(
-        environment.dsn,
+        environment.runtime_dsn,
         schema=schema,
         config=config,
         runtime=runtime,
@@ -1553,7 +1730,7 @@ def test_postgres_same_event_has_one_active_delivery_lease(
 
     def recover() -> OutboxRecoveryResult:
         store = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=runtime,
@@ -1585,24 +1762,22 @@ def test_postgres_active_outbox_lease_blocks_then_expiry_reclaims(
     _advance(postgres_environment, store, request)
     store.atomic_commit(request)
     now = runtime.clock.now_ms()
-    with postgres_environment.modules.psycopg.connect(
-        postgres_environment.dsn, autocommit=True
-    ) as connection:
-        connection.execute(
-            f'UPDATE "{schema}"."outbox" SET state=\'CLAIMED\','
-            "lease_token='owner',lease_claimed_ms=%s,lease_until_ms=%s,delivered=0",
-            (now, now + 1000),
-        )
+    _apply_valid_test_mutation_and_reseal(
+        postgres_environment,
+        schema,
+        "UPDATE outbox SET state='CLAIMED',lease_token='owner',"
+        "lease_claimed_ms=%s,lease_until_ms=%s,delivered=0",
+        (now, now + 1000),
+    )
     blocked = store.recover_outbox(OutboxRecoveryRequest("1"))
     assert blocked.delivered_count == "0"
     assert sink.deliveries == []
-    with postgres_environment.modules.psycopg.connect(
-        postgres_environment.dsn, autocommit=True
-    ) as connection:
-        connection.execute(
-            f'UPDATE "{schema}"."outbox" SET lease_claimed_ms=%s,lease_until_ms=%s',
-            (now - 2, now - 1),
-        )
+    _apply_valid_test_mutation_and_reseal(
+        postgres_environment,
+        schema,
+        "UPDATE outbox SET lease_claimed_ms=%s,lease_until_ms=%s",
+        (now - 2, now - 1),
+    )
     reclaimed = store.recover_outbox(OutboxRecoveryRequest("1"))
     assert reclaimed.delivered_count == "1"
     assert len(sink.deliveries) == 1
@@ -1639,7 +1814,10 @@ def test_postgres_accepts_a_generic_safe_schema_identifier(
     with postgres_environment.modules.psycopg.connect(
         postgres_environment.dsn, autocommit=True
     ) as connection:
-        connection.execute(f'CREATE SCHEMA "{schema}"')
+        connection.execute(
+            f'CREATE SCHEMA "{schema}" AUTHORIZATION '
+            f'"{postgres_environment.owner_role}"'
+        )
     try:
         config = _config(postgres_environment)
         postgres_environment.modules.store_factory.provision(
@@ -1647,9 +1825,11 @@ def test_postgres_accepts_a_generic_safe_schema_identifier(
             schema=schema,
             config=config,
             initial_contexts=_initial_contexts(postgres_environment),
+            runtime_role=postgres_environment.runtime_role,
+            runtime=_runtime(postgres_environment),
         )
         store = postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=config,
             runtime=_runtime(postgres_environment),
@@ -1674,6 +1854,8 @@ def test_postgres_rejects_reserved_or_unsafe_schema_identifiers(
             schema=schema,
             config=_config(postgres_environment),
             initial_contexts=_initial_contexts(postgres_environment),
+            runtime_role=postgres_environment.runtime_role,
+            runtime=_runtime(postgres_environment),
         )
 
 
@@ -1686,6 +1868,9 @@ def test_postgres_provisions_the_native_schema_manifest(
     ) as connection:
         fingerprint = connection.execute(
             f'SELECT value FROM "{schema}"."metadata" WHERE key=\'schema_fingerprint\''
+        ).fetchone()
+        schema_version = connection.execute(
+            f'SELECT value FROM "{schema}"."metadata" WHERE key=\'schema_version\''
         ).fetchone()
         indexes = {
             row[0]
@@ -1701,7 +1886,12 @@ def test_postgres_provisions_the_native_schema_manifest(
                 (schema,),
             ).fetchall()
         }
+        checkpoint = connection.execute(
+            f"SELECT change_sequence,prior_digest,checkpoint_digest,key_id,signature "
+            f'FROM "{schema}"."semantic_checkpoint" WHERE singleton=1'
+        ).fetchone()
     assert fingerprint is not None and len(str(fingerprint[0])) == 43
+    assert schema_version == ("2",)
     assert {
         "idx_apcc_outbox_pending",
         "idx_apcc_outbox_head",
@@ -1719,6 +1909,979 @@ def test_postgres_provisions_the_native_schema_manifest(
         "outbox_identity_no_update",
         "outbox_no_delete",
     } <= triggers
+    assert {
+        "apcc_semantic_dirty_candidates_insert",
+        "apcc_semantic_dirty_certificates_update",
+        "apcc_semantic_dirty_outbox_delete",
+        "apcc_semantic_dirty_workflow_authority_insert",
+    } <= triggers
+    assert checkpoint is not None
+    assert isinstance(checkpoint[0], int) and checkpoint[0] >= 0
+    assert isinstance(checkpoint[1], str) and len(checkpoint[1]) == 43
+    assert isinstance(checkpoint[2], str) and len(checkpoint[2]) == 43
+    assert checkpoint[3] == _config(postgres_environment).commit_trust.key_id
+    assert isinstance(checkpoint[4], str) and checkpoint[4]
+
+
+def test_postgres_v1_store_fails_with_explicit_schema_incompatibility(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, _ = _single_store(postgres_environment, "incompatible_v1")
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn, autocommit=True
+    ) as connection:
+        connection.execute(
+            f"UPDATE \"{schema}\".\"metadata\" SET value='1' WHERE key='schema_version'"
+        )
+
+    with pytest.raises(ValueError, match="authority schema version is incompatible"):
+        postgres_environment.modules.reader_factory.open(
+            postgres_environment.runtime_dsn, schema=schema
+        )
+    with pytest.raises(ValueError, match="authority schema version is incompatible"):
+        postgres_environment.modules.store_factory.open(
+            postgres_environment.runtime_dsn,
+            schema=schema,
+            config=_config(postgres_environment),
+            runtime=_runtime(postgres_environment),
+        )
+
+
+def test_postgres_checkpoint_trigger_cannot_be_shadowed_by_pg_temp(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, store = _single_store(postgres_environment, "checkpoint_pg_temp_shadow")
+    request = _request(
+        postgres_environment,
+        commit_id="checkpoint-pg-temp-shadow",
+        nonce_byte=139,
+    )
+    store.stage_result(
+        getattr(postgres_environment.modules.support, "_stage_request")(request)
+    )
+    before = _checkpoint_row(postgres_environment, schema)
+
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn
+    ) as connection:
+        connection.execute(
+            "CREATE TEMP TABLE semantic_checkpoint "
+            f'(LIKE "{schema}"."semantic_checkpoint" INCLUDING ALL)'
+        )
+        connection.execute(
+            "INSERT INTO pg_temp.semantic_checkpoint SELECT * FROM "
+            f'"{schema}"."semantic_checkpoint"'
+        )
+        connection.execute(
+            f'UPDATE "{schema}"."candidates" SET proposal_digest=\'tampered\' '
+            "WHERE workflow_id=%s AND node_id=%s AND attempt_id=%s",
+            (
+                request.subject.workflow_id,
+                request.subject.node_id,
+                request.subject.attempt_id,
+            ),
+        )
+        real = connection.execute(
+            f"SELECT change_sequence,prior_digest,checkpoint_digest,key_id,signature "
+            f'FROM "{schema}"."semantic_checkpoint" WHERE singleton=1'
+        ).fetchone()
+        shadow = connection.execute(
+            "SELECT change_sequence,prior_digest,checkpoint_digest,key_id,signature "
+            "FROM pg_temp.semantic_checkpoint WHERE singleton=1"
+        ).fetchone()
+
+    assert real is not None
+    assert isinstance(real[0], int) and not isinstance(real[0], bool)
+    assert real[0] > before[0]
+    assert real[2] == ""
+    assert real[4] == ""
+    assert shadow == before
+
+
+@pytest.mark.parametrize("table", _CHECKPOINT_GUARDED_TABLES)
+def test_postgres_truncate_dirties_checkpoint_for_every_guarded_table(
+    postgres_environment: _PostgresEnvironment,
+    table: str,
+) -> None:
+    schema, _ = _single_store(postgres_environment, f"checkpoint_truncate_{table}")
+    store_module = importlib.import_module("constitutional_swarm.apcc.postgres_store")
+    assert tuple(getattr(store_module, "_POSTGRES_CHECKPOINT_TABLES")) == (
+        _CHECKPOINT_GUARDED_TABLES
+    )
+    before = _checkpoint_row(postgres_environment, schema)
+
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn, autocommit=True
+    ) as connection:
+        connection.execute(f'TRUNCATE TABLE "{schema}"."{table}" CASCADE')
+
+    after = _checkpoint_row(postgres_environment, schema)
+    assert after[0] > before[0]
+    assert after[2] == ""
+    assert after[4] == ""
+
+
+def test_postgres_missing_checkpoint_aborts_guarded_dml_without_mutation(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, store = _single_store(postgres_environment, "checkpoint_missing")
+    request = _request(
+        postgres_environment,
+        commit_id="checkpoint-missing",
+        nonce_byte=140,
+    )
+    store.stage_result(
+        getattr(postgres_environment.modules.support, "_stage_request")(request)
+    )
+
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn, autocommit=True
+    ) as connection:
+        connection.execute(
+            f'DELETE FROM "{schema}"."semantic_checkpoint" WHERE singleton=1'
+        )
+        with pytest.raises(Exception) as error:
+            connection.execute(
+                f'UPDATE "{schema}"."candidates" SET proposal_digest=\'tampered\' '
+                "WHERE workflow_id=%s AND node_id=%s AND attempt_id=%s",
+                (
+                    request.subject.workflow_id,
+                    request.subject.node_id,
+                    request.subject.attempt_id,
+                ),
+            )
+        persisted = connection.execute(
+            f'SELECT proposal_digest FROM "{schema}"."candidates" '
+            "WHERE workflow_id=%s AND node_id=%s AND attempt_id=%s",
+            (
+                request.subject.workflow_id,
+                request.subject.node_id,
+                request.subject.attempt_id,
+            ),
+        ).fetchone()
+
+    assert getattr(error.value, "sqlstate", None) == "55000"
+    assert persisted == (None,)
+
+
+def test_postgres_provision_never_commits_unsealed_populated_state(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema = postgres_environment.schema("checkpoint_bootstrap_sealed")
+    postgres_environment.modules.store_factory.provision(
+        postgres_environment.dsn,
+        schema=schema,
+        config=_config(postgres_environment),
+        initial_contexts=_initial_contexts(postgres_environment),
+        runtime_role=postgres_environment.runtime_role,
+        runtime=_runtime(postgres_environment),
+    )
+
+    checkpoint = _checkpoint_row(postgres_environment, schema)
+    assert checkpoint[2]
+    assert checkpoint[4]
+
+
+def test_postgres_runtime_role_is_nonprivileged_and_commits_normally(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    _, store = _single_store(postgres_environment, "runtime_normal_commit")
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.runtime_dsn, autocommit=True
+    ) as connection:
+        identity = connection.execute(
+            "SELECT current_user,rolsuper,rolinherit,rolcreaterole,rolcreatedb,"
+            "rolcanlogin,rolreplication,rolbypassrls FROM pg_roles "
+            "WHERE rolname=current_user"
+        ).fetchone()
+    assert identity == (
+        postgres_environment.runtime_role,
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
+        False,
+    )
+    request = _request(postgres_environment, commit_id="runtime-normal", nonce_byte=141)
+    _advance(postgres_environment, store, request)
+    assert store.atomic_commit(request).decision.outcome is RequestOutcome.COMMITTED
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        "checkpoint_delete",
+        "checkpoint_sequence",
+        "checkpoint_prior",
+        "checkpoint_key",
+        "truncate",
+        "disable_trigger",
+        "drop_trigger",
+        "alter_table",
+        "schema_create",
+    ),
+)
+def test_postgres_runtime_role_cannot_escape_checkpoint_authority(
+    postgres_environment: _PostgresEnvironment,
+    operation: str,
+) -> None:
+    schema, _ = _single_store(postgres_environment, f"runtime_denied_{operation}")
+    statements = {
+        "checkpoint_delete": (
+            f'DELETE FROM "{schema}"."semantic_checkpoint" WHERE singleton=1'
+        ),
+        "checkpoint_sequence": (
+            f'UPDATE "{schema}"."semantic_checkpoint" '
+            "SET change_sequence=change_sequence+1 WHERE singleton=1"
+        ),
+        "checkpoint_prior": (
+            f'UPDATE "{schema}"."semantic_checkpoint" '
+            "SET prior_digest='tampered' WHERE singleton=1"
+        ),
+        "checkpoint_key": (
+            f'UPDATE "{schema}"."semantic_checkpoint" '
+            "SET key_id='tampered' WHERE singleton=1"
+        ),
+        "truncate": f'TRUNCATE TABLE "{schema}"."candidates"',
+        "disable_trigger": (
+            f'ALTER TABLE "{schema}"."candidates" DISABLE TRIGGER '
+            "apcc_semantic_dirty_candidates_update"
+        ),
+        "drop_trigger": (
+            "DROP TRIGGER apcc_semantic_dirty_candidates_update ON "
+            f'"{schema}"."candidates"'
+        ),
+        "alter_table": (f'ALTER TABLE "{schema}"."candidates" ADD COLUMN bypass TEXT'),
+        "schema_create": f'CREATE TABLE "{schema}"."bypass" (value TEXT)',
+    }
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.runtime_dsn, autocommit=True
+    ) as connection:
+        with pytest.raises(Exception) as error:
+            connection.execute(statements[operation])
+    assert getattr(error.value, "sqlstate", None) == "42501"
+
+
+def test_postgres_runtime_raw_dml_cannot_replay_the_prior_checkpoint(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, store = _single_store(postgres_environment, "runtime_checkpoint_replay")
+    request = _request(
+        postgres_environment,
+        commit_id="runtime-checkpoint-replay",
+        nonce_byte=142,
+    )
+    store.stage_result(
+        getattr(postgres_environment.modules.support, "_stage_request")(request)
+    )
+    before = _checkpoint_row(postgres_environment, schema)
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.runtime_dsn, autocommit=True
+    ) as connection:
+        connection.execute(
+            f'UPDATE "{schema}"."candidates" SET proposal_digest=\'tampered\' '
+            "WHERE workflow_id=%s AND node_id=%s AND attempt_id=%s",
+            (
+                request.subject.workflow_id,
+                request.subject.node_id,
+                request.subject.attempt_id,
+            ),
+        )
+        dirty = connection.execute(
+            f"SELECT change_sequence,prior_digest,checkpoint_digest,key_id,signature "
+            f'FROM "{schema}"."semantic_checkpoint" WHERE singleton=1'
+        ).fetchone()
+        assert dirty is not None
+        assert isinstance(dirty[0], int) and not isinstance(dirty[0], bool)
+        assert dirty[0] > before[0]
+        assert dirty[2] == "" and dirty[4] == ""
+        connection.execute(
+            f'UPDATE "{schema}"."semantic_checkpoint" '
+            "SET checkpoint_digest=%s,signature=%s WHERE singleton=1",
+            (before[2], before[4]),
+        )
+
+    with pytest.raises(ValueError, match="semantic checkpoint validation failed"):
+        postgres_environment.modules.reader_factory.open(
+            postgres_environment.runtime_dsn, schema=schema
+        )
+
+
+@pytest.mark.parametrize("opener", ("reader", "writer"))
+@pytest.mark.parametrize("target", ("schema", "relation", "function"))
+def test_postgres_open_rejects_owner_drift(
+    postgres_environment: _PostgresEnvironment,
+    opener: str,
+    target: str,
+) -> None:
+    schema, _ = _single_store(postgres_environment, f"owner_drift_{opener}_{target}")
+    alter = {
+        "schema": f'ALTER SCHEMA "{schema}" OWNER TO apcc',
+        "relation": f'ALTER TABLE "{schema}"."candidates" OWNER TO apcc',
+        "function": (
+            f'ALTER FUNCTION "{schema}"."apcc_mark_semantic_dirty"() OWNER TO apcc'
+        ),
+    }[target]
+    restore = {
+        "schema": (
+            f'ALTER SCHEMA "{schema}" OWNER TO "{postgres_environment.owner_role}"'
+        ),
+        "relation": (
+            f'ALTER TABLE "{schema}"."candidates" OWNER TO '
+            f'"{postgres_environment.owner_role}"'
+        ),
+        "function": (
+            f'ALTER FUNCTION "{schema}"."apcc_mark_semantic_dirty"() OWNER TO '
+            f'"{postgres_environment.owner_role}"'
+        ),
+    }[target]
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn, autocommit=True
+    ) as connection:
+        connection.execute(alter)
+    try:
+        with pytest.raises(ValueError, match="schema validation failed"):
+            if opener == "reader":
+                postgres_environment.modules.reader_factory.open(
+                    postgres_environment.runtime_dsn, schema=schema
+                )
+            else:
+                postgres_environment.modules.store_factory.open(
+                    postgres_environment.runtime_dsn,
+                    schema=schema,
+                    config=_config(postgres_environment),
+                    runtime=_runtime(postgres_environment),
+                )
+    finally:
+        with postgres_environment.modules.psycopg.connect(
+            postgres_environment.dsn, autocommit=True
+        ) as connection:
+            connection.execute(restore)
+
+
+@pytest.mark.parametrize("opener", ("reader", "writer"))
+@pytest.mark.parametrize("target", ("schema", "relation", "function"))
+def test_postgres_open_rejects_acl_drift(
+    postgres_environment: _PostgresEnvironment,
+    opener: str,
+    target: str,
+) -> None:
+    schema, _ = _single_store(postgres_environment, f"acl_drift_{opener}_{target}")
+    grant = {
+        "schema": f'GRANT CREATE ON SCHEMA "{schema}" TO PUBLIC',
+        "relation": f'GRANT TRUNCATE ON "{schema}"."candidates" TO PUBLIC',
+        "function": (
+            f'GRANT EXECUTE ON FUNCTION "{schema}".'
+            '"apcc_mark_semantic_dirty"() TO PUBLIC'
+        ),
+    }[target]
+    revoke = grant.replace("GRANT", "REVOKE", 1).replace(" TO PUBLIC", " FROM PUBLIC")
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn, autocommit=True
+    ) as connection:
+        connection.execute(grant)
+    try:
+        with pytest.raises(ValueError, match="schema validation failed"):
+            if opener == "reader":
+                postgres_environment.modules.reader_factory.open(
+                    postgres_environment.runtime_dsn, schema=schema
+                )
+            else:
+                postgres_environment.modules.store_factory.open(
+                    postgres_environment.runtime_dsn,
+                    schema=schema,
+                    config=_config(postgres_environment),
+                    runtime=_runtime(postgres_environment),
+                )
+    finally:
+        with postgres_environment.modules.psycopg.connect(
+            postgres_environment.dsn, autocommit=True
+        ) as connection:
+            connection.execute(revoke)
+
+
+def test_postgres_runtime_and_public_function_acl_is_exact(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, _ = _single_store(postgres_environment, "function_acl")
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn, autocommit=True
+    ) as connection:
+        public_execute = connection.execute(
+            "SELECT p.proname FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,"
+            "acldefault('f',p.proowner))) x "
+            "WHERE n.nspname=%s AND x.grantee=0 "
+            "AND x.privilege_type='EXECUTE'",
+            (schema,),
+        ).fetchall()
+    assert public_execute == []
+
+
+def test_postgres_admin_dsn_is_not_accepted_as_runtime(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, _ = _single_store(postgres_environment, "admin_not_runtime")
+    with pytest.raises(ValueError, match="schema validation failed"):
+        postgres_environment.modules.reader_factory.open(
+            postgres_environment.dsn, schema=schema
+        )
+    with pytest.raises(ValueError, match="schema validation failed"):
+        postgres_environment.modules.store_factory.open(
+            postgres_environment.dsn,
+            schema=schema,
+            config=_config(postgres_environment),
+            runtime=_runtime(postgres_environment),
+        )
+
+
+@pytest.mark.parametrize("batch_size", (1, 100, 1000))
+def test_postgres_status_batch_uses_one_repeatable_read_checkpoint_attestation(
+    postgres_environment: _PostgresEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+    batch_size: int,
+) -> None:
+    _, store = _single_store(postgres_environment, f"checkpoint_batch_{batch_size}")
+    request = _request(
+        postgres_environment,
+        commit_id=f"checkpoint-batch-{batch_size}",
+        nonce_byte=118,
+    )
+    _advance(postgres_environment, store, request)
+    committed = store.atomic_commit(request)
+    assert committed.certificate_digest is not None
+    store_module = importlib.import_module("constitutional_swarm.apcc.postgres_store")
+    original_verify = getattr(store_module, "_verify_semantic_checkpoint")
+    original_connection = cast(
+        "Callable[[], _Connection]", getattr(store, "_connection")
+    )
+    provider_type = type(_runtime(postgres_environment).key_provider)
+    status_signature_count = cast(
+        "Callable[[], int]", getattr(provider_type, "status_signature_count")
+    )
+    attestations = 0
+    connections = 0
+    observations: list[tuple[object, object, object]] = []
+
+    def open_connection() -> _Connection:
+        nonlocal connections
+        connections += 1
+        return original_connection()
+
+    def verify_checkpoint(*args: object, **kwargs: object) -> object:
+        nonlocal attestations
+        attestations += 1
+        connection = cast("_Connection", args[0])
+        observations.append(
+            (
+                connection.execute("SHOW transaction_isolation").fetchone(),
+                connection.execute("SHOW transaction_read_only").fetchone(),
+                connection.execute("SELECT txid_current()").fetchone(),
+            )
+        )
+        return original_verify(*args, **kwargs)
+
+    def forbid_full_scan(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("hot status batch performed a whole-store semantic scan")
+
+    monkeypatch.setattr(store, "_connection", open_connection)
+    monkeypatch.setattr(store_module, "_verify_semantic_checkpoint", verify_checkpoint)
+    monkeypatch.setattr(store_module, "_validate_semantics", forbid_full_scan)
+    requests = tuple(
+        CurrentStatusRequest(
+            committed.certificate_digest,
+            base64.urlsafe_b64encode(index.to_bytes(16, "big"))
+            .rstrip(b"=")
+            .decode("ascii"),
+        )
+        for index in range(1, batch_size + 1)
+    )
+
+    before_signatures = status_signature_count()
+    results = store.current_status_batch(requests)
+
+    assert tuple(result.request for result in results) == requests
+    assert connections == 1
+    assert attestations == 1
+    assert len(observations) == 1
+    assert observations[0][0:2] == (("repeatable read",), ("on",))
+    assert isinstance(observations[0][2], tuple)
+    assert status_signature_count() - before_signatures == batch_size
+
+
+def test_postgres_hot_mutation_verifies_and_reseals_checkpoint_without_full_scan(
+    postgres_environment: _PostgresEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, store = _single_store(postgres_environment, "checkpoint_hot_mutation")
+    store_module = importlib.import_module("constitutional_swarm.apcc.postgres_store")
+    original_verify = getattr(store_module, "_verify_semantic_checkpoint")
+    original_seal = getattr(store_module, "_seal_semantic_checkpoint")
+    verifications = 0
+    seals = 0
+
+    def verify_checkpoint(*args: object, **kwargs: object) -> object:
+        nonlocal verifications
+        verifications += 1
+        return original_verify(*args, **kwargs)
+
+    def seal_checkpoint(*args: object, **kwargs: object) -> object:
+        nonlocal seals
+        seals += 1
+        return original_seal(*args, **kwargs)
+
+    def forbid_full_scan(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("hot mutation performed a whole-store semantic scan")
+
+    monkeypatch.setattr(store_module, "_verify_semantic_checkpoint", verify_checkpoint)
+    monkeypatch.setattr(store_module, "_seal_semantic_checkpoint", seal_checkpoint)
+    monkeypatch.setattr(store_module, "_validate_semantics", forbid_full_scan)
+    request = _request(
+        postgres_environment,
+        commit_id="checkpoint-hot-mutation",
+        nonce_byte=121,
+    )
+
+    store.stage_result(
+        getattr(postgres_environment.modules.support, "_stage_request")(request)
+    )
+
+    assert verifications == 1
+    assert seals == 1
+
+
+def test_postgres_rolled_back_raw_write_does_not_dirty_signed_checkpoint(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, store = _single_store(postgres_environment, "checkpoint_raw_rollback")
+    seed = _request(
+        postgres_environment,
+        commit_id="checkpoint-raw-rollback-seed",
+        nonce_byte=127,
+    )
+    store.stage_result(
+        getattr(postgres_environment.modules.support, "_stage_request")(seed)
+    )
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn
+    ) as connection:
+        connection.execute(
+            f'UPDATE "{schema}"."candidates" SET proposal_digest=\'tampered\' '
+            "WHERE workflow_id=%s AND node_id=%s AND attempt_id=%s",
+            (
+                seed.subject.workflow_id,
+                seed.subject.node_id,
+                seed.subject.attempt_id,
+            ),
+        )
+        connection.rollback()
+    target = _request(
+        postgres_environment,
+        commit_id="checkpoint-after-raw-rollback",
+        nonce_byte=128,
+        attempt_id="checkpoint-after-raw-rollback",
+    )
+
+    store.stage_result(
+        getattr(postgres_environment.modules.support, "_stage_request")(target)
+    )
+
+
+def test_postgres_invalid_checkpoint_signature_blocks_mutation_and_reopen(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, store = _single_store(postgres_environment, "checkpoint_bad_signature")
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn, autocommit=True
+    ) as connection:
+        connection.execute(
+            f'UPDATE "{schema}"."semantic_checkpoint" SET signature=%s '
+            "WHERE singleton=1",
+            (base64.urlsafe_b64encode(bytes(64)).rstrip(b"=").decode("ascii"),),
+        )
+    request = _request(
+        postgres_environment,
+        commit_id="checkpoint-bad-signature",
+        nonce_byte=129,
+    )
+    stage = getattr(postgres_environment.modules.support, "_stage_request")(request)
+
+    with pytest.raises(ValueError, match="semantic checkpoint validation failed"):
+        store.stage_result(stage)
+    with pytest.raises(ValueError, match="semantic checkpoint validation failed"):
+        postgres_environment.modules.reader_factory.open(
+            postgres_environment.runtime_dsn, schema=schema
+        )
+
+
+def test_postgres_checkpoint_seal_failure_rolls_back_mutation(
+    postgres_environment: _PostgresEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema, store = _single_store(postgres_environment, "checkpoint_seal_rollback")
+    sqlite_module = importlib.import_module("constitutional_swarm.apcc.sqlite_store")
+    checkpoint_domain = getattr(sqlite_module, "_SEMANTIC_CHECKPOINT_DOMAIN")
+    assert isinstance(checkpoint_domain, bytes)
+    provider_type = type(_runtime(postgres_environment).key_provider)
+    original_sign = cast(
+        "Callable[[object, AuthoritySigningRole, str, bytes, bytes], Signature]",
+        getattr(provider_type, "sign"),
+    )
+
+    def fail_checkpoint_seal(
+        instance: object,
+        role: AuthoritySigningRole,
+        key_id: str,
+        domain: bytes,
+        canonical_body: bytes,
+    ) -> Signature:
+        if role is AuthoritySigningRole.COMMIT and domain == checkpoint_domain:
+            raise RuntimeError("injected PostgreSQL checkpoint seal failure")
+        return original_sign(instance, role, key_id, domain, canonical_body)
+
+    monkeypatch.setattr(provider_type, "sign", fail_checkpoint_seal)
+    request = _request(
+        postgres_environment,
+        commit_id="checkpoint-seal-rollback",
+        nonce_byte=130,
+    )
+    before = _snapshot(postgres_environment, store)
+    before_checkpoint = _checkpoint_row(postgres_environment, schema)
+
+    with pytest.raises(RuntimeError, match="checkpoint seal failure"):
+        store.stage_result(
+            getattr(postgres_environment.modules.support, "_stage_request")(request)
+        )
+
+    assert _snapshot(postgres_environment, store) == before
+    assert _checkpoint_row(postgres_environment, schema) == before_checkpoint
+
+
+def test_postgres_reopen_full_scan_rejects_tamper_with_replayed_checkpoint(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, store = _single_store(postgres_environment, "checkpoint_replay_reopen")
+    request = _request(
+        postgres_environment,
+        commit_id="checkpoint-replay-reopen",
+        nonce_byte=131,
+    )
+    _advance(postgres_environment, store, request)
+    store.atomic_commit(request)
+    checkpoint = _checkpoint_row(postgres_environment, schema)
+    with postgres_environment.modules.psycopg.connect(
+        postgres_environment.dsn, autocommit=True
+    ) as connection:
+        connection.execute(
+            f'UPDATE "{schema}"."candidates" SET proposal_digest=\'tampered\' '
+            "WHERE workflow_id=%s AND node_id=%s AND attempt_id=%s",
+            (
+                request.subject.workflow_id,
+                request.subject.node_id,
+                request.subject.attempt_id,
+            ),
+        )
+        connection.execute(
+            f'UPDATE "{schema}"."semantic_checkpoint" SET change_sequence=%s,'
+            "prior_digest=%s,checkpoint_digest=%s,key_id=%s,signature=%s "
+            "WHERE singleton=1",
+            checkpoint,
+        )
+
+    with pytest.raises(ValueError, match="semantic validation failed"):
+        postgres_environment.modules.reader_factory.open(
+            postgres_environment.runtime_dsn, schema=schema
+        )
+    with pytest.raises(ValueError, match="semantic validation failed"):
+        postgres_environment.modules.store_factory.open(
+            postgres_environment.runtime_dsn,
+            schema=schema,
+            config=_config(postgres_environment),
+            runtime=_runtime(postgres_environment),
+        )
+
+
+def test_postgres_status_batch_observes_one_pre_revocation_snapshot(
+    postgres_environment: _PostgresEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, store = _single_store(postgres_environment, "status_batch_revocation_snapshot")
+    request = _request(
+        postgres_environment,
+        commit_id="status-batch-revocation-snapshot",
+        nonce_byte=132,
+    )
+    _advance(postgres_environment, store, request)
+    committed = store.atomic_commit(request)
+    assert committed.certificate_digest is not None
+    status_requests = tuple(
+        CurrentStatusRequest(committed.certificate_digest, _nonce(index))
+        for index in range(1, 101)
+    )
+    store_module = importlib.import_module("constitutional_swarm.apcc.postgres_store")
+    connection_type = getattr(store_module, "_Connection")
+    original_execute = cast(
+        "Callable[[object, str, tuple[object, ...]], _Cursor]",
+        connection_type.execute,
+    )
+    main_thread = threading.get_ident()
+    snapshot_established = threading.Event()
+    release = threading.Event()
+    armed = True
+    gate = threading.Lock()
+
+    def execute_with_barrier(
+        connection: object,
+        query: str,
+        parameters: tuple[object, ...] = (),
+    ) -> _Cursor:
+        nonlocal armed
+        cursor = original_execute(connection, query, parameters)
+        if threading.get_ident() != main_thread and query.startswith(
+            "SELECT change_sequence,prior_digest,checkpoint_digest"
+        ):
+            with gate:
+                should_pause = armed
+                armed = False
+            if should_pause:
+                snapshot_established.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("status batch snapshot barrier was not released")
+        return cursor
+
+    monkeypatch.setattr(connection_type, "execute", execute_with_barrier)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(store.current_status_batch, status_requests)
+        if not snapshot_established.wait(timeout=10):
+            release.set()
+            future.result(timeout=1)
+            pytest.fail("status batch did not establish its repeatable-read snapshot")
+        try:
+            revoked = store.revoke(
+                RevocationRequest(
+                    RevocationScope.CERTIFICATE,
+                    request.subject.workflow_id,
+                    committed.certificate_digest,
+                    "1",
+                    "deterministic batch snapshot race",
+                )
+            )
+            assert revoked.resulting_generation == "1"
+        finally:
+            release.set()
+        results = future.result(timeout=10)
+
+    assert tuple(result.request for result in results) == status_requests
+    assert {result.status.status for result in results} == {
+        AuthorityStatusValue.CURRENT
+    }
+    assert len({result.status.trust_log_sequence for result in results}) == 1
+    assert len({result.status.trust_log_head for result in results}) == 1
+    assert (
+        store.current_status(committed.certificate_digest, _nonce(101)).status
+        is AuthorityStatusValue.REVOKED
+    )
+
+
+def test_postgres_dirty_checkpoint_rejects_whole_status_batch_before_signing(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, store = _single_store(postgres_environment, "status_batch_dirty")
+    committed_request = _request(
+        postgres_environment,
+        commit_id="status-batch-dirty-committed",
+        nonce_byte=133,
+    )
+    _advance(postgres_environment, store, committed_request)
+    committed = store.atomic_commit(committed_request)
+    assert committed.certificate_digest is not None
+    corrupt = _request(
+        postgres_environment,
+        commit_id="status-batch-dirty-unrelated",
+        nonce_byte=134,
+        workflow_id="workflow-2",
+    )
+    store.stage_result(
+        getattr(postgres_environment.modules.support, "_stage_request")(corrupt)
+    )
+    _corrupt_candidate_proposal_digest(postgres_environment, schema, corrupt)
+    requests = tuple(
+        CurrentStatusRequest(committed.certificate_digest, _nonce(index))
+        for index in range(1, 101)
+    )
+    provider_type = type(_runtime(postgres_environment).key_provider)
+    status_signature_count = cast(
+        "Callable[[], int]", getattr(provider_type, "status_signature_count")
+    )
+    before_signatures = status_signature_count()
+    before = _snapshot(postgres_environment, store)
+
+    with pytest.raises(ValueError, match="semantic checkpoint validation failed"):
+        store.current_status_batch(requests)
+
+    assert status_signature_count() == before_signatures
+    assert _snapshot(postgres_environment, store) == before
+
+
+def test_postgres_status_signer_failure_returns_no_partial_batch(
+    postgres_environment: _PostgresEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema, store = _single_store(postgres_environment, "status_batch_signer_failure")
+    request = _request(
+        postgres_environment,
+        commit_id="status-batch-signer-failure",
+        nonce_byte=135,
+    )
+    _advance(postgres_environment, store, request)
+    committed = store.atomic_commit(request)
+    assert committed.certificate_digest is not None
+    requests = tuple(
+        CurrentStatusRequest(committed.certificate_digest, _nonce(index))
+        for index in range(1, 101)
+    )
+    provider_type = type(_runtime(postgres_environment).key_provider)
+    original_sign = cast(
+        "Callable[[object, AuthoritySigningRole, str, bytes, bytes], Signature]",
+        getattr(provider_type, "sign"),
+    )
+    status_calls = 0
+
+    def fail_one_status_signature(
+        instance: object,
+        role: AuthoritySigningRole,
+        key_id: str,
+        domain: bytes,
+        canonical_body: bytes,
+    ) -> Signature:
+        nonlocal status_calls
+        if role is AuthoritySigningRole.STATUS:
+            status_calls += 1
+            if status_calls == 37:
+                raise RuntimeError("injected PostgreSQL status signer failure")
+        return original_sign(instance, role, key_id, domain, canonical_body)
+
+    monkeypatch.setattr(provider_type, "sign", fail_one_status_signature)
+    before = _snapshot(postgres_environment, store)
+    before_checkpoint = _checkpoint_row(postgres_environment, schema)
+
+    with pytest.raises(RuntimeError, match="status signer failure"):
+        store.current_status_batch(requests)
+
+    assert status_calls == 37
+    assert _snapshot(postgres_environment, store) == before
+    assert _checkpoint_row(postgres_environment, schema) == before_checkpoint
+
+
+def test_postgres_logical_status_batch_preserves_order_and_duplicate_nodes(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    _, store = _single_store(postgres_environment, "logical_status_batch_order")
+    request = _request(
+        postgres_environment,
+        commit_id="logical-status-batch-order",
+        nonce_byte=136,
+    )
+    _advance(postgres_environment, store, request)
+    committed = store.atomic_commit(request)
+    assert committed.certificate_digest is not None
+    requests = (
+        LogicalNodeStatusRequest("workflow-1", "node-1", _nonce(1)),
+        LogicalNodeStatusRequest("workflow-1", "missing", _nonce(2)),
+        LogicalNodeStatusRequest("workflow-1", "node-1", _nonce(3)),
+    )
+
+    results = store.logical_node_status_batch(requests)
+
+    assert tuple(result.request for result in results) == requests
+    assert (
+        results[0].logical_node.current_certificate_digest
+        == committed.certificate_digest
+    )
+    assert results[0].commit_id == request.commit_id
+    assert results[0].status is not None
+    assert results[1].logical_node.current_node_version == "0"
+    assert results[1].commit_id is None
+    assert results[1].status is None
+    assert results[2].status is not None
+    assert results[0].status.request_nonce != results[2].status.request_nonce
+
+
+def test_postgres_batch_rejects_duplicate_nonce_before_opening_transaction(
+    postgres_environment: _PostgresEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, store = _single_store(postgres_environment, "logical_status_batch_duplicate")
+    opened = False
+
+    def forbidden_connection() -> _Connection:
+        nonlocal opened
+        opened = True
+        raise AssertionError("transaction opened before batch validation")
+
+    monkeypatch.setattr(store, "_connection", forbidden_connection)
+    duplicate = (
+        LogicalNodeStatusRequest("workflow-1", "node-1", _nonce(1)),
+        LogicalNodeStatusRequest("workflow-1", "node-2", _nonce(1)),
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        store.logical_node_status_batch(duplicate)
+    assert opened is False
+
+
+def test_postgres_concurrent_writers_leave_one_valid_signed_checkpoint(
+    postgres_environment: _PostgresEnvironment,
+) -> None:
+    schema, setup = _single_store(postgres_environment, "checkpoint_concurrent_writers")
+    requests = (
+        _request(
+            postgres_environment,
+            commit_id="checkpoint-concurrent-left",
+            nonce_byte=137,
+        ),
+        _request(
+            postgres_environment,
+            commit_id="checkpoint-concurrent-right",
+            nonce_byte=138,
+            workflow_id="workflow-2",
+        ),
+    )
+    for request in requests:
+        _advance(postgres_environment, setup, request)
+    stores = tuple(
+        postgres_environment.modules.store_factory.open(
+            postgres_environment.runtime_dsn,
+            schema=schema,
+            config=_config(postgres_environment),
+            runtime=_runtime(postgres_environment),
+        )
+        for _ in requests
+    )
+    barrier = threading.Barrier(2)
+
+    def commit(index: int) -> CommitResult:
+        barrier.wait()
+        return stores[index].atomic_commit(requests[index])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(commit, range(2)))
+
+    assert all(
+        result.decision.outcome is RequestOutcome.COMMITTED for result in results
+    )
+    postgres_environment.modules.reader_factory.open(
+        postgres_environment.runtime_dsn, schema=schema
+    ).close()
+    postgres_environment.modules.store_factory.open(
+        postgres_environment.runtime_dsn,
+        schema=schema,
+        config=_config(postgres_environment),
+        runtime=_runtime(postgres_environment),
+    ).close()
 
 
 @pytest.mark.parametrize("tamper", ("index", "constraint", "column", "fingerprint"))
@@ -1746,11 +2909,11 @@ def test_postgres_reader_and_writer_open_reject_structural_schema_tamper(
             )
     with pytest.raises(ValueError, match="schema validation failed"):
         postgres_environment.modules.reader_factory.open(
-            postgres_environment.dsn, schema=schema
+            postgres_environment.runtime_dsn, schema=schema
         )
     with pytest.raises(ValueError, match="schema validation failed"):
         postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -1766,7 +2929,7 @@ def test_postgres_all_authority_reads_revalidate_semantic_integrity(
     )
     _advance(postgres_environment, store, request)
     reader = postgres_environment.modules.reader_factory.open(
-        postgres_environment.dsn, schema=schema
+        postgres_environment.runtime_dsn, schema=schema
     )
     with postgres_environment.modules.psycopg.connect(
         postgres_environment.dsn, autocommit=True
@@ -1800,15 +2963,17 @@ def test_postgres_all_authority_reads_revalidate_semantic_integrity(
         lambda: store.recover_outbox(OutboxRecoveryRequest(max_items="1")),
     )
     for read in reads:
-        with pytest.raises(ValueError, match="semantic validation failed"):
+        with pytest.raises(
+            ValueError, match=r"semantic (?:checkpoint )?validation failed"
+        ):
             read()
-    with pytest.raises(ValueError, match="semantic validation failed"):
+    with pytest.raises(ValueError, match=r"semantic (?:checkpoint )?validation failed"):
         postgres_environment.modules.reader_factory.open(
-            postgres_environment.dsn, schema=schema
+            postgres_environment.runtime_dsn, schema=schema
         )
-    with pytest.raises(ValueError, match="semantic validation failed"):
+    with pytest.raises(ValueError, match=r"semantic (?:checkpoint )?validation failed"):
         postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=_config(postgres_environment),
             runtime=_runtime(postgres_environment),
@@ -1905,12 +3070,12 @@ def test_postgres_every_mutation_rejects_unrelated_semantic_corruption(
     _corrupt_candidate_proposal_digest(postgres_environment, schema, corrupt)
     before = _snapshot(postgres_environment, store)
 
-    with pytest.raises(ValueError, match="semantic validation failed"):
+    with pytest.raises(ValueError, match=r"semantic (?:checkpoint )?validation failed"):
         invoke()
     assert _snapshot(postgres_environment, store) == before
-    with pytest.raises(ValueError, match="semantic validation failed"):
+    with pytest.raises(ValueError, match=r"semantic (?:checkpoint )?validation failed"):
         postgres_environment.modules.reader_factory.open(
-            postgres_environment.dsn, schema=schema
+            postgres_environment.runtime_dsn, schema=schema
         )
 
 
@@ -1957,9 +3122,12 @@ def test_postgres_attestation_uses_one_snapshot_during_concurrent_valid_commit(
         nonlocal armed
         cursor = original_execute(connection, query, parameters)
         should_pause = False
-        if threading.get_ident() != main_thread and query.startswith(
-            "SELECT certificate_digest, commit_id, certificate_json"
-        ):
+        barrier_query = (
+            "SELECT c.relname,c.relkind,c.relpersistence"
+            if operation == "outbox"
+            else "SELECT certificate_digest, commit_id, certificate_json"
+        )
+        if threading.get_ident() != main_thread and query.startswith(barrier_query):
             with gate:
                 if armed:
                     armed = False
@@ -1975,11 +3143,11 @@ def test_postgres_attestation_uses_one_snapshot_during_concurrent_valid_commit(
     def attest() -> object:
         if operation == "reader_open":
             return postgres_environment.modules.reader_factory.open(
-                postgres_environment.dsn, schema=schema
+                postgres_environment.runtime_dsn, schema=schema
             )
         if operation == "writer_open":
             return postgres_environment.modules.store_factory.open(
-                postgres_environment.dsn,
+                postgres_environment.runtime_dsn,
                 schema=schema,
                 config=_config(postgres_environment),
                 runtime=_runtime(postgres_environment),
@@ -2044,6 +3212,8 @@ def test_postgres_outbox_post_claim_mutations_reattest_same_store_snapshot(
         schema=schema,
         config=config,
         initial_contexts=_initial_contexts(postgres_environment),
+        runtime_role=postgres_environment.runtime_role,
+        runtime=_runtime(postgres_environment),
     )
     corrupt = _request(
         postgres_environment,
@@ -2054,7 +3224,7 @@ def test_postgres_outbox_post_claim_mutations_reattest_same_store_snapshot(
     sink = _CorruptingOutboxSink(postgres_environment, schema, corrupt, sink_failure)
     runtime = replace(_runtime(postgres_environment), outbox_sink=sink)
     store = postgres_environment.modules.store_factory.open(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=config,
         runtime=runtime,
@@ -2068,7 +3238,7 @@ def test_postgres_outbox_post_claim_mutations_reattest_same_store_snapshot(
     _advance(postgres_environment, store, pending)
     store.atomic_commit(pending)
 
-    with pytest.raises(ValueError, match="semantic validation failed"):
+    with pytest.raises(ValueError, match=r"semantic (?:checkpoint )?validation failed"):
         store.recover_outbox(OutboxRecoveryRequest("1"))
     assert sink.claimed_state is not None
     with postgres_environment.modules.psycopg.connect(
@@ -2080,9 +3250,9 @@ def test_postgres_outbox_post_claim_mutations_reattest_same_store_snapshot(
             (pending.commit_id,),
         ).fetchone()
     assert persisted == sink.claimed_state
-    with pytest.raises(ValueError, match="semantic validation failed"):
+    with pytest.raises(ValueError, match=r"semantic (?:checkpoint )?validation failed"):
         postgres_environment.modules.reader_factory.open(
-            postgres_environment.dsn, schema=schema
+            postgres_environment.runtime_dsn, schema=schema
         )
 
 
@@ -2101,23 +3271,25 @@ def test_postgres_outbox_attestation_retries_the_complete_claim_transaction(
     _advance(postgres_environment, setup, request)
     setup.atomic_commit(request)
     store = postgres_environment.modules.store_factory.open(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
         retry_policy=postgres_environment.modules.retry_policy_factory(max_attempts=2),
     )
-    store_module = importlib.import_module("constitutional_swarm.apcc.postgres_store")
-    original_attest = cast(
-        "Callable[[_Connection, str], APCCAuthorityConfig]",
-        getattr(store_module, "_attest_store"),
+    store_type = type(store)
+    original_validate = cast(
+        "Callable[[object, _Connection, APCCAuthorityConfig | None], None]",
+        getattr(store_type, "_validate_mutation_checkpoint"),
     )
     failures_remaining = 1
     transaction_ids: list[object] = []
 
-    def attest_with_abort(
-        connection: _Connection, schema_name: str
-    ) -> APCCAuthorityConfig:
+    def validate_with_abort(
+        instance: object,
+        connection: _Connection,
+        provisioned: APCCAuthorityConfig | None = None,
+    ) -> None:
         nonlocal failures_remaining
         transaction = connection.execute("SELECT txid_current()").fetchone()
         assert transaction is not None
@@ -2128,9 +3300,11 @@ def test_postgres_outbox_attestation_retries_the_complete_claim_transaction(
                 "DO $apcc$ BEGIN RAISE EXCEPTION 'retry outbox attestation' "
                 f"USING ERRCODE = '{sqlstate}'; END $apcc$"
             )
-        return original_attest(connection, schema_name)
+        original_validate(instance, connection, provisioned)
 
-    monkeypatch.setattr(store_module, "_attest_store", attest_with_abort)
+    monkeypatch.setattr(
+        store_type, "_validate_mutation_checkpoint", validate_with_abort
+    )
     result = store.recover_outbox(OutboxRecoveryRequest("1"))
     assert result.delivered_count == "1"
     assert len(transaction_ids) >= 2
@@ -2150,17 +3324,20 @@ def test_postgres_outbox_attestation_retry_exhaustion_is_bounded_and_atomic(
     _advance(postgres_environment, setup, request)
     setup.atomic_commit(request)
     store = postgres_environment.modules.store_factory.open(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
         retry_policy=postgres_environment.modules.retry_policy_factory(max_attempts=2),
     )
-    store_module = importlib.import_module("constitutional_swarm.apcc.postgres_store")
+    store_type = type(store)
     attempts = 0
 
-    def always_abort(connection: _Connection, schema_name: str) -> APCCAuthorityConfig:
-        del schema_name
+    def always_abort(
+        _instance: object,
+        connection: _Connection,
+        _provisioned: APCCAuthorityConfig | None = None,
+    ) -> None:
         nonlocal attempts
         attempts += 1
         connection.execute(
@@ -2169,7 +3346,7 @@ def test_postgres_outbox_attestation_retry_exhaustion_is_bounded_and_atomic(
         )
         raise AssertionError("PostgreSQL did not raise the injected SQLSTATE")
 
-    monkeypatch.setattr(store_module, "_attest_store", always_abort)
+    monkeypatch.setattr(store_type, "_validate_mutation_checkpoint", always_abort)
     before = _snapshot(postgres_environment, store)
     with pytest.raises(RuntimeError, match="outbox claim.*40001.*2"):
         store.recover_outbox(OutboxRecoveryRequest("1"))
@@ -2187,7 +3364,7 @@ def test_postgres_bootstrap_reopen_is_public_only_and_persists_no_private_seed(
     before = _snapshot(postgres_environment, store)
     store.close()
     reopened = postgres_environment.modules.store_factory.open(
-        postgres_environment.dsn,
+        postgres_environment.runtime_dsn,
         schema=schema,
         config=_config(postgres_environment),
         runtime=_runtime(postgres_environment),
@@ -2199,7 +3376,7 @@ def test_postgres_bootstrap_reopen_is_public_only_and_persists_no_private_seed(
         == committed
     )
     reader = postgres_environment.modules.reader_factory.open(
-        postgres_environment.dsn, schema=schema
+        postgres_environment.runtime_dsn, schema=schema
     )
     assert reader.authority_store_id == reopened.authority_store_id
     assert _snapshot(postgres_environment, reopened) == before
@@ -2245,7 +3422,7 @@ def test_postgres_bootstrap_reopen_is_public_only_and_persists_no_private_seed(
     )
     with pytest.raises(ValueError):
         postgres_environment.modules.store_factory.open(
-            postgres_environment.dsn,
+            postgres_environment.runtime_dsn,
             schema=schema,
             config=changed,
             runtime=_runtime(postgres_environment),

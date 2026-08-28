@@ -174,6 +174,58 @@ def _require_types(
         raise ValueError("invalid_field_type")
 
 
+def _string_field(value: Mapping[str, Any], field: str) -> str:
+    item = value[field]
+    if type(item) is not str:
+        raise ValueError("invalid_field_type")
+    return item
+
+
+def _integer_field(value: Mapping[str, Any], field: str) -> int:
+    item = value[field]
+    if type(item) is not int:
+        raise ValueError("invalid_field_type")
+    return item
+
+
+def _optional_string_field(value: Mapping[str, Any], field: str) -> str | None:
+    item = value[field]
+    if item is not None and type(item) is not str:
+        raise ValueError("invalid_field_type")
+    return item
+
+
+def _string_tuple_field(value: Mapping[str, Any], field: str) -> tuple[str, ...]:
+    raw = value[field]
+    if type(raw) is not list:
+        raise ValueError("invalid_field_type")
+    items: list[str] = []
+    for item in raw:
+        if type(item) is not str:
+            raise ValueError("invalid_field_type")
+        items.append(item)
+    return tuple(items)
+
+
+def _float_field(value: Mapping[str, Any], field: str) -> float:
+    item = value[field]
+    if type(item) not in {int, float}:
+        raise ValueError("invalid_field_type")
+    return float(item)
+
+
+def _inert_json_object(value: Any) -> dict[str, Any]:
+    raw = _inert_json_value(value)
+    if type(raw) is not dict:
+        raise ValueError("invalid_field_type")
+    result: dict[str, Any] = {}
+    for key, item in raw.items():
+        if type(key) is not str:
+            raise ValueError("invalid_field_type")
+        result[key] = item
+    return result
+
+
 def _json_value(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
@@ -228,12 +280,36 @@ def _decode_receipt_payload(value: Any) -> GovernedReceiptPayload:
     if not isinstance(predecessors, list):
         raise ValueError("invalid_predecessor_bindings")
     return GovernedReceiptPayload(
-        **{
-            **body,
-            "predecessor_bindings": tuple(
-                _decode_predecessor(item) for item in predecessors
-            ),
-        }
+        profile=_string_field(body, "profile"),
+        signature_algorithm=_string_field(body, "signature_algorithm"),
+        key_id=_string_field(body, "key_id"),
+        issued_at=_integer_field(body, "issued_at"),
+        expires_at=_integer_field(body, "expires_at"),
+        intent=_string_field(body, "intent"),
+        verifier_policy_id=_string_field(body, "verifier_policy_id"),
+        workflow_id=_string_field(body, "workflow_id"),
+        node_id=_string_field(body, "node_id"),
+        attempt_id=_string_field(body, "attempt_id"),
+        agent_id=_string_field(body, "agent_id"),
+        input_digest=_string_field(body, "input_digest"),
+        output_digest=_string_field(body, "output_digest"),
+        predecessor_bindings=tuple(_decode_predecessor(item) for item in predecessors),
+        predecessor_root=_string_field(body, "predecessor_root"),
+        policy_version=_string_field(body, "policy_version"),
+        policy_digest=_string_field(body, "policy_digest"),
+        policy_epoch=_integer_field(body, "policy_epoch"),
+        authority_snapshot_digest=_string_field(body, "authority_snapshot_digest"),
+        authority_root=_string_field(body, "authority_root"),
+        authority_epoch=_integer_field(body, "authority_epoch"),
+        agent_revocation_epoch=_integer_field(body, "agent_revocation_epoch"),
+        workflow_revocation_generation=_integer_field(
+            body, "workflow_revocation_generation"
+        ),
+        workflow_generation=_integer_field(body, "workflow_generation"),
+        state_version=_integer_field(body, "state_version"),
+        expected_node_state_version=_integer_field(body, "expected_node_state_version"),
+        nonce=_string_field(body, "nonce"),
+        commit_id=_string_field(body, "commit_id"),
     )
 
 
@@ -261,10 +337,35 @@ def _decode_commit_request(value: Any) -> CommitRequest:
         raise ValueError("invalid_field_type")
     return CommitRequest(
         SignedGovernedReceipt(
-            _decode_receipt_payload(receipt["payload"]), receipt["signature"]
+            _decode_receipt_payload(receipt["payload"]),
+            _string_field(receipt, "signature"),
         ),
         AuthoritativeVerdict(
-            **{**verdict, "decision": VerdictDecision(verdict["decision"])}
+            decision=VerdictDecision(_string_field(verdict, "decision")),
+            store_id=_string_field(verdict, "store_id"),
+            verifier_policy_id=_string_field(verdict, "verifier_policy_id"),
+            policy_id=_string_field(verdict, "policy_id"),
+            policy_version=_string_field(verdict, "policy_version"),
+            verifier_key_id=_string_field(verdict, "verifier_key_id"),
+            receipt_digest=_string_field(verdict, "receipt_digest"),
+            workflow_id=_string_field(verdict, "workflow_id"),
+            node_id=_string_field(verdict, "node_id"),
+            attempt_id=_string_field(verdict, "attempt_id"),
+            agent_id=_string_field(verdict, "agent_id"),
+            expected_node_state_version=_integer_field(
+                verdict, "expected_node_state_version"
+            ),
+            policy_epoch=_integer_field(verdict, "policy_epoch"),
+            authority_epoch=_integer_field(verdict, "authority_epoch"),
+            agent_revocation_epoch=_integer_field(verdict, "agent_revocation_epoch"),
+            workflow_revocation_generation=_integer_field(
+                verdict, "workflow_revocation_generation"
+            ),
+            workflow_generation=_integer_field(verdict, "workflow_generation"),
+            issued_at=_integer_field(verdict, "issued_at"),
+            expires_at=_integer_field(verdict, "expires_at"),
+            reason=_string_field(verdict, "reason"),
+            signature=_string_field(verdict, "signature"),
         ),
     )
 
@@ -295,7 +396,14 @@ def _decode_commit_decision(value: Any) -> CommitDecision:
         strings=fields - {"state_version"},
         integers={"state_version"},
     )
-    return CommitDecision(**{**body, "outcome": CommitOutcome(body["outcome"])})
+    return CommitDecision(
+        commit_id=_string_field(body, "commit_id"),
+        outcome=CommitOutcome(_string_field(body, "outcome")),
+        reason=_string_field(body, "reason"),
+        workflow_id=_string_field(body, "workflow_id"),
+        node_id=_string_field(body, "node_id"),
+        state_version=_integer_field(body, "state_version"),
+    )
 
 
 def _encode_artifact(artifact: Artifact | None) -> dict[str, Any] | None:
@@ -344,11 +452,17 @@ def _decode_artifact(value: Any) -> Artifact | None:
     ):
         raise ValueError("invalid_field_type")
     return Artifact(
-        **{
-            **body,
-            "tags": tuple(body["tags"]),
-            "parent_artifacts": tuple(body["parent_artifacts"]),
-        }
+        artifact_id=_string_field(body, "artifact_id"),
+        task_id=_string_field(body, "task_id"),
+        agent_id=_string_field(body, "agent_id"),
+        content_type=_string_field(body, "content_type"),
+        content=_string_field(body, "content"),
+        domain=_string_field(body, "domain"),
+        tags=_string_tuple_field(body, "tags"),
+        timestamp=_float_field(body, "timestamp"),
+        constitutional_hash=_string_field(body, "constitutional_hash"),
+        parent_artifacts=_string_tuple_field(body, "parent_artifacts"),
+        metadata=_inert_json_object(body["metadata"]),
     )
 
 
@@ -519,10 +633,14 @@ def _handle_execution_request(admin: Any, request: Any) -> Any:
             type(item) is not str for item in node_ids
         ):
             raise ValueError("invalid_node_ids")
-        return {
-            node_id: _encode_node_state(admin.node_state(body["workflow_id"], node_id))
-            for node_id in node_ids
-        }
+        if not node_ids:
+            raise ValueError("empty_node_status_batch")
+        if len(node_ids) > 1000:
+            raise ValueError("node_status_batch_too_large")
+        states = admin.workflow_node_states(body["workflow_id"], tuple(node_ids))
+        if len(states) != len(node_ids):
+            raise ValueError("node_status_batch_length_mismatch")
+        return [_encode_node_state(state) for state in states]
     if operation == "prepare_attempt_authorization":
         fields = {
             "workflow_id",
@@ -884,24 +1002,38 @@ class _AuthorityExecutionChannel(_JSONClient):
         }
 
     def node_state(self, workflow_id: str, node_id: str) -> GovernedNodeState:
-        return _trusted_decode(
-            _decode_node_state,
-            self._rpc("node_state", {"workflow_id": workflow_id, "node_id": node_id}),
-        )
+        return self.workflow_node_states(workflow_id, (node_id,))[0]
 
     def workflow_node_states(
         self, workflow_id: str, node_ids: Sequence[str]
-    ) -> dict[str, GovernedNodeState]:
-        result = self._rpc(
-            "workflow_node_states",
-            {"workflow_id": workflow_id, "node_ids": list(node_ids)},
-        )
-        if type(result) is not dict or any(type(key) is not str for key in result):
-            raise GovernanceBypassDenied("authority_unavailable")
-        return {
-            node_id: _trusted_decode(_decode_node_state, state)
-            for node_id, state in result.items()
-        }
+    ) -> tuple[GovernedNodeState, ...]:
+        resolved_ids = tuple(node_ids)
+        if not resolved_ids:
+            raise GovernanceBypassDenied("empty_node_status_batch")
+        if len(resolved_ids) > 1000:
+            raise GovernanceBypassDenied("node_status_batch_too_large")
+        with self._rpc_lock:
+            result = self._rpc(
+                "workflow_node_states",
+                {"workflow_id": workflow_id, "node_ids": list(resolved_ids)},
+            )
+            if type(result) is not list or len(result) != len(resolved_ids):
+                self._poison()
+                raise GovernanceBypassDenied("authority_unavailable")
+            try:
+                states = tuple(
+                    _trusted_decode(_decode_node_state, state) for state in result
+                )
+            except GovernanceBypassDenied:
+                self._poison()
+                raise
+            if any(
+                state.workflow_id != workflow_id or state.node_id != node_id
+                for node_id, state in zip(resolved_ids, states, strict=True)
+            ):
+                self._poison()
+                raise GovernanceBypassDenied("authority_status_batch_order_mismatch")
+            return states
 
     def prepare_attempt_authorization(
         self,
@@ -1128,17 +1260,20 @@ def _decode_task_node(value: Any) -> Any:
     for field in ("claimed_by", "artifact_id"):
         if body[field] is not None and type(body[field]) is not str:
             raise ValueError("invalid_task_node")
-    metadata = _inert_json_value(body["metadata"])
-    if type(metadata) is not dict:
-        raise ValueError("invalid_task_node")
+    metadata = _inert_json_object(body["metadata"])
     return TaskNode(
-        **{
-            **body,
-            "required_capabilities": tuple(body["required_capabilities"]),
-            "depends_on": tuple(body["depends_on"]),
-            "status": ExecutionStatus(body["status"]),
-            "metadata": metadata,
-        }
+        node_id=_string_field(body, "node_id"),
+        title=_string_field(body, "title"),
+        description=_string_field(body, "description"),
+        domain=_string_field(body, "domain"),
+        required_capabilities=_string_tuple_field(body, "required_capabilities"),
+        depends_on=_string_tuple_field(body, "depends_on"),
+        priority=_integer_field(body, "priority"),
+        max_budget_tokens=_integer_field(body, "max_budget_tokens"),
+        status=ExecutionStatus(_string_field(body, "status")),
+        claimed_by=_optional_string_field(body, "claimed_by"),
+        artifact_id=_optional_string_field(body, "artifact_id"),
+        metadata=metadata,
     )
 
 
@@ -1278,12 +1413,13 @@ def _decode_registry_snapshot(value: Any) -> CapabilityRegistry:
                 raise ValueError("invalid_capability")
             capabilities.append(
                 Capability(
-                    **{
-                        **body,
-                        "avg_latency_ms": float(body["avg_latency_ms"]),
-                        "cost_per_task": float(body["cost_per_task"]),
-                        "tags": tuple(body["tags"]),
-                    }
+                    name=_string_field(body, "name"),
+                    domain=_string_field(body, "domain"),
+                    description=_string_field(body, "description"),
+                    model_tier=_string_field(body, "model_tier"),
+                    avg_latency_ms=_float_field(body, "avg_latency_ms"),
+                    cost_per_task=_float_field(body, "cost_per_task"),
+                    tags=_string_tuple_field(body, "tags"),
                 )
             )
         registry.register(agent_id, capabilities)

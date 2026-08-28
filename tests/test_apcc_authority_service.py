@@ -14,7 +14,9 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+import constitutional_swarm.governed_commit as governed_commit_module
 from constitutional_swarm.apcc.ports import (
     OutboxRecoveryRequest,
     RevocationRequest,
@@ -31,6 +33,7 @@ from constitutional_swarm.governed_commit import (
 from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
 from tests.gcb_apcc_support import (
+    InProcessExecutionClientHarness,
     authority_child_config,
     canonical_nonce,
     producer_key,
@@ -223,15 +226,27 @@ def test_signed_transcript_rejects_wrong_binding_and_replay(
         "request_digest": digest(request),
         **override,
     }
+    expected_public_key = expected["public_key"]
+    expected_session = expected["session"]
+    expected_channel = expected["channel"]
+    expected_sequence = expected["sequence"]
+    expected_authority_pid = expected["authority_pid"]
+    expected_request_digest = expected["request_digest"]
+    assert isinstance(expected_public_key, Ed25519PublicKey)
+    assert type(expected_session) is str
+    assert type(expected_channel) is str
+    assert type(expected_sequence) is int
+    assert type(expected_authority_pid) is int
+    assert type(expected_request_digest) is str
     with pytest.raises(ValueError, match=message):
         verify_response(
             response,
-            public_key=expected["public_key"],  # type: ignore[arg-type]
-            session=expected["session"],  # type: ignore[arg-type]
-            channel=expected["channel"],  # type: ignore[arg-type]
-            sequence=expected["sequence"],  # type: ignore[arg-type]
-            authority_pid=expected["authority_pid"],  # type: ignore[arg-type]
-            request_digest=expected["request_digest"],  # type: ignore[arg-type]
+            public_key=expected_public_key,
+            session=expected_session,
+            channel=expected_channel,
+            sequence=expected_sequence,
+            authority_pid=expected_authority_pid,
+            request_digest=expected_request_digest,
         )
 
 
@@ -371,7 +386,9 @@ def _recv_exact(connection: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def _raw_channel_rpc(client, body: bytes, *, declared_size: int | None = None) -> dict:
+def _raw_channel_rpc(
+    client, body: bytes, *, declared_size: int | None = None
+) -> dict[str, object]:
     connection = client._channel_socket
     assert isinstance(connection, socket.socket)
     size = len(body) if declared_size is None else declared_size
@@ -383,7 +400,7 @@ def _raw_channel_rpc(client, body: bytes, *, declared_size: int | None = None) -
     return response
 
 
-def _error_code(response: dict) -> str:
+def _error_code(response: dict[str, object]) -> str:
     error = response.get("error")
     if isinstance(error, dict):
         return str(error.get("code", ""))
@@ -499,6 +516,7 @@ def _workflow_row(path) -> tuple[str, int, str]:
 def test_authoritative_status_reads_use_distinct_fresh_csprng_nonces(
     tmp_path, monkeypatch
 ) -> None:
+    from constitutional_swarm.apcc.crypto import b64u_encode
     from constitutional_swarm.authority_ipc import b64u_decode
 
     key = producer_key()
@@ -508,15 +526,17 @@ def test_authoritative_status_reads_use_distinct_fresh_csprng_nonces(
         admin.commit_port.commit(_request(bootstrap, admin, key)).outcome
         is CommitOutcome.COMMITTED
     )
-    store = admin.commit_port._apcc_store
-    original = store.current_status
     nonces: list[str] = []
+    original_token_bytes = governed_commit_module.secrets.token_bytes
 
-    def capture(certificate_digest: str, request_nonce: str):
-        nonces.append(request_nonce)
-        return original(certificate_digest, request_nonce)
+    def capture_token_bytes(size: int) -> bytes:
+        value = original_token_bytes(size)
+        nonces.append(b64u_encode(value))
+        return value
 
-    monkeypatch.setattr(store, "current_status", capture)
+    monkeypatch.setattr(
+        governed_commit_module.secrets, "token_bytes", capture_token_bytes
+    )
     admin.commit_port.node_state("wf", "root")
     admin.commit_port.node_state("wf", "root")
     assert admin.commit_port.authoritative_artifact("wf", "artifact-root") is not None
@@ -862,6 +882,150 @@ def test_oversized_execution_response_returns_signed_error_and_survives(
         handle.close()
 
 
+def test_execution_status_batch_rejects_empty_rpc_and_service_survives(
+    tmp_path,
+) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "empty.db", tmp_path / "empty.keys")
+    )
+    try:
+        assert handle._execution_channel is not None
+        channel = handle._execution_channel
+        with pytest.raises(GovernanceBypassDenied, match="empty_node_status_batch"):
+            channel._rpc("workflow_node_states", {"workflow_id": "wf", "node_ids": []})
+        assert channel.health()["authority_pid"] == handle.pid
+    finally:
+        handle.close()
+
+
+def test_execution_status_batch_accepts_1000_ordered_duplicate_nodes(
+    tmp_path,
+) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "maximum.db", tmp_path / "maximum.keys")
+    )
+    try:
+        handle.admin_client.create_workflow(
+            workflow_id="wf", nodes={"root": ()}, policy_version="1"
+        )
+        assert handle._execution_channel is not None
+        node_ids = ("root",) * 1000
+
+        states = handle._execution_channel.workflow_node_states("wf", node_ids)
+
+        assert len(states) == 1000
+        assert tuple(state.node_id for state in states) == node_ids
+        assert all(state.workflow_id == "wf" for state in states)
+    finally:
+        handle.close()
+
+
+def test_execution_status_batch_rejects_1001_node_rpc_and_service_survives(
+    tmp_path,
+) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "oversized.db", tmp_path / "oversized.keys")
+    )
+    try:
+        assert handle._execution_channel is not None
+        channel = handle._execution_channel
+        with pytest.raises(GovernanceBypassDenied, match="node_status_batch_too_large"):
+            channel._rpc(
+                "workflow_node_states",
+                {"workflow_id": "wf", "node_ids": ["root"] * 1001},
+            )
+        assert channel.health()["authority_pid"] == handle.pid
+    finally:
+        handle.close()
+
+
+def test_in_process_execution_status_batch_rejects_order_spoof(tmp_path) -> None:
+    _bootstrap, admin = _provision(
+        tmp_path / "order-spoof.db", nodes={"root": (), "child": ("root",)}
+    )
+
+    class ReorderingAdmin:
+        def workflow_node_states(self, workflow_id, node_ids):
+            states = admin.workflow_node_states(workflow_id, node_ids)
+            return tuple(reversed(states))
+
+    client = InProcessExecutionClientHarness(ReorderingAdmin())
+
+    with pytest.raises(
+        GovernanceBypassDenied, match="authority_status_batch_order_mismatch"
+    ):
+        getattr(client, "workflow_node_states")("wf", ("root", "child"))
+
+
+def test_execution_channel_rejects_signed_order_spoof_and_poisons() -> None:
+    from constitutional_swarm.authority_ipc import (
+        digest,
+        recv_frame,
+        send_frame,
+        signed_response,
+    )
+    from constitutional_swarm.authority_service import (
+        _AuthorityExecutionChannel,
+        _bind_verified_child_channel,
+    )
+
+    key = producer_key("ordered-batch-ipc")
+    client_socket, authority_socket = socket.socketpair(socket.AF_UNIX)
+    client = _bind_verified_child_channel(
+        _AuthorityExecutionChannel,
+        client_socket,
+        channel_role="execution",
+        session="ordered-batch-session",
+        authority_pid=4321,
+        ipc_public_key=key.public_key(),
+        max_frame_bytes=16_384,
+    )
+
+    def reply_out_of_order() -> None:
+        request = recv_frame(authority_socket, 16_384)
+        states = [
+            {
+                "workflow_id": "wf",
+                "node_id": node_id,
+                "status": "ready",
+                "version": 0,
+                "attempt_id": None,
+                "claimed_by": None,
+                "artifact_id": None,
+                "commit_id": None,
+            }
+            for node_id in ("child", "root")
+        ]
+        response = signed_response(
+            key=key,
+            session="ordered-batch-session",
+            channel="execution",
+            sequence=1,
+            authority_pid=4321,
+            request_digest=digest(request),
+            result=states,
+        )
+        send_frame(authority_socket, response, 16_384)
+        authority_socket.close()
+
+    thread = threading.Thread(target=reply_out_of_order)
+    thread.start()
+    with pytest.raises(
+        GovernanceBypassDenied, match="authority_status_batch_order_mismatch"
+    ):
+        client.workflow_node_states("wf", ("root", "child"))
+    thread.join(2)
+    assert client._poisoned is True
+    with pytest.raises(GovernanceBypassDenied, match="authority_unavailable"):
+        client.health()
+
+
 def test_no_importable_executor_composer_accepts_caller_execution_client() -> None:
     service = importlib.import_module("constitutional_swarm.authority_service")
     swarm = importlib.import_module("constitutional_swarm.swarm")
@@ -885,10 +1049,11 @@ def test_swarm_executor_rejects_privileged_execution_client(
     client = admin if client_name == "admin" else admin.commit_port
 
     with pytest.raises(TypeError, match="execution_client"):
-        SwarmExecutor(
+        type.__call__(
+            SwarmExecutor,
             CapabilityRegistry(),
             ArtifactStore(),
-            execution_client=client,  # type: ignore[call-arg]
+            execution_client=client,
             policy_version="1",
         )
 
@@ -924,10 +1089,11 @@ def test_swarm_executor_rejects_renamed_slots_closure_descriptor_and_subclass_pr
     )
     for proxy in proxies:
         with pytest.raises(TypeError, match="execution_client"):
-            SwarmExecutor(
+            type.__call__(
+                SwarmExecutor,
                 CapabilityRegistry(),
                 ArtifactStore(),
-                execution_client=proxy,  # type: ignore[call-arg]
+                execution_client=proxy,
                 policy_version="1",
             )
 
@@ -967,10 +1133,11 @@ def test_forged_scheduler_cannot_enter_supported_composition_or_mutate_authority
 
     try:
         with pytest.raises(TypeError, match="execution_client"):
-            SwarmExecutor(
+            type.__call__(
+                SwarmExecutor,
                 CapabilityRegistry(),
                 ArtifactStore(),
-                execution_client=ForgedScheduler(),  # type: ignore[call-arg]
+                execution_client=ForgedScheduler(),
                 policy_version="1",
             )
         with sqlite3.connect(config.database_path) as connection:
@@ -992,7 +1159,9 @@ def test_spawn_executor_rejects_callable_and_proxy_registry_metadata(tmp_path) -
     )
     registry = CapabilityRegistry()
     registry.register("agent", [Capability("work", "d")])
-    registry._by_agent["agent"].append(lambda: "authority endpoint")  # type: ignore[arg-type]
+    registered = registry.__dict__["_by_agent"]["agent"]
+    assert isinstance(registered, list)
+    registered.append(lambda: "authority endpoint")
     try:
         with pytest.raises(TypeError, match="inert metadata"):
             handle.spawn_executor(registry, policy_version="1")
@@ -1011,10 +1180,11 @@ def test_spawn_executor_rejects_callable_and_proxy_registry_metadata(tmp_path) -
 )
 def test_swarm_executor_rejects_execution_client_proxies(client) -> None:
     with pytest.raises(TypeError, match="execution_client"):
-        SwarmExecutor(
+        type.__call__(
+            SwarmExecutor,
             CapabilityRegistry(),
             ArtifactStore(),
-            execution_client=client,  # type: ignore[call-arg]
+            execution_client=client,
             policy_version="1",
         )
 

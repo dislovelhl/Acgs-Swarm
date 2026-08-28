@@ -269,10 +269,13 @@ def _tree(value: object, depth: int = 1) -> None:
     if depth > MAX_DEPTH:
         raise CodecError(FailureCode.DEPTH_LIMIT_EXCEEDED)
     if isinstance(value, str):
-        if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
-            raise CodecError(FailureCode.INVALID_UNICODE)
-        if unicodedata.normalize("NFC", value) != value:
-            raise CodecError(FailureCode.INVALID_UNICODE)
+        if not value.isascii():
+            try:
+                value.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise CodecError(FailureCode.INVALID_UNICODE) from exc
+            if unicodedata.normalize("NFC", value) != value:
+                raise CodecError(FailureCode.INVALID_UNICODE)
     elif isinstance(value, dict):
         for key, item in value.items():
             if not key.isascii():
@@ -385,7 +388,10 @@ def _schema(value: object, schema: object) -> None:
             raise CodecError(FailureCode.WRONG_JSON_TYPE)
     elif isinstance(schema, frozenset):
         obj = _object(value)
-        _keys(set(obj), set(schema))
+        expected = {item for item in schema if isinstance(item, str)}
+        if len(expected) != len(schema):
+            raise AssertionError("invalid internal schema")
+        _keys(set(obj), expected)
         if any(not isinstance(item, str) for item in obj.values()):
             raise CodecError(FailureCode.WRONG_JSON_TYPE)
     elif isinstance(schema, dict):

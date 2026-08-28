@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Protocol, cast, get_type_hints
@@ -32,14 +33,16 @@ from constitutional_swarm.apcc.codec import (
     decode_certificate,
     encode_certificate,
 )
-from constitutional_swarm.apcc.crypto import sha256_digest
+from constitutional_swarm.apcc.crypto import COMMIT_DOMAIN, sha256_digest
 from constitutional_swarm.apcc.model import (
     AuthorityStatus,
+    AuthorityStatusValue,
     CandidateLifecycle,
     CandidateState,
     CommitCertificate,
     FailureCode,
     LogicalNodeState,
+    PredecessorRef,
     RequestOutcome,
     Signature,
 )
@@ -50,6 +53,8 @@ from constitutional_swarm.apcc.ports import (
     AuthorityRuntime,
     AuthoritySigningRole,
     AuthorityStore,
+    CurrentStatusRequest,
+    LogicalNodeStatusRequest,
     CommitResult,
     CommitContextRequest,
     CommitContext,
@@ -333,7 +338,7 @@ class _KeyProvider:
         domain: bytes,
         canonical_body: bytes,
     ) -> Signature:
-        if role is AuthoritySigningRole.COMMIT:
+        if role is AuthoritySigningRole.COMMIT and domain == COMMIT_DOMAIN:
             type(self)._commit_signatures += 1
             if self.invalid_commit_signature:
                 return Signature("Ed25519", key_id, _b64u(bytes(64)))
@@ -643,7 +648,10 @@ def _initial_contexts() -> tuple[CommitContext, ...]:
 def _open_store(path: Path, controller: FaultProbe | None) -> SQLiteAuthorityStore:
     if not path.exists():
         SQLiteAuthorityStore.provision(
-            path, config=_config(), initial_contexts=_initial_contexts()
+            path,
+            config=_config(),
+            initial_contexts=_initial_contexts(),
+            runtime=_runtime(),
         )
     if controller is None:
         return SQLiteAuthorityStore.open(path, config=_config(), runtime=_runtime())
@@ -664,7 +672,8 @@ def _snapshot(store: SQLiteAuthorityStore) -> AuthoritySnapshot:
             "AND name NOT LIKE 'sqlite_%' ORDER BY name"
         ):
             assert isinstance(name, str)
-            tables.append(name)
+            if name != "semantic_checkpoint":
+                tables.append(name)
         contents = {
             semantic_names.get(name, name): tuple(
                 repr(row).encode("utf-8")
@@ -692,6 +701,11 @@ def _force_sql_mutation(
         "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?",
         (table,),
     ).fetchall()
+    triggers = [
+        (name, sql)
+        for name, sql in triggers
+        if not str(name).startswith("apcc_semantic_dirty_")
+    ]
     for name, _sql in triggers:
         connection.execute(f'DROP TRIGGER "{name}"')
     connection.execute(statement, parameters)
@@ -755,6 +769,458 @@ def _resigned_status(
             ),
         }
     )
+
+
+@pytest.mark.parametrize("batch_size", (1, 100, 1000))
+def test_sqlite_status_batches_use_one_attested_snapshot_and_positional_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, batch_size: int
+) -> None:
+    store = _open_store(tmp_path / "status-batch.db", None)
+    request = _request(commit_id="status-batch", nonce_byte=71)
+    _advance_candidate(store, request)
+    committed = store.atomic_commit(request)
+    certificate_digest = committed.certificate_digest
+    assert certificate_digest is not None
+
+    transactions = 0
+    attestations = 0
+    original_transaction = store._read_transaction
+    original_attestation = sqlite_store_module._verify_semantic_checkpoint
+
+    @contextmanager
+    def count_transaction():
+        nonlocal transactions
+        transactions += 1
+        with original_transaction() as connection:
+            yield connection
+
+    def count_attestation(*args, **kwargs):
+        nonlocal attestations
+        attestations += 1
+        return original_attestation(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_read_transaction", count_transaction)
+    monkeypatch.setattr(
+        sqlite_store_module, "_verify_semantic_checkpoint", count_attestation
+    )
+    monkeypatch.setattr(
+        sqlite_store_module,
+        "_validate_semantic_integrity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hot batch performed a whole-store semantic scan")
+        ),
+    )
+    before_signatures = _KeyProvider.status_signature_count()
+    requests = tuple(
+        CurrentStatusRequest(
+            certificate_digest,
+            base64.urlsafe_b64encode(index.to_bytes(16, "big"))
+            .rstrip(b"=")
+            .decode("ascii"),
+        )
+        for index in range(1, batch_size + 1)
+    )
+
+    results = store.current_status_batch(requests)
+
+    assert transactions == 1
+    assert attestations == 1
+    assert _KeyProvider.status_signature_count() - before_signatures == batch_size
+    assert tuple(result.request for result in results) == requests
+    assert tuple(result.status.request_nonce for result in results) == tuple(
+        request.request_nonce for request in requests
+    )
+
+
+def test_sqlite_logical_status_batch_preserves_order_and_duplicate_nodes(
+    tmp_path: Path,
+) -> None:
+    store = _open_store(tmp_path / "logical-status-batch.db", None)
+    request = _request(commit_id="logical-status-batch", nonce_byte=72)
+    _advance_candidate(store, request)
+    committed = store.atomic_commit(request)
+    certificate_digest = committed.certificate_digest
+    assert certificate_digest is not None
+    requests = (
+        LogicalNodeStatusRequest("workflow-1", "node-1", _nonce(1)),
+        LogicalNodeStatusRequest("workflow-1", "missing", _nonce(2)),
+        LogicalNodeStatusRequest("workflow-1", "node-1", _nonce(3)),
+    )
+
+    results = store.logical_node_status_batch(requests)
+
+    assert tuple(result.request for result in results) == requests
+    assert (
+        results[0].logical_node.current_certificate_digest
+        == committed.certificate_digest
+    )
+    assert results[0].commit_id == request.commit_id
+    assert results[0].status is not None
+    assert results[1].logical_node.current_node_version == "0"
+    assert results[1].commit_id is None
+    assert results[1].status is None
+    assert results[2].status is not None
+    assert results[0].status.request_nonce != results[2].status.request_nonce
+
+
+def test_sqlite_status_reuses_only_immutable_certificate_reconstruction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _open_store(tmp_path / "status-certificate-reconstruction.db", None)
+    request = _request(commit_id="status-certificate-reconstruction", nonce_byte=76)
+    _advance_candidate(store, request)
+    committed = store.atomic_commit(request)
+    certificate_digest = committed.certificate_digest
+    assert certificate_digest is not None
+    strict_decodes = 0
+    original_decode = sqlite_store_module.decode_certificate
+
+    def count_strict_decode(raw: bytes):
+        nonlocal strict_decodes
+        strict_decodes += 1
+        return original_decode(raw)
+
+    monkeypatch.setattr(sqlite_store_module, "decode_certificate", count_strict_decode)
+
+    first = store.current_status(certificate_digest, _nonce(76))
+    second = store.current_status(certificate_digest, _nonce(77))
+
+    assert first.status is AuthorityStatusValue.CURRENT
+    assert second.status is AuthorityStatusValue.CURRENT
+    assert first.request_nonce != second.request_nonce
+    assert strict_decodes == 1
+
+    store.revoke(
+        RevocationRequest(
+            RevocationScope.CERTIFICATE,
+            request.subject.workflow_id,
+            certificate_digest,
+            "1",
+            "revoke after certificate reconstruction cache warmup",
+        )
+    )
+    revoked = store.current_status(certificate_digest, _nonce(78))
+
+    assert revoked.status is AuthorityStatusValue.REVOKED
+    assert strict_decodes == 1
+
+
+def _large_certificate_payload(variant: int) -> bytes:
+    certificate = CommitCertificate.from_object(copy.deepcopy(valid_vector().payload))
+    predecessors = tuple(
+        PredecessorRef(
+            workflow_id="workflow-1",
+            node_id=f"predecessor-{variant}-{index}",
+            committed_node_version="1",
+            commit_id=f"predecessor-commit-{variant}-{index}",
+            certificate_digest=_digest(
+                f"predecessor-certificate-{variant}-{index}".encode()
+            ),
+            output_digest=_digest(f"predecessor-output-{variant}-{index}".encode()),
+        )
+        for index in range(999)
+    )
+    predecessor_objects = [item.to_object() for item in predecessors]
+    return encode_certificate(
+        replace(
+            certificate,
+            header=replace(certificate.header, certificate_sequence=str(variant + 1)),
+            decision=replace(certificate.decision, commit_id=f"cache-{variant}"),
+            bindings=replace(
+                certificate.bindings,
+                predecessor_root=_digest(_canonical(predecessor_objects)),
+                predecessors=predecessors,
+            ),
+        )
+    )
+
+
+def test_certificate_reconstruction_cache_bounds_large_payload_bytes_and_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = tuple(_large_certificate_payload(index) for index in range(6))
+    byte_budget = max(len(payload) for payload in payloads) * 2
+    strict_decodes = 0
+    original_decode = sqlite_store_module.decode_certificate
+
+    def count_strict_decode(raw: bytes) -> CommitCertificate:
+        nonlocal strict_decodes
+        strict_decodes += 1
+        return original_decode(raw)
+
+    monkeypatch.setattr(sqlite_store_module, "decode_certificate", count_strict_decode)
+    cache = sqlite_store_module._CertificateDecodeCache(
+        max_entries=2,
+        max_payload_bytes=byte_budget,
+    )
+
+    for payload in payloads:
+        cache.decode(payload)
+
+    info = cache.info()
+    assert info.entries == 2
+    assert info.payload_bytes == sum(len(payload) for payload in payloads[-2:])
+    assert info.payload_bytes <= info.max_payload_bytes == byte_budget
+    assert info.max_entries == 2
+    assert strict_decodes == len(payloads)
+
+    cache.decode(payloads[-1])
+    assert strict_decodes == len(payloads)
+    cache.decode(payloads[0])
+    assert strict_decodes == len(payloads) + 1
+
+
+def test_certificate_reconstruction_cache_decodes_oversize_without_retaining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _large_certificate_payload(20)
+    strict_decodes = 0
+    original_decode = sqlite_store_module.decode_certificate
+
+    def count_strict_decode(raw: bytes) -> CommitCertificate:
+        nonlocal strict_decodes
+        strict_decodes += 1
+        return original_decode(raw)
+
+    monkeypatch.setattr(sqlite_store_module, "decode_certificate", count_strict_decode)
+    cache = sqlite_store_module._CertificateDecodeCache(
+        max_entries=1000,
+        max_payload_bytes=len(payload) - 1,
+    )
+
+    first = cache.decode(payload)
+    second = cache.decode(payload)
+
+    assert first == second
+    assert strict_decodes == 2
+    assert cache.info().entries == 0
+    assert cache.info().payload_bytes == 0
+
+
+@pytest.mark.parametrize("tamper", ("changed-payload", "noncanonical-payload"))
+def test_sqlite_cached_certificate_never_bypasses_dirty_payload_rejection(
+    tmp_path: Path, tamper: str
+) -> None:
+    path = tmp_path / f"cached-certificate-{tamper}.db"
+    store = _open_store(path, None)
+    request = _request(commit_id=f"cached-certificate-{tamper}", nonce_byte=77)
+    _advance_candidate(store, request)
+    committed = store.atomic_commit(request)
+    certificate_digest = committed.certificate_digest
+    assert certificate_digest is not None
+    assert (
+        store.current_status(certificate_digest, _nonce(79)).status
+        is AuthorityStatusValue.CURRENT
+    )
+    with sqlite3.connect(path) as connection:
+        if tamper == "changed-payload":
+            payload = bytes(
+                connection.execute(
+                    "SELECT certificate_json FROM certificates "
+                    "WHERE certificate_digest=?",
+                    (certificate_digest,),
+                ).fetchone()[0]
+            )
+            value = json.loads(payload)
+            value["subject"]["output_digest"] = "f" * 64
+            replacement = json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+        else:
+            replacement = b"{}\n"
+        connection.execute(
+            "UPDATE certificates SET certificate_json=? WHERE certificate_digest=?",
+            (replacement, certificate_digest),
+        )
+        connection.commit()
+
+    before_signatures = _KeyProvider.status_signature_count()
+    with pytest.raises(
+        ValueError, match="authority semantic checkpoint validation failed"
+    ):
+        store.current_status(certificate_digest, _nonce(80))
+    assert _KeyProvider.status_signature_count() == before_signatures
+
+
+def test_sqlite_batch_rejects_duplicate_nonce_before_opening_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _open_store(tmp_path / "duplicate-status-nonce.db", None)
+    opened = False
+
+    @contextmanager
+    def forbidden_transaction():
+        nonlocal opened
+        opened = True
+        raise AssertionError("transaction opened before batch validation")
+        yield
+
+    monkeypatch.setattr(store, "_read_transaction", forbidden_transaction)
+    duplicated = (
+        LogicalNodeStatusRequest("workflow-1", "node-1", _nonce(1)),
+        LogicalNodeStatusRequest("workflow-1", "node-2", _nonce(1)),
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        store.logical_node_status_batch(duplicated)
+    assert opened is False
+
+
+@pytest.mark.parametrize("surface", ("current", "logical"))
+def test_sqlite_direct_status_batch_rejects_1001_before_opening_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
+    store = _open_store(tmp_path / f"oversized-{surface}-status-batch.db", None)
+    opened = False
+
+    @contextmanager
+    def forbidden_transaction():
+        nonlocal opened
+        opened = True
+        raise AssertionError("transaction opened before batch size validation")
+        yield
+
+    monkeypatch.setattr(store, "_read_transaction", forbidden_transaction)
+    if surface == "current":
+        current_requests = tuple(
+            CurrentStatusRequest(
+                _digest(b"unknown-certificate"),
+                base64.urlsafe_b64encode(index.to_bytes(16, "big"))
+                .rstrip(b"=")
+                .decode("ascii"),
+            )
+            for index in range(1, 1002)
+        )
+        with pytest.raises(ValueError, match=FailureCode.SIZE_LIMIT_EXCEEDED.value):
+            store.current_status_batch(current_requests)
+    else:
+        logical_requests = tuple(
+            LogicalNodeStatusRequest(
+                "workflow-1",
+                f"node-{index}",
+                base64.urlsafe_b64encode(index.to_bytes(16, "big"))
+                .rstrip(b"=")
+                .decode("ascii"),
+            )
+            for index in range(1, 1002)
+        )
+        with pytest.raises(ValueError, match=FailureCode.SIZE_LIMIT_EXCEEDED.value):
+            store.logical_node_status_batch(logical_requests)
+    assert opened is False
+
+
+@pytest.mark.parametrize("batch_size", (1, 100, 1000))
+def test_sqlite_logical_status_batch_uses_one_set_query_independent_of_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    batch_size: int,
+) -> None:
+    store = _open_store(tmp_path / f"set-logical-batch-{batch_size}.db", None)
+    logical_selects = 0
+    original_connection = store._connection
+
+    def traced_connection() -> sqlite3.Connection:
+        connection = original_connection()
+
+        def trace(statement: str) -> None:
+            nonlocal logical_selects
+            normalized = " ".join(statement.split()).casefold()
+            if "from logical_nodes" in normalized:
+                logical_selects += 1
+
+        connection.set_trace_callback(trace)
+        return connection
+
+    monkeypatch.setattr(store, "_connection", traced_connection)
+    requests = tuple(
+        LogicalNodeStatusRequest(
+            "workflow-1",
+            "root",
+            base64.urlsafe_b64encode(index.to_bytes(16, "big"))
+            .rstrip(b"=")
+            .decode("ascii"),
+        )
+        for index in range(1, batch_size + 1)
+    )
+
+    results = store.logical_node_status_batch(requests)
+
+    assert len(results) == batch_size
+    assert tuple(result.request for result in results) == requests
+    assert logical_selects == 1
+
+
+@pytest.mark.parametrize(
+    ("interface", "surface"),
+    (
+        ("reader", "logical"),
+        ("reader", "context"),
+        ("reader", "replay"),
+        ("reader", "certificate"),
+        ("reader", "outbox"),
+        ("store", "logical"),
+        ("store", "context"),
+        ("store", "replay"),
+        ("store", "certificate"),
+        ("store", "outbox"),
+        ("store", "status"),
+        ("store", "status-batch"),
+        ("store", "logical-status-batch"),
+    ),
+)
+def test_sqlite_every_public_authority_read_rejects_a_dirty_checkpoint(
+    tmp_path: Path, interface: str, surface: str
+) -> None:
+    path = tmp_path / f"dirty-read-{interface}-{surface}.db"
+    store = _open_store(path, None)
+    request = _request(commit_id=f"dirty-read-{interface}-{surface}", nonce_byte=73)
+    _advance_candidate(store, request)
+    committed = store.atomic_commit(request)
+    certificate_digest = committed.certificate_digest
+    assert certificate_digest is not None
+    reader = SQLiteAuthorityReader.open(path)
+    target = reader if interface == "reader" else store
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO logical_nodes(workflow_id,node_id,version,certificate_digest) "
+            "VALUES ('forged-workflow','forged-node','0',NULL)"
+        )
+        connection.commit()
+
+    def operation() -> object:
+        if surface == "logical":
+            return target.read_logical_node("workflow-1", "node-1")
+        if surface == "context":
+            return target.read_commit_context(
+                CommitContextRequest(
+                    request.subject.workflow_id,
+                    request.subject.node_id,
+                    request.subject.attempt_id,
+                    request.subject.agent_id,
+                )
+            )
+        if surface == "replay":
+            return target.replay_commit(
+                ReplayCommitRequest(request.commit_id, request.request_digest)
+            )
+        if surface == "certificate":
+            return target.get_certificate(request.commit_id)
+        if surface == "outbox":
+            return target.get_outbox_event(request.commit_id)
+        if surface == "status":
+            return store.current_status(certificate_digest, _nonce(73))
+        if surface == "status-batch":
+            return store.current_status_batch(
+                (CurrentStatusRequest(certificate_digest, _nonce(73)),)
+            )
+        return store.logical_node_status_batch(
+            (LogicalNodeStatusRequest("workflow-1", "node-1", _nonce(73)),)
+        )
+
+    with pytest.raises(
+        ValueError, match="authority semantic checkpoint validation failed"
+    ):
+        operation()
 
 
 def _only_conflict_and_audit(
@@ -930,6 +1396,16 @@ def _authority_outbox_event(
     return _outbox_event(store, commit_id)
 
 
+def _reseal_test_checkpoint(connection: sqlite3.Connection) -> None:
+    """Test-only bypass used to reach local causal validators after corruption."""
+    sqlite_store_module._seal_semantic_checkpoint(
+        connection,
+        _config(),
+        _runtime(),
+        sqlite_store_module._SCHEMA_FINGERPRINT,
+    )
+
+
 def _tamper_certificate_payload(store: AuthorityStore, digest: str) -> None:
     assert isinstance(store, SQLiteAuthorityStore)
     with sqlite3.connect(store.database_path) as connection:
@@ -946,6 +1422,7 @@ def _tamper_certificate_payload(store: AuthorityStore, digest: str) -> None:
             "UPDATE certificates SET certificate_json=? WHERE certificate_digest=?",
             (encode_certificate(tampered), digest),
         )
+        _reseal_test_checkpoint(connection)
 
 
 def _replace_predecessor_edges(
@@ -961,6 +1438,7 @@ def _replace_predecessor_edges(
             "INSERT INTO predecessor_edges(child_commit_id, predecessor_digest) VALUES (?, ?)",
             ((child_commit_id, digest) for digest in digests),
         )
+        _reseal_test_checkpoint(connection)
 
 
 def _set_clock_sequence(store: AuthorityStore, values: tuple[int, ...]) -> None:
@@ -1081,6 +1559,195 @@ def _prepared_gcb_projection_case(
     assert type(atomic) is _GCBAtomicCommitRequest
     admin.commit_port._prepare_apcc_candidate(atomic)
     return bootstrap, admin, governed, atomic, config, runtime
+
+
+def test_sqlite_gcb_commit_does_not_rescan_full_authority_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hot commit path validates its delta against an authenticated checkpoint."""
+    _bootstrap, admin, _governed, atomic, _config_value, _runtime_value = (
+        _prepared_gcb_projection_case(tmp_path)
+    )
+    attestations = 0
+    original = sqlite_store_module._validate_semantic_integrity
+
+    def count_attestation(connection, config):
+        nonlocal attestations
+        attestations += 1
+        return original(connection, config)
+
+    monkeypatch.setattr(
+        sqlite_store_module, "_validate_semantic_integrity", count_attestation
+    )
+
+    result = admin.commit_port._apcc_store.atomic_commit(atomic)
+
+    assert result.decision.outcome is RequestOutcome.COMMITTED
+    assert attestations == 0
+
+
+def test_sqlite_preexisting_unrelated_corruption_blocks_next_mutation_atomically(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "authenticated-checkpoint-corruption.db"
+    store = _open_store(path, None)
+    corrupted = _request(
+        commit_id="checkpoint-corrupted", nonce_byte=73, workflow_id="workflow-2"
+    )
+    target = _request(commit_id="checkpoint-target", nonce_byte=74)
+    _advance_candidate(store, corrupted)
+    _advance_candidate(store, target)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE candidates SET proposal_digest='tampered' "
+            "WHERE workflow_id=? AND node_id=? AND attempt_id=?",
+            (
+                corrupted.subject.workflow_id,
+                corrupted.subject.node_id,
+                corrupted.subject.attempt_id,
+            ),
+        )
+        connection.commit()
+    before = _snapshot(store)
+
+    with pytest.raises(
+        ValueError, match="semantic (checkpoint validation|validation) failed"
+    ):
+        store.atomic_commit(target)
+
+    assert _snapshot(store) == before
+
+
+def test_sqlite_checkpoint_seal_failure_rolls_back_apcc_and_gcb_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bootstrap, admin, _governed, atomic, _config_value, runtime = (
+        _prepared_gcb_projection_case(tmp_path)
+    )
+    before = _gcb_authority_snapshot(admin)
+    provider = runtime.key_provider
+    original_sign = type(provider).sign
+
+    def fail_checkpoint_sign(
+        self,
+        role: AuthoritySigningRole,
+        key_id: str,
+        domain: bytes,
+        canonical_body: bytes,
+    ) -> Signature:
+        if domain == b"APCC-SEMANTIC-CHECKPOINT-V1":
+            raise RuntimeError("checkpoint signer unavailable")
+        return original_sign(self, role, key_id, domain, canonical_body)
+
+    monkeypatch.setattr(type(provider), "sign", fail_checkpoint_sign)
+
+    with pytest.raises(RuntimeError, match="checkpoint signer unavailable"):
+        admin.commit_port._apcc_store.atomic_commit(atomic)
+
+    assert _gcb_authority_snapshot(admin) == before
+
+
+def test_sqlite_reopen_full_scan_rejects_corruption_despite_replayed_checkpoint(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "checkpoint-replay-on-reopen.db"
+    store = _open_store(path, None)
+    request = _request(commit_id="checkpoint-replay", nonce_byte=75)
+    _advance_candidate(store, request)
+    with sqlite3.connect(path) as connection:
+        checkpoint = connection.execute(
+            "SELECT change_sequence,prior_digest,checkpoint_digest,key_id,signature "
+            "FROM semantic_checkpoint WHERE singleton=1"
+        ).fetchone()
+        assert checkpoint is not None
+        connection.execute(
+            "UPDATE candidates SET proposal_digest='tampered' "
+            "WHERE workflow_id=? AND node_id=? AND attempt_id=?",
+            (
+                request.subject.workflow_id,
+                request.subject.node_id,
+                request.subject.attempt_id,
+            ),
+        )
+        connection.execute(
+            "UPDATE semantic_checkpoint SET change_sequence=?,prior_digest=?,"
+            "checkpoint_digest=?,key_id=?,signature=? WHERE singleton=1",
+            checkpoint,
+        )
+        connection.commit()
+
+    with pytest.raises(ValueError, match="semantic validation failed"):
+        SQLiteAuthorityStore.open(path, config=_config(), runtime=_runtime())
+
+
+@pytest.mark.parametrize("opener", ("reader", "writer"))
+@pytest.mark.parametrize("checkpoint_tamper", ("unsigned-genesis", "missing"))
+def test_sqlite_invalid_checkpoint_never_reopens_or_resigns_forged_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    opener: str,
+    checkpoint_tamper: str,
+) -> None:
+    path = tmp_path / f"{checkpoint_tamper}-{opener}.db"
+    _open_store(path, None)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO logical_nodes(workflow_id,node_id,version,certificate_digest) "
+            "VALUES ('forged-workflow','forged-node','0',NULL)"
+        )
+        if checkpoint_tamper == "unsigned-genesis":
+            connection.execute(
+                "UPDATE semantic_checkpoint SET change_sequence=0,prior_digest=?,"
+                "checkpoint_digest='',key_id=?,signature='' WHERE singleton=1",
+                (
+                    sqlite_store_module._SEMANTIC_CHECKPOINT_GENESIS,
+                    _config().commit_trust.key_id,
+                ),
+            )
+        else:
+            connection.execute("DELETE FROM semantic_checkpoint WHERE singleton=1")
+        connection.commit()
+
+    before = _database_file_state(path)
+    if opener == "writer":
+        monkeypatch.setattr(
+            sqlite_store_module,
+            "_seal_semantic_checkpoint",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("reopen attempted to sign an invalid checkpoint")
+            ),
+        )
+
+    with pytest.raises(
+        ValueError, match="authority semantic checkpoint validation failed"
+    ):
+        if opener == "reader":
+            SQLiteAuthorityReader.open(path)
+        else:
+            SQLiteAuthorityStore.open(path, config=_config(), runtime=_runtime())
+    assert _database_file_state(path) == before
+
+
+def test_sqlite_missing_checkpoint_aborts_guarded_dml_without_mutation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "checkpoint-missing-guarded-dml.db"
+    _open_store(path, None)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DELETE FROM semantic_checkpoint WHERE singleton=1")
+        connection.commit()
+
+        with pytest.raises(sqlite3.IntegrityError, match="checkpoint is missing"):
+            connection.execute(
+                "INSERT INTO logical_nodes(workflow_id,node_id,version,certificate_digest) "
+                "VALUES ('forged-workflow','forged-node','0',NULL)"
+            )
+        forged = connection.execute(
+            "SELECT 1 FROM logical_nodes "
+            "WHERE workflow_id='forged-workflow' AND node_id='forged-node'"
+        ).fetchone()
+
+    assert forged is None
 
 
 def test_gcb_projection_has_no_callback_sql_or_connection_capability_surface() -> None:
@@ -1356,7 +2023,10 @@ def test_sqlite_open_never_creates_an_unprovisioned_path_and_reader_is_read_only
         assert not Path(f"{path}-shm").exists()
 
     SQLiteAuthorityStore.provision(
-        path, config=_config(), initial_contexts=_initial_contexts()
+        path,
+        config=_config(),
+        initial_contexts=_initial_contexts(),
+        runtime=_runtime(),
     )
     reader = SQLiteAuthorityReader.open(path)
     before = _database_file_state(path)
@@ -1383,16 +2053,22 @@ def test_sqlite_open_never_creates_an_unprovisioned_path_and_reader_is_read_only
         "unexpected-index",
     ),
 )
-def test_sqlite_open_validates_v1_schema_without_mutating_failed_store(
+def test_sqlite_open_validates_v2_schema_without_mutating_failed_store(
     tmp_path: Path, tamper: str
 ) -> None:
     path = tmp_path / f"schema-{tamper}.db"
     SQLiteAuthorityStore.provision(
-        path, config=_config(), initial_contexts=_initial_contexts()
+        path,
+        config=_config(),
+        initial_contexts=_initial_contexts(),
+        runtime=_runtime(),
     )
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA application_id").fetchone() == (0x41504343,)
-        assert connection.execute("PRAGMA user_version").fetchone() == (1,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("2",)
         fingerprint = connection.execute(
             "SELECT value FROM metadata WHERE key='schema_fingerprint'"
         ).fetchone()
@@ -1439,12 +2115,37 @@ def test_sqlite_open_validates_v1_schema_without_mutating_failed_store(
         assert _database_file_state(path) == before
 
 
+def test_sqlite_v1_store_fails_with_explicit_schema_incompatibility(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "incompatible-v1.db"
+    SQLiteAuthorityStore.provision(
+        path, _config(), _initial_contexts(), runtime=_runtime()
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version=1")
+        connection.execute("UPDATE metadata SET value='1' WHERE key='schema_version'")
+        connection.commit()
+
+    for opener in (
+        lambda: SQLiteAuthorityReader.open(path),
+        lambda: SQLiteAuthorityStore.open(path, _config(), _runtime()),
+    ):
+        with pytest.raises(
+            ValueError, match="authority schema version is incompatible"
+        ):
+            opener()
+
+
 def test_sqlite_apcc_namespace_does_not_collide_with_added_gcb_table_names(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "shared-gcb-apcc.db"
     SQLiteAuthorityStore.provision(
-        path, config=_config(), initial_contexts=_initial_contexts()
+        path,
+        config=_config(),
+        initial_contexts=_initial_contexts(),
+        runtime=_runtime(),
     )
     with sqlite3.connect(path) as connection:
         connection.executescript(
@@ -1511,7 +2212,10 @@ def test_sqlite_provision_rejects_foreign_file_without_journal_or_byte_mutation(
     before = _database_file_state(path)
     with pytest.raises(ValueError, match="schema validation failed"):
         SQLiteAuthorityStore.provision(
-            path, config=_config(), initial_contexts=_initial_contexts()
+            path,
+            config=_config(),
+            initial_contexts=_initial_contexts(),
+            runtime=_runtime(),
         )
     assert _database_file_state(path) == before
     with sqlite3.connect(path) as connection:
@@ -1537,7 +2241,10 @@ def test_sqlite_provision_is_public_only_one_time_and_changed_config_fails_close
         )
     with pytest.raises(ValueError):
         SQLiteAuthorityStore.provision(
-            path, config=changed, initial_contexts=_initial_contexts()
+            path,
+            config=changed,
+            initial_contexts=_initial_contexts(),
+            runtime=_runtime(),
         )
     assert _snapshot(_reopen_store(path)) == before
 
@@ -1557,24 +2264,28 @@ def test_same_store_rejects_every_persisted_role_binding_mutation_without_writes
 
     with pytest.raises(ValueError):
         SQLiteAuthorityStore.provision(
-            path, config=changed, initial_contexts=_initial_contexts()
+            path,
+            config=changed,
+            initial_contexts=_initial_contexts(),
+            runtime=_runtime(),
         )
     assert _snapshot(_reopen_store(path)) == before
 
 
-def test_sqlite_provision_and_open_signatures_keep_public_config_and_runtime_apart(
+def test_sqlite_provision_requires_typed_runtime_without_raw_private_material(
     tmp_path: Path,
 ) -> None:
     del tmp_path
     provision = inspect.signature(SQLiteAuthorityStore.provision).parameters
     writer_open = inspect.signature(SQLiteAuthorityStore.open).parameters
     reader_open = inspect.signature(SQLiteAuthorityReader.open).parameters
-    assert set(provision) == {"path", "config", "initial_contexts"}
+    assert set(provision) == {"path", "config", "initial_contexts", "runtime"}
     assert (
         get_type_hints(SQLiteAuthorityStore.provision)["config"] is APCCAuthorityConfig
     )
+    assert get_type_hints(SQLiteAuthorityStore.provision)["runtime"] is AuthorityRuntime
+    assert provision["runtime"].default is inspect.Parameter.empty
     assert not {
-        "runtime",
         "key_provider",
         "signers",
         "private_seed",
@@ -2112,7 +2823,10 @@ def test_sqlite_status_signer_output_is_verified_before_return(
     path = tmp_path / f"status-signer-{mode}.db"
     runtime = _runtime()
     SQLiteAuthorityStore.provision(
-        path, config=_config(), initial_contexts=_initial_contexts()
+        path,
+        config=_config(),
+        initial_contexts=_initial_contexts(),
+        runtime=runtime,
     )
     store = SQLiteAuthorityStore.open(path, config=_config(), runtime=runtime)
     request = _request(commit_id=f"status-signer-{mode}", nonce_byte=241)
@@ -2353,7 +3067,7 @@ def test_service_changed_unconfigured_scope_reaches_store_equivocation_guard(
     config = _config()
     runtime = _runtime()
     SQLiteAuthorityStore.provision(
-        path, config=config, initial_contexts=_initial_contexts()
+        path, config=config, initial_contexts=_initial_contexts(), runtime=runtime
     )
     store = SQLiteAuthorityStore.open(path, config=config, runtime=runtime)
     service = APCCCommitService(store=store, config=config, runtime=runtime)
@@ -2408,6 +3122,7 @@ def test_sqlite_lifecycle_advancement_rejects_tampered_durable_candidate_binding
                 request.subject.attempt_id,
             ),
         )
+        _reseal_test_checkpoint(connection)
     before = _snapshot(store)
     with pytest.raises(ValueError, match=FailureCode.STAGED_RESULT_CONFLICT.value):
         if evidence_already_assembled:
@@ -2465,6 +3180,7 @@ def test_sqlite_predecessor_payload_is_digest_pinned_and_verified(
             "UPDATE certificates SET certificate_json=? WHERE certificate_digest=?",
             (encode_certificate(tampered), parent.certificate_digest),
         )
+        _reseal_test_checkpoint(connection)
     child = _request(
         commit_id="pin-child",
         nonce_byte=129,
@@ -3881,6 +4597,7 @@ def test_sqlite_outbox_claim_head_blocks_then_expires_and_stale_token_cannot_fin
             ).rowcount
             == 0
         )
+        _reseal_test_checkpoint(connection)
         connection.commit()
     _OUTBOX_SINK.delivered.clear()
     blocked = store.recover_outbox(OutboxRecoveryRequest("1"))
@@ -3891,6 +4608,7 @@ def test_sqlite_outbox_claim_head_blocks_then_expires_and_stale_token_cannot_fin
             "UPDATE apcc_outbox SET lease_claimed_ms=?,lease_until_ms=?",
             (now - 2, now - 1),
         )
+        _reseal_test_checkpoint(connection)
         connection.commit()
     reclaimed = store.recover_outbox(OutboxRecoveryRequest("1"))
     assert reclaimed.delivered_count == "1"
@@ -3943,7 +4661,9 @@ def test_sqlite_literal_memory_path_is_created_as_a_wal_backed_file(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     path = Path(":memory:")
-    SQLiteAuthorityStore.provision(path, _config(), _initial_contexts())
+    SQLiteAuthorityStore.provision(
+        path, _config(), _initial_contexts(), runtime=_runtime()
+    )
     assert path.is_file()
     with sqlite3.connect(path.resolve().as_uri(), uri=True) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
@@ -4040,7 +4760,9 @@ def test_sqlite_coherent_control_retargeting_fails_before_status_signing(
 ) -> None:
     path = tmp_path / "control-retarget.db"
     provider = _KeyProvider()
-    store = SQLiteAuthorityStore.provision(path, _config(), _initial_contexts())
+    store = SQLiteAuthorityStore.provision(
+        path, _config(), _initial_contexts(), runtime=_runtime()
+    )
     del store
     authority = SQLiteAuthorityStore.open(
         path, _config(), AuthorityRuntime(provider, _Clock(), _OUTBOX_SINK)
@@ -4239,9 +4961,71 @@ def test_sqlite_failed_first_provision_leaves_no_destination_or_sidecars(
 
     monkeypatch.setattr(sqlite_store_module, "_schema", fail_schema)
     with pytest.raises(RuntimeError, match="injected initial schema failure"):
-        SQLiteAuthorityStore.provision(path, _config(), _initial_contexts())
+        SQLiteAuthorityStore.provision(
+            path, _config(), _initial_contexts(), runtime=_runtime()
+        )
     assert not path.exists()
     assert not list(tmp_path.glob("atomic-provision.db*"))
+
+
+def test_sqlite_checkpoint_sign_failure_never_publishes_bootstrap_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "atomic-checkpoint-sign.db"
+
+    def fail_checkpoint_sign(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected initial checkpoint signing failure")
+
+    monkeypatch.setattr(
+        sqlite_store_module, "_seal_semantic_checkpoint", fail_checkpoint_sign
+    )
+    with pytest.raises(
+        RuntimeError, match="injected initial checkpoint signing failure"
+    ):
+        SQLiteAuthorityStore.provision(
+            path, _config(), _initial_contexts(), runtime=_runtime()
+        )
+    assert not path.exists()
+    assert not list(tmp_path.glob("atomic-checkpoint-sign.db*"))
+
+
+def test_sqlite_runtime_key_mismatch_never_publishes_bootstrap_store(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "atomic-runtime-key-mismatch.db"
+
+    with pytest.raises(ValueError, match="runtime signer does not match"):
+        SQLiteAuthorityStore.provision(
+            path,
+            _config(),
+            _initial_contexts(),
+            runtime=_runtime(status_seed=SEEDS["producer"]),
+        )
+
+    assert not path.exists()
+    assert not list(tmp_path.glob("atomic-runtime-key-mismatch.db*"))
+
+
+def test_sqlite_preexisting_empty_file_is_never_treated_as_fresh_bootstrap(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "preexisting-empty.db"
+    path.touch()
+    before = path.stat()
+
+    with pytest.raises(ValueError, match="schema validation failed"):
+        SQLiteAuthorityStore.provision(
+            path, _config(), _initial_contexts(), runtime=_runtime()
+        )
+
+    after = path.stat()
+    assert (after.st_dev, after.st_ino, after.st_size) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+    )
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
 
 
 @pytest.mark.parametrize("clock_value", (-1, True, 9_007_199_254_740_992))
@@ -4249,7 +5033,9 @@ def test_sqlite_trusted_clock_bounds_fail_before_signing_or_mutation(
     tmp_path: Path, clock_value: int
 ) -> None:
     path = tmp_path / "clock-bounds.db"
-    SQLiteAuthorityStore.provision(path, _config(), _initial_contexts())
+    SQLiteAuthorityStore.provision(
+        path, _config(), _initial_contexts(), runtime=_runtime()
+    )
 
     class BadClock:
         def now_ms(self) -> int:
@@ -4278,7 +5064,9 @@ def test_sqlite_config_exact_roundtrip_supports_multiple_scoped_role_bindings(
     )
     config = replace(base, producer_trust=(*base.producer_trust, extra))
     path = tmp_path / "multi-binding.db"
-    SQLiteAuthorityStore.provision(path, config, _initial_contexts())
+    SQLiteAuthorityStore.provision(
+        path, config, _initial_contexts(), runtime=_runtime()
+    )
     assert (
         SQLiteAuthorityReader.open(path).authority_store_id == config.authority_store_id
     )
@@ -4402,7 +5190,7 @@ def test_executor_and_gcb_route_only_once_through_apcc_and_block_legacy_paths(
     assert failed.reason == "persistence_error"
     assert getattr(admin.commit_port, "_apcc_store")._gcb_projection_fault_fired
     after_failed_commit = _gcb_authority_snapshot(admin)
-    preparation_tables = {"candidates", "logical_nodes"}
+    preparation_tables = {"candidates", "logical_nodes", "semantic_checkpoint"}
     assert {
         name: rows
         for name, rows in after_failed_commit.tables.items()
@@ -4694,7 +5482,9 @@ def test_sqlite_busy_wal_checkpoint_never_publishes_poisoned_store(
 
     monkeypatch.setattr(sqlite_store_module, "_connect_create", busy_connect)
     with pytest.raises(ValueError, match="WAL checkpoint"):
-        SQLiteAuthorityStore.provision(path, _config(), _initial_contexts())
+        SQLiteAuthorityStore.provision(
+            path, _config(), _initial_contexts(), runtime=_runtime()
+        )
     assert not path.exists()
     assert not tuple(tmp_path.iterdir())
 
@@ -4715,7 +5505,9 @@ def test_sqlite_post_link_directory_fsync_failure_removes_only_attempt_inode(
 
     monkeypatch.setattr(sqlite_store_module.os, "fsync", fail_second_fsync)
     with pytest.raises(OSError, match="injected parent fsync failure"):
-        SQLiteAuthorityStore.provision(path, _config(), _initial_contexts())
+        SQLiteAuthorityStore.provision(
+            path, _config(), _initial_contexts(), runtime=_runtime()
+        )
     assert not path.exists()
     assert not tuple(tmp_path.iterdir())
 

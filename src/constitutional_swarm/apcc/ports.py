@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, Protocol, TypeAlias, runtime_checkable
@@ -446,6 +447,76 @@ class PersistedOutboxEvent:
     pending: bool
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentStatusRequest:
+    """One positional certificate-status challenge in a batch read."""
+
+    certificate_digest: str
+    request_nonce: str
+
+    def __post_init__(self) -> None:
+        b64u_decode(self.certificate_digest, expected_length=32)
+        b64u_decode(self.request_nonce, expected_length=16)
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentStatusResult:
+    """Status response bound to its exact positional request."""
+
+    request: CurrentStatusRequest
+    status: AuthorityStatus
+
+    def __post_init__(self) -> None:
+        if (
+            self.status.certificate_digest != self.request.certificate_digest
+            or self.status.request_nonce != self.request.request_nonce
+        ):
+            raise ValueError("authority status response identity mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class LogicalNodeStatusRequest:
+    """One positional logical-node/current-status read."""
+
+    workflow_id: str
+    node_id: str
+    request_nonce: str
+
+    def __post_init__(self) -> None:
+        if not self.workflow_id or not self.node_id:
+            raise ValueError("logical-node identity cannot be empty")
+        b64u_decode(self.request_nonce, expected_length=16)
+
+
+@dataclass(frozen=True, slots=True)
+class LogicalNodeStatusResult:
+    """One immutable logical-node result from a shared stable snapshot."""
+
+    request: LogicalNodeStatusRequest
+    logical_node: LogicalNodeState
+    commit_id: str | None
+    status: AuthorityStatus | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.logical_node.workflow_id != self.request.workflow_id
+            or self.logical_node.node_id != self.request.node_id
+        ):
+            raise ValueError("logical-node response identity mismatch")
+        digest = self.logical_node.current_certificate_digest
+        if digest is None:
+            if self.commit_id is not None or self.status is not None:
+                raise ValueError("uncommitted logical node has certificate metadata")
+            return
+        if not self.commit_id or self.status is None:
+            raise ValueError("committed logical node lacks certificate metadata")
+        if (
+            self.status.certificate_digest != digest
+            or self.status.request_nonce != self.request.request_nonce
+        ):
+            raise ValueError("logical-node authority status identity mismatch")
+
+
 class AuthorityReader(Protocol):
     """Signer-free, non-mutating authority access."""
 
@@ -482,6 +553,14 @@ class AuthorityStore(AuthorityReader, Protocol):
     def current_status(
         self, certificate_digest: str, request_nonce: str
     ) -> AuthorityStatus: ...
+
+    def current_status_batch(
+        self, requests: Sequence[CurrentStatusRequest]
+    ) -> tuple[CurrentStatusResult, ...]: ...
+
+    def logical_node_status_batch(
+        self, requests: Sequence[LogicalNodeStatusRequest]
+    ) -> tuple[LogicalNodeStatusResult, ...]: ...
 
     def revoke(self, request: RevocationRequest) -> RevocationResult: ...
 

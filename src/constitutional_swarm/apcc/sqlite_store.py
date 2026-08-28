@@ -14,11 +14,13 @@ import os
 import re
 import secrets
 import sqlite3
-from collections.abc import Mapping
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+from threading import Lock
 from typing import Iterator, Protocol, cast
 
 from cryptography.exceptions import InvalidSignature
@@ -74,6 +76,10 @@ from .ports import (
     CommitContext,
     CommitContextRequest,
     CommitResult,
+    CurrentStatusRequest,
+    CurrentStatusResult,
+    LogicalNodeStatusRequest,
+    LogicalNodeStatusResult,
     OutboxRecoveryRequest,
     OutboxRecoveryResult,
     PersistedOutboxEvent,
@@ -100,13 +106,21 @@ from .verifier import (
     TrustRole,
     _bindings,
     _evidence,
+    _header,
+    _verify_signature,
     verify_causal_closure,
     verify_historical,
 )
 
 _APPLICATION_ID = 0x41504343  # ASCII "APCC"
-_SCHEMA_VERSION = 1
+_AUTHORITY_SCHEMA_VERSION = "2"
+_SCHEMA_VERSION = int(_AUTHORITY_SCHEMA_VERSION)
+_MAX_STATUS_BATCH_SIZE = 1000
+_MAX_CERTIFICATE_CACHE_PAYLOAD_BYTES = 4 * 1024 * 1024
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
+_SEMANTIC_CHECKPOINT_DOMAIN = b"APCC-SEMANTIC-CHECKPOINT-V1"
+_SEMANTIC_CHECKPOINT_GENESIS = sha256_digest(b"APCC-1/semantic-checkpoint/genesis")
+_SCHEMA_VERSION_INCOMPATIBLE = "APCC authority schema version is incompatible"
 
 
 class _FaultProbe(Protocol):
@@ -176,6 +190,22 @@ class _GCBProjectionPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class _SemanticSnapshot:
+    """Validated certificate facts produced by one full store attestation."""
+
+    certificates: Mapping[str, CommitCertificate]
+    dispositions: Mapping[str, CertificateDisposition]
+    envelope_sizes: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _CausalBatchFacts:
+    closure: frozenset[str]
+    depth: int
+    error: FailureCode | None
+
+
+@dataclass(frozen=True, slots=True)
 class _GCBAtomicCommitRequest(AtomicCommitRequest):
     """Internal APCC request carrying only an immutable GCB semantic plan."""
 
@@ -190,6 +220,296 @@ class _GCBProjectionDenied(RuntimeError):
 
 class _GCBProjectionFault(RuntimeError):
     pass
+
+
+def _semantic_checkpoint_body(
+    config: APCCAuthorityConfig,
+    schema_fingerprint: str,
+    change_sequence: int,
+    prior_digest: str,
+) -> bytes:
+    return _json(
+        {
+            "profile": "APCC-1.0-draft",
+            "kind": "apcc.semantic-checkpoint",
+            "authority_store_id": config.authority_store_id,
+            "schema_fingerprint": schema_fingerprint,
+            "change_sequence": str(change_sequence),
+            "prior_digest": prior_digest,
+        }
+    ).encode("utf-8")
+
+
+def _semantic_checkpoint_row(
+    connection: _AuthorityConnection,
+) -> tuple[int, str, str, str, str]:
+    rows = connection.execute(
+        "SELECT change_sequence,prior_digest,checkpoint_digest,key_id,signature "
+        "FROM semantic_checkpoint WHERE singleton=1"
+    ).fetchall()
+    if len(rows) != 1:
+        raise ValueError("APCC authority semantic checkpoint validation failed")
+    sequence, prior_digest, checkpoint_digest, key_id, signature = rows[0]
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or not 0 <= sequence <= _MAX_SAFE_INTEGER
+        or any(
+            not isinstance(value, str)
+            for value in (prior_digest, checkpoint_digest, key_id, signature)
+        )
+    ):
+        raise ValueError("APCC authority semantic checkpoint validation failed")
+    return (
+        sequence,
+        _row_text(prior_digest),
+        _row_text(checkpoint_digest),
+        _row_text(key_id),
+        _row_text(signature),
+    )
+
+
+def _verify_semantic_checkpoint(
+    connection: _AuthorityConnection,
+    config: APCCAuthorityConfig,
+    schema_fingerprint: str,
+    *,
+    allow_initial_unsealed: bool = False,
+) -> bool:
+    invalid = ValueError("APCC authority semantic checkpoint validation failed")
+    sequence, prior_digest, checkpoint_digest, key_id, signature_b64u = (
+        _semantic_checkpoint_row(connection)
+    )
+    if not checkpoint_digest and not signature_b64u:
+        if (
+            allow_initial_unsealed
+            and sequence == 0
+            and prior_digest == _SEMANTIC_CHECKPOINT_GENESIS
+            and key_id == config.commit_trust.key_id
+        ):
+            return False
+        raise invalid
+    if (
+        not checkpoint_digest
+        or not signature_b64u
+        or key_id != config.commit_trust.key_id
+    ):
+        raise invalid
+    body = _semantic_checkpoint_body(config, schema_fingerprint, sequence, prior_digest)
+    if sha256_digest(body) != checkpoint_digest:
+        raise invalid
+    try:
+        signature = b64u_decode(signature_b64u, expected_length=64)
+        Ed25519PublicKey.from_public_bytes(config.commit_trust.public_key).verify(
+            signature, _SEMANTIC_CHECKPOINT_DOMAIN + b"\x00" + body
+        )
+    except (InvalidSignature, ValueError) as error:
+        raise invalid from error
+    return True
+
+
+def _seal_semantic_checkpoint(
+    connection: _AuthorityConnection,
+    config: APCCAuthorityConfig,
+    runtime: AuthorityRuntime,
+    schema_fingerprint: str,
+) -> None:
+    sequence, prior_digest, checkpoint_digest, key_id, signature_b64u = (
+        _semantic_checkpoint_row(connection)
+    )
+    if checkpoint_digest or signature_b64u:
+        _verify_semantic_checkpoint(connection, config, schema_fingerprint)
+        return
+    if key_id != config.commit_trust.key_id:
+        raise ValueError("APCC authority semantic checkpoint validation failed")
+    body = _semantic_checkpoint_body(config, schema_fingerprint, sequence, prior_digest)
+    signature = runtime.key_provider.sign(
+        AuthoritySigningRole.COMMIT,
+        config.commit_trust.key_id,
+        _SEMANTIC_CHECKPOINT_DOMAIN,
+        body,
+    )
+    if signature.algorithm != "Ed25519" or signature.key_id != key_id:
+        raise ValueError("APCC authority semantic checkpoint signing failed")
+    try:
+        raw_signature = b64u_decode(signature.signature_b64u, expected_length=64)
+        Ed25519PublicKey.from_public_bytes(config.commit_trust.public_key).verify(
+            raw_signature, _SEMANTIC_CHECKPOINT_DOMAIN + b"\x00" + body
+        )
+    except (InvalidSignature, ValueError) as error:
+        raise ValueError("APCC authority semantic checkpoint signing failed") from error
+    digest = sha256_digest(body)
+    changed = connection.execute(
+        "UPDATE semantic_checkpoint SET checkpoint_digest=?,signature=? "
+        "WHERE singleton=1 AND change_sequence=? AND prior_digest=? "
+        "AND checkpoint_digest='' AND key_id=? AND signature=''",
+        (digest, signature.signature_b64u, sequence, prior_digest, key_id),
+    ).rowcount
+    if changed != 1:
+        raise ValueError("APCC authority semantic checkpoint signing failed")
+
+
+@dataclass(frozen=True, slots=True)
+class _CertificateDecodeCacheInfo:
+    entries: int
+    payload_bytes: int
+    max_entries: int
+    max_payload_bytes: int
+
+
+class _CertificateDecodeCache:
+    """Bounded process-local cache of exact payload parses only.
+
+    The byte budget accounts for immutable raw payload keys.  The decoded
+    certificate graph is additionally bounded by the same entry limit and by
+    the APCC grammar represented by each charged payload.  No verification,
+    revocation, status, nonce, or store verdict is cached.
+    """
+
+    def __init__(self, *, max_entries: int, max_payload_bytes: int) -> None:
+        if max_entries <= 0 or max_payload_bytes <= 0:
+            raise ValueError("certificate decode cache limits must be positive")
+        self._max_entries = max_entries
+        self._max_payload_bytes = max_payload_bytes
+        self._entries: OrderedDict[bytes, CommitCertificate] = OrderedDict()
+        self._payload_bytes = 0
+        self._lock = Lock()
+
+    def decode(self, payload: bytes) -> CommitCertificate:
+        with self._lock:
+            cached = self._entries.get(payload)
+            if cached is not None:
+                self._entries.move_to_end(payload)
+                return cached
+
+        certificate = decode_certificate(payload)
+        payload_size = len(payload)
+        if payload_size > self._max_payload_bytes:
+            return certificate
+
+        with self._lock:
+            cached = self._entries.get(payload)
+            if cached is not None:
+                self._entries.move_to_end(payload)
+                return cached
+            while self._entries and (
+                len(self._entries) >= self._max_entries
+                or self._payload_bytes + payload_size > self._max_payload_bytes
+            ):
+                evicted_payload, _ = self._entries.popitem(last=False)
+                self._payload_bytes -= len(evicted_payload)
+            self._entries[payload] = certificate
+            self._payload_bytes += payload_size
+            return certificate
+
+    def info(self) -> _CertificateDecodeCacheInfo:
+        with self._lock:
+            return _CertificateDecodeCacheInfo(
+                entries=len(self._entries),
+                payload_bytes=self._payload_bytes,
+                max_entries=self._max_entries,
+                max_payload_bytes=self._max_payload_bytes,
+            )
+
+
+_CERTIFICATE_DECODE_CACHE = _CertificateDecodeCache(
+    max_entries=_MAX_STATUS_BATCH_SIZE,
+    max_payload_bytes=_MAX_CERTIFICATE_CACHE_PAYLOAD_BYTES,
+)
+
+
+def _decode_checkpoint_certificate(payload: bytes) -> CommitCertificate:
+    """Reconstruct an immutable certificate through the bounded exact cache."""
+
+    return _CERTIFICATE_DECODE_CACHE.decode(payload)
+
+
+def _checkpoint_semantic_snapshot(
+    connection: _AuthorityConnection,
+    certificate_digests: Sequence[str],
+) -> _SemanticSnapshot:
+    """Load only the requested causal closure after checkpoint attestation."""
+
+    certificates: dict[str, CommitCertificate] = {}
+    envelope_sizes: dict[str, int] = {}
+    attempted: set[str] = set()
+    pending = set(certificate_digests)
+    while pending:
+        batch = tuple(sorted(pending)[:400])
+        pending.difference_update(batch)
+        attempted.update(batch)
+        placeholders = ",".join("?" for _ in batch)
+        rows = connection.execute(
+            "SELECT certificate_digest,commit_id,certificate_json,envelope,"
+            "workflow_id,node_id,sequence FROM certificates "
+            f"WHERE certificate_digest IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for row in rows:
+            digest = _row_text(row[0])
+            try:
+                payload = _row_bytes(row[2])
+                sequence = _row_int(row[6])
+                if sha256_digest(payload) != digest:
+                    raise ValueError(
+                        "APCC semantic checkpoint protected row is invalid"
+                    )
+                certificate = _decode_checkpoint_certificate(payload)
+            except Exception as error:
+                raise ValueError(
+                    "APCC semantic checkpoint protected row is invalid"
+                ) from error
+            if (
+                certificate.decision.commit_id != _row_text(row[1])
+                or certificate.subject.workflow_id != _row_text(row[4])
+                or certificate.subject.node_id != _row_text(row[5])
+                or certificate.header.certificate_sequence != str(sequence)
+            ):
+                raise ValueError("APCC semantic checkpoint protected row is invalid")
+            certificates[digest] = certificate
+            envelope_sizes[digest] = len(_row_bytes(row[3]))
+            pending.update(
+                reference.certificate_digest
+                for reference in certificate.bindings.predecessors
+                if reference.certificate_digest not in attempted
+                and reference.certificate_digest not in certificates
+            )
+
+    dispositions: dict[str, CertificateDisposition] = {}
+    digests = tuple(sorted(certificates))
+    for offset in range(0, len(digests), 400):
+        batch = digests[offset : offset + 400]
+        placeholders = ",".join("?" for _ in batch)
+        for row_digest, raw_event_sequence, raw_disposition in connection.execute(
+            "SELECT certificate_digest,event_sequence,disposition "
+            "FROM certificate_dispositions "
+            f"WHERE certificate_digest IN ({placeholders}) "
+            "ORDER BY certificate_digest,event_sequence",
+            batch,
+        ):
+            resolved_digest = _row_text(row_digest)
+            event_sequence = _row_int(raw_event_sequence)
+            current = CertificateDisposition(_row_text(raw_disposition))
+            prior = dispositions.get(resolved_digest)
+            if (event_sequence, current, prior) == (
+                1,
+                CertificateDisposition.CURRENT,
+                None,
+            ) or (
+                event_sequence == 2
+                and current
+                in {
+                    CertificateDisposition.REVOKED,
+                    CertificateDisposition.SUPERSEDED,
+                }
+                and prior is CertificateDisposition.CURRENT
+            ):
+                dispositions[resolved_digest] = current
+                continue
+            raise ValueError("APCC semantic checkpoint protected row is invalid")
+    if set(dispositions) != set(certificates):
+        raise ValueError("APCC semantic checkpoint protected row is invalid")
+    return _SemanticSnapshot(certificates, dispositions, envelope_sizes)
 
 
 def _row_text(value: object) -> str:
@@ -1121,6 +1441,20 @@ def _trusted_now(clock: object) -> int:
     return value
 
 
+def _validate_runtime_signers(
+    config: APCCAuthorityConfig, runtime: AuthorityRuntime
+) -> None:
+    for role, binding in (
+        (AuthoritySigningRole.COMMIT, config.commit_trust),
+        (AuthoritySigningRole.STATUS, config.status_trust),
+    ):
+        if (
+            bytes(runtime.key_provider.public_key(role, binding.key_id))
+            != binding.public_key
+        ):
+            raise ValueError("APCC runtime signer does not match public configuration")
+
+
 def _has_later_generation_revocation(
     connection: _AuthorityConnection, certificate: CommitCertificate
 ) -> bool:
@@ -1325,9 +1659,11 @@ class _AuthorityReaderCore:
 class SQLiteAuthorityReader(_AuthorityReaderCore):
     """Signer-free SQLite APCC reader.  It never opens a writer transaction."""
 
-    def __init__(self, path: Path, authority_store_id: str) -> None:
-        super().__init__(authority_store_id)
+    def __init__(self, path: Path, config: APCCAuthorityConfig) -> None:
+        super().__init__(config.authority_store_id)
         self.database_path = Path(path)
+        self._config = config
+        self._attested_read_connections: set[sqlite3.Connection] = set()
 
     @classmethod
     def open(cls, path: Path) -> SQLiteAuthorityReader:
@@ -1337,7 +1673,7 @@ class SQLiteAuthorityReader(_AuthorityReaderCore):
             config_text = _validate_schema(connection)
             config = _config_from_object(_loads(config_text))
             connection.commit()
-            return cls(Path(path), config.authority_store_id)
+            return cls(Path(path), config)
         except ValueError:
             raise
         except sqlite3.DatabaseError as error:
@@ -1353,12 +1689,15 @@ class SQLiteAuthorityReader(_AuthorityReaderCore):
         connection = self._connection()
         try:
             connection.execute("BEGIN")
+            _attest_sqlite_read_connection(connection, self._config)
+            self._attested_read_connections.add(connection)
             yield connection
             connection.commit()
         except Exception:
             connection.rollback()
             raise
         finally:
+            self._attested_read_connections.discard(connection)
             connection.close()
 
 
@@ -2314,116 +2653,323 @@ class _AuthorityStoreCore(_AuthorityReaderCore):
             request.scope, request.target_id, request.next_generation, audit
         )
 
+    @staticmethod
+    def _validated_status_requests(
+        requests: Sequence[CurrentStatusRequest],
+    ) -> tuple[CurrentStatusRequest, ...]:
+        resolved = tuple(requests)
+        if len(resolved) > _MAX_STATUS_BATCH_SIZE:
+            raise ValueError(FailureCode.SIZE_LIMIT_EXCEEDED.value)
+        if any(type(request) is not CurrentStatusRequest for request in resolved):
+            raise ValueError("invalid current-status batch request")
+        nonces = tuple(request.request_nonce for request in resolved)
+        if len(set(nonces)) != len(nonces):
+            raise ValueError("duplicate request_nonce in status batch")
+        return resolved
+
+    @staticmethod
+    def _validated_logical_status_requests(
+        requests: Sequence[LogicalNodeStatusRequest],
+    ) -> tuple[LogicalNodeStatusRequest, ...]:
+        resolved = tuple(requests)
+        if len(resolved) > _MAX_STATUS_BATCH_SIZE:
+            raise ValueError(FailureCode.SIZE_LIMIT_EXCEEDED.value)
+        if any(type(request) is not LogicalNodeStatusRequest for request in resolved):
+            raise ValueError("invalid logical-node status batch request")
+        nonces = tuple(request.request_nonce for request in resolved)
+        if len(set(nonces)) != len(nonces):
+            raise ValueError("duplicate request_nonce in logical-node status batch")
+        return resolved
+
+    def _attest_batch_snapshot(
+        self,
+        connection: _AuthorityConnection,
+        certificate_digests: Sequence[str] = (),
+    ) -> _SemanticSnapshot:
+        del certificate_digests
+        return _validate_semantic_integrity(connection, self._config)
+
+    @staticmethod
+    def _trust_head(connection: _AuthorityConnection) -> tuple[str, str]:
+        latest = connection.execute(
+            "SELECT sequence, entry_digest FROM trust_log ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        if latest is None:
+            return "0", sha256_digest(b"APCC-1/trust-log/genesis")
+        return str(latest[0]), _row_text(latest[1])
+
+    def _current_status_at(
+        self,
+        connection: _AuthorityConnection,
+        request: CurrentStatusRequest,
+        trust_head: tuple[str, str],
+        semantic_snapshot: _SemanticSnapshot,
+        causal_cache: dict[str, _CausalBatchFacts],
+        generation_cache: dict[str, bool],
+    ) -> tuple[AuthorityStatus, str]:
+        certificate = semantic_snapshot.certificates.get(request.certificate_digest)
+        if certificate is None:
+            raise ValueError("unknown APCC certificate")
+        disposition = semantic_snapshot.dispositions.get(request.certificate_digest)
+        if disposition is None:
+            raise ValueError("APCC certificate has no disposition")
+        status_value = AuthorityStatusValue.CURRENT
+        superseded = (
+            SupersessionValue.YES
+            if disposition is CertificateDisposition.SUPERSEDED
+            else SupersessionValue.NO
+        )
+        if disposition is CertificateDisposition.REVOKED:
+            status_value = AuthorityStatusValue.REVOKED
+        facts = self._causal_batch_facts(
+            request.certificate_digest, semantic_snapshot, causal_cache, set()
+        )
+        if facts.error is not None or any(
+            semantic_snapshot.dispositions.get(digest) is CertificateDisposition.REVOKED
+            or self._later_generation_revoked(
+                connection, digest, semantic_snapshot, generation_cache
+            )
+            for digest in facts.closure
+        ):
+            status_value = AuthorityStatusValue.REVOKED
+        actor_generation = certificate.context.agent_revocation_generation
+        workflow_generation = certificate.context.workflow_revocation_generation
+        seq, head = trust_head
+        now_value = _trusted_now(self._runtime.clock)
+        lifetime = int(self._config.freshness.issued_status_lifetime_ms)
+        if now_value > _MAX_SAFE_INTEGER - lifetime:
+            raise ValueError(FailureCode.INVALID_DECIMAL_STRING.value)
+        unsigned = AuthorityStatus(
+            "APCC-1.0-draft",
+            "apcc.authority-status",
+            self.authority_store_id,
+            self._config.status_trust.key_id,
+            request.request_nonce,
+            request.certificate_digest,
+            certificate.header.certificate_sequence,
+            seq,
+            head,
+            status_value,
+            actor_generation,
+            workflow_generation,
+            superseded,
+            str(now_value),
+            str(now_value + lifetime),
+            Signature(
+                "Ed25519", self._config.status_trust.key_id, b64u_encode(bytes(64))
+            ),
+        )
+        body = encode_authority_status_body(unsigned)
+        signature = self._runtime.key_provider.sign(
+            AuthoritySigningRole.STATUS,
+            self._config.status_trust.key_id,
+            AUTHORITY_STATUS_DOMAIN,
+            body,
+        )
+        if signature.key_id != self._config.status_trust.key_id:
+            raise ValueError(FailureCode.KEY_ID_MISMATCH.value)
+        try:
+            b64u_decode(signature.signature_b64u, expected_length=64)
+        except ValueError as error:
+            raise ValueError(FailureCode.INVALID_BASE64URL.value) from error
+        if signature.algorithm != "Ed25519" or not verify_detached(
+            self._config.status_trust.public_key,
+            AUTHORITY_STATUS_DOMAIN,
+            body,
+            signature.signature_b64u,
+        ):
+            raise ValueError(FailureCode.AUTHORITY_STATUS_INVALID_SIGNATURE.value)
+        return replace(unsigned, signature=signature), certificate.decision.commit_id
+
+    def _later_generation_revoked(
+        self,
+        connection: _AuthorityConnection,
+        digest: str,
+        semantic_snapshot: _SemanticSnapshot,
+        cache: dict[str, bool],
+    ) -> bool:
+        cached = cache.get(digest)
+        if cached is not None:
+            return cached
+        certificate = semantic_snapshot.certificates.get(digest)
+        if certificate is None:
+            return True
+        revoked = _has_later_generation_revocation(connection, certificate)
+        cache[digest] = revoked
+        return revoked
+
+    def _causal_batch_facts(
+        self,
+        digest: str,
+        semantic_snapshot: _SemanticSnapshot,
+        cache: dict[str, _CausalBatchFacts],
+        active: set[str],
+    ) -> _CausalBatchFacts:
+        cached = cache.get(digest)
+        if cached is not None:
+            return cached
+        certificate = semantic_snapshot.certificates.get(digest)
+        if certificate is None or digest in active:
+            return _CausalBatchFacts(
+                frozenset((digest,)), 0, FailureCode.INVALID_PREDECESSOR
+            )
+        active.add(digest)
+        closure = {digest}
+        depth = 0
+        error: FailureCode | None = None
+        for reference in certificate.bindings.predecessors:
+            predecessor = semantic_snapshot.certificates.get(
+                reference.certificate_digest
+            )
+            if predecessor is None or (
+                predecessor.subject.workflow_id,
+                predecessor.subject.node_id,
+                predecessor.bindings.committed_node_version,
+                predecessor.decision.commit_id,
+                reference.certificate_digest,
+                predecessor.subject.output_digest,
+            ) != (
+                reference.workflow_id,
+                reference.node_id,
+                reference.committed_node_version,
+                reference.commit_id,
+                reference.certificate_digest,
+                reference.output_digest,
+            ):
+                error = FailureCode.INVALID_PREDECESSOR
+                break
+            child = self._causal_batch_facts(
+                reference.certificate_digest, semantic_snapshot, cache, active
+            )
+            if child.error is not None:
+                error = child.error
+                break
+            closure.update(child.closure)
+            depth = max(depth, child.depth + 1)
+        active.remove(digest)
+        limits = CausalClosureLimits()
+        if error is None and depth > limits.max_depth:
+            error = FailureCode.DEPTH_LIMIT_EXCEEDED
+        if error is None and (
+            len(closure) > limits.max_certificates
+            or sum(
+                semantic_snapshot.envelope_sizes.get(item, limits.max_total_bytes + 1)
+                for item in closure
+            )
+            > limits.max_total_bytes
+        ):
+            error = FailureCode.SIZE_LIMIT_EXCEEDED
+        facts = _CausalBatchFacts(frozenset(closure), depth, error)
+        cache[digest] = facts
+        return facts
+
+    def current_status_batch(
+        self, requests: Sequence[CurrentStatusRequest]
+    ) -> tuple[CurrentStatusResult, ...]:
+        resolved = self._validated_status_requests(requests)
+        if not resolved:
+            return ()
+        with self._read_transaction() as connection:
+            semantic_snapshot = self._attest_batch_snapshot(
+                connection,
+                tuple(request.certificate_digest for request in resolved),
+            )
+            trust_head = self._trust_head(connection)
+            causal_cache: dict[str, _CausalBatchFacts] = {}
+            generation_cache: dict[str, bool] = {}
+            return tuple(
+                CurrentStatusResult(
+                    request,
+                    self._current_status_at(
+                        connection,
+                        request,
+                        trust_head,
+                        semantic_snapshot,
+                        causal_cache,
+                        generation_cache,
+                    )[0],
+                )
+                for request in resolved
+            )
+
     def current_status(
         self, certificate_digest: str, request_nonce: str
     ) -> AuthorityStatus:
-        b64u_decode(request_nonce, expected_length=16)
+        request = CurrentStatusRequest(certificate_digest, request_nonce)
+        return self.current_status_batch((request,))[0].status
+
+    def logical_node_status_batch(
+        self, requests: Sequence[LogicalNodeStatusRequest]
+    ) -> tuple[LogicalNodeStatusResult, ...]:
+        resolved = self._validated_logical_status_requests(requests)
+        if not resolved:
+            return ()
         with self._read_transaction() as connection:
-            _validate_semantic_integrity(connection, self._config)
-            row = connection.execute(
-                "SELECT commit_id, workflow_id, node_id, sequence, certificate_json, envelope "
-                "FROM certificates WHERE certificate_digest=?",
-                (certificate_digest,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("unknown APCC certificate")
-            historical = verify_historical(
-                _row_bytes(row[5]), trust=_trust(self._config)
+            return self._logical_node_status_batch_at(connection, resolved)
+
+    def _logical_node_status_batch_at(
+        self,
+        connection: _AuthorityConnection,
+        requests: tuple[LogicalNodeStatusRequest, ...],
+        semantic_snapshot: _SemanticSnapshot | None = None,
+    ) -> tuple[LogicalNodeStatusResult, ...]:
+        keys = tuple(
+            dict.fromkeys(
+                (request.workflow_id, request.node_id) for request in requests
             )
-            if not historical.ok or historical.certificate is None:
-                code = (
-                    historical.code or FailureCode.AUTHORITY_STATUS_CERTIFICATE_MISMATCH
-                )
-                raise ValueError(code.value)
-            certificate = historical.certificate
-            payload = _row_bytes(row[4])
-            if (
-                sha256_digest(payload) != certificate_digest
-                or encode_certificate(certificate) != payload
-                or certificate.decision.commit_id != row[0]
-                or certificate.subject.workflow_id != row[1]
-                or certificate.subject.node_id != row[2]
-                or isinstance(row[3], bool)
-                or not isinstance(row[3], int)
-                or certificate.header.certificate_sequence != str(row[3])
-            ):
-                raise ValueError(
-                    FailureCode.AUTHORITY_STATUS_CERTIFICATE_MISMATCH.value
-                )
-            disposition = _latest_disposition(connection, certificate_digest)
-            if disposition is None:
-                raise ValueError("APCC certificate has no disposition")
-            status_value = AuthorityStatusValue.CURRENT
-            superseded = (
-                SupersessionValue.YES
-                if disposition is CertificateDisposition.SUPERSEDED
-                else SupersessionValue.NO
+        )
+        placeholders = ",".join("(?,?)" for _ in keys)
+        parameters = tuple(value for key in keys for value in key)
+        rows = connection.execute(
+            "SELECT workflow_id,node_id,version,certificate_digest "
+            "FROM logical_nodes WHERE (workflow_id,node_id) IN "
+            f"(VALUES {placeholders})",
+            parameters,
+        ).fetchall()
+        persisted = {
+            (_row_text(row[0]), _row_text(row[1])): (
+                _row_text(row[2]),
+                _row_optional_text(row[3]),
             )
-            if disposition is CertificateDisposition.REVOKED:
-                status_value = AuthorityStatusValue.REVOKED
-            if self._persisted_causal_error(connection, certificate_digest) is not None:
-                status_value = AuthorityStatusValue.REVOKED
-            # These fields bind the certificate's issuance generation.  A later
-            # revocation is represented by the signed current-status value, not
-            # by rewriting historical certificate context.
-            actor_generation = certificate.context.agent_revocation_generation
-            workflow_generation = certificate.context.workflow_revocation_generation
-            if _has_later_generation_revocation(connection, certificate):
-                status_value = AuthorityStatusValue.REVOKED
-            latest = connection.execute(
-                "SELECT sequence, entry_digest FROM trust_log ORDER BY sequence DESC LIMIT 1"
-            ).fetchone()
-            if latest is None:
-                seq, head = "0", sha256_digest(b"APCC-1/trust-log/genesis")
-            else:
-                seq, head = str(latest[0]), _row_text(latest[1])
-            now_value = _trusted_now(self._runtime.clock)
-            lifetime = int(self._config.freshness.issued_status_lifetime_ms)
-            if now_value > _MAX_SAFE_INTEGER - lifetime:
-                raise ValueError(FailureCode.INVALID_DECIMAL_STRING.value)
-            now = str(now_value)
-            next_update = str(now_value + lifetime)
-            unsigned = AuthorityStatus(
-                "APCC-1.0-draft",
-                "apcc.authority-status",
-                self.authority_store_id,
-                self._config.status_trust.key_id,
-                request_nonce,
-                certificate_digest,
-                str(row[3]),
-                seq,
-                head,
-                status_value,
-                actor_generation,
-                workflow_generation,
-                superseded,
-                now,
-                next_update,
-                Signature(
-                    "Ed25519", self._config.status_trust.key_id, b64u_encode(bytes(64))
+            for row in rows
+        }
+        logical_nodes = [
+            LogicalNodeState(
+                request.workflow_id,
+                request.node_id,
+                *persisted.get((request.workflow_id, request.node_id), ("0", None)),
+            )
+            for request in requests
+        ]
+        if semantic_snapshot is None:
+            semantic_snapshot = self._attest_batch_snapshot(
+                connection,
+                tuple(
+                    logical.current_certificate_digest
+                    for logical in logical_nodes
+                    if logical.current_certificate_digest is not None
                 ),
             )
-            body = encode_authority_status_body(unsigned)
-            signature = self._runtime.key_provider.sign(
-                AuthoritySigningRole.STATUS,
-                self._config.status_trust.key_id,
-                AUTHORITY_STATUS_DOMAIN,
-                body,
+        trust_head = self._trust_head(connection)
+        causal_cache: dict[str, _CausalBatchFacts] = {}
+        generation_cache: dict[str, bool] = {}
+        results: list[LogicalNodeStatusResult] = []
+        for request, logical in zip(requests, logical_nodes, strict=True):
+            if logical.current_certificate_digest is None:
+                results.append(LogicalNodeStatusResult(request, logical, None, None))
+                continue
+            status, commit_id = self._current_status_at(
+                connection,
+                CurrentStatusRequest(
+                    logical.current_certificate_digest, request.request_nonce
+                ),
+                trust_head,
+                semantic_snapshot,
+                causal_cache,
+                generation_cache,
             )
-            if signature.key_id != self._config.status_trust.key_id:
-                raise ValueError(FailureCode.KEY_ID_MISMATCH.value)
-            try:
-                b64u_decode(signature.signature_b64u, expected_length=64)
-            except ValueError as error:
-                raise ValueError(FailureCode.INVALID_BASE64URL.value) from error
-            if signature.algorithm != "Ed25519" or not verify_detached(
-                self._config.status_trust.public_key,
-                AUTHORITY_STATUS_DOMAIN,
-                body,
-                signature.signature_b64u,
-            ):
-                raise ValueError(FailureCode.AUTHORITY_STATUS_INVALID_SIGNATURE.value)
-            return replace(unsigned, signature=signature)
+            results.append(LogicalNodeStatusResult(request, logical, commit_id, status))
+        return tuple(results)
 
     def _request_causal_error(
         self, connection: _AuthorityConnection, root: CommitCertificate
@@ -2658,6 +3204,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
         self._gcb_attached = False
         self._gcb_projection_fault: _GCBProjectionCheckpoint | None = None
         self._gcb_projection_fault_fired = False
+        self._attested_read_connections: set[sqlite3.Connection] = set()
         raise ValueError("use SQLiteAuthorityStore.open on a provisioned store")
 
     @classmethod
@@ -2666,8 +3213,10 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
         path: Path,
         config: APCCAuthorityConfig,
         initial_contexts: tuple[CommitContext, ...],
+        runtime: AuthorityRuntime,
     ) -> None:
         path = Path(path)
+        _validate_runtime_signers(config, runtime)
         if path.exists():
             connection = _connect_reader(path)
             try:
@@ -2702,8 +3251,42 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
                     "INSERT INTO metadata(key, value) VALUES ('schema_fingerprint', ?)",
                     (_SCHEMA_FINGERPRINT,),
                 )
+                connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES ('schema_version', ?)",
+                    (_AUTHORITY_SCHEMA_VERSION,),
+                )
                 for context in initial_contexts:
                     _insert_context(connection, context)
+                connection.execute(
+                    "INSERT INTO semantic_checkpoint(singleton,change_sequence,"
+                    "prior_digest,checkpoint_digest,key_id,signature) "
+                    "VALUES (1,0,?,'',?,'')",
+                    (_SEMANTIC_CHECKPOINT_GENESIS, config.commit_trust.key_id),
+                )
+                for statement in _SEMANTIC_CHECKPOINT_TRIGGERS:
+                    connection.execute(statement)
+                config_text = _validate_schema_manifest(
+                    connection, storage_checks=False
+                )
+                if config_text != _json(_config_object(config)):
+                    raise ValueError(
+                        "APCC authority configuration does not match provisioned store"
+                    )
+                _validate_semantic_integrity(connection, config)
+                sealed = _verify_semantic_checkpoint(
+                    connection,
+                    config,
+                    _SCHEMA_FINGERPRINT,
+                    allow_initial_unsealed=True,
+                )
+                if sealed:
+                    raise ValueError(
+                        "APCC authority bootstrap checkpoint was already sealed"
+                    )
+                _seal_semantic_checkpoint(
+                    connection, config, runtime, _SCHEMA_FINGERPRINT
+                )
+                _verify_semantic_checkpoint(connection, config, _SCHEMA_FINGERPRINT)
                 connection.commit()
                 _validate_schema(connection)
                 checkpoint = connection.execute(
@@ -2848,17 +3431,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
             connection.close()
         if reader.authority_store_id != config.authority_store_id:
             raise ValueError("APCC authority store identity mismatch")
-        for role, binding in (
-            (AuthoritySigningRole.COMMIT, config.commit_trust),
-            (AuthoritySigningRole.STATUS, config.status_trust),
-        ):
-            if (
-                bytes(runtime.key_provider.public_key(role, binding.key_id))
-                != binding.public_key
-            ):
-                raise ValueError(
-                    "APCC runtime signer does not match public configuration"
-                )
+        _validate_runtime_signers(config, runtime)
         store = object.__new__(cls)
         _AuthorityStoreCore.__init__(store, config, runtime)
         store.database_path = Path(path)
@@ -2867,6 +3440,8 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
         store._gcb_attached = gcb_attached
         store._gcb_projection_fault = projection_fault
         store._gcb_projection_fault_fired = False
+        store._attested_read_connections = set()
+        store._ensure_semantic_checkpoint()
         return store
 
     def atomic_commit(self, request: AtomicCommitRequest) -> CommitResult:
@@ -2890,7 +3465,69 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
         connection = self._connection()
         try:
             connection.execute("BEGIN")
+            _attest_sqlite_read_connection(connection, self._config)
+            self._attested_read_connections.add(connection)
             yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            self._attested_read_connections.discard(connection)
+            connection.close()
+
+    def _attest_batch_snapshot(
+        self,
+        connection: _AuthorityConnection,
+        certificate_digests: Sequence[str] = (),
+    ) -> _SemanticSnapshot:
+        if (
+            not isinstance(connection, sqlite3.Connection)
+            or connection not in self._attested_read_connections
+        ):
+            raise ValueError("APCC SQLite batch snapshot was not attested")
+        return _checkpoint_semantic_snapshot(connection, certificate_digests)
+
+    def _hit(self, point: str) -> None:
+        if self._probe is not None:
+            self._probe.hit(point)
+
+    def _validate_mutation_checkpoint(self, connection: sqlite3.Connection) -> None:
+        config_text = _validate_schema_manifest(connection, storage_checks=False)
+        if config_text != _json(_config_object(self._config)):
+            raise ValueError(
+                "APCC authority configuration does not match provisioned store"
+            )
+        _verify_semantic_checkpoint(connection, self._config, _SCHEMA_FINGERPRINT)
+
+    def _seal_mutation_checkpoint(self, connection: sqlite3.Connection) -> None:
+        _seal_semantic_checkpoint(
+            connection, self._config, self._runtime, _SCHEMA_FINGERPRINT
+        )
+
+    def _finalize_attached_gcb_transaction(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Validate and seal APCC changes made by the trusted GCB control path."""
+        _, _, checkpoint_digest, _, signature = _semantic_checkpoint_row(connection)
+        if not checkpoint_digest and not signature:
+            _validate_semantic_integrity(connection, self._config)
+        self._seal_mutation_checkpoint(connection)
+
+    def _ensure_semantic_checkpoint(self) -> None:
+        connection = _connect(self.database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            config_text = _validate_schema_manifest(connection, storage_checks=False)
+            if config_text != _json(_config_object(self._config)):
+                raise ValueError(
+                    "APCC authority configuration does not match provisioned store"
+                )
+            _verify_semantic_checkpoint(
+                connection,
+                self._config,
+                _SCHEMA_FINGERPRINT,
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -2898,16 +3535,14 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
         finally:
             connection.close()
 
-    def _hit(self, point: str) -> None:
-        if self._probe is not None:
-            self._probe.hit(point)
-
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         connection = _connect(self.database_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_mutation_checkpoint(connection)
             yield connection
+            self._seal_mutation_checkpoint(connection)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -3043,7 +3678,6 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
                 raise _GCBProjectionDenied("legacy_projection_state_conflict")
             unlocked.append((child_id, child_version + 1))
         self._gcb_checkpoint(_GCBProjectionCheckpoint.AFTER_CHILD_UNLOCK)
-        _validate_semantic_integrity(connection, self._config)
         _attest_gcb_projection(
             connection, request, result, plan, validated, tuple(unlocked)
         )
@@ -3069,7 +3703,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
             connection = _connect(self.database_path)
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                _validate_semantic_integrity(connection, self._config)
+                self._validate_mutation_checkpoint(connection)
                 head = connection.execute(
                     "SELECT event_sequence,event_id,event_json,state,lease_until_ms "
                     "FROM apcc_outbox WHERE state<>'DELIVERED' "
@@ -3078,6 +3712,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
                 if head is None or (
                     head[3] == "CLAIMED" and head[4] is not None and int(head[4]) > now
                 ):
+                    self._seal_mutation_checkpoint(connection)
                     connection.commit()
                     break
                 claimed = connection.execute(
@@ -3085,6 +3720,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
                     "WHERE event_sequence=? AND (state='PENDING' OR (state='CLAIMED' AND lease_until_ms<=?))",
                     (token, now, now + lease_ms, head[0], now),
                 ).rowcount
+                self._seal_mutation_checkpoint(connection)
                 connection.commit()
                 if claimed != 1:
                     continue
@@ -3100,11 +3736,13 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
                 release = _connect(self.database_path)
                 try:
                     release.execute("BEGIN IMMEDIATE")
+                    self._validate_mutation_checkpoint(release)
                     release.execute(
                         "UPDATE apcc_outbox SET state='PENDING',lease_token=NULL,lease_claimed_ms=NULL,lease_until_ms=NULL,delivered=0 "
                         "WHERE event_id=? AND state='CLAIMED' AND lease_token=?",
                         (event_id, token),
                     )
+                    self._seal_mutation_checkpoint(release)
                     release.commit()
                 except Exception:
                     release.rollback()
@@ -3115,6 +3753,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
             finalize = _connect(self.database_path)
             try:
                 finalize.execute("BEGIN IMMEDIATE")
+                self._validate_mutation_checkpoint(finalize)
                 changed = finalize.execute(
                     "UPDATE apcc_outbox SET state='DELIVERED',lease_token=NULL,lease_claimed_ms=NULL,lease_until_ms=NULL,delivered=1 "
                     "WHERE event_id=? AND state='CLAIMED' AND lease_token=?",
@@ -3122,6 +3761,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
                 ).rowcount
                 if changed == 1:
                     delivered_ids.append(event_id)
+                self._seal_mutation_checkpoint(finalize)
                 finalize.commit()
             except Exception:
                 finalize.rollback()
@@ -3134,6 +3774,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
         connection = _connect(self.database_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_mutation_checkpoint(connection)
             if (
                 delivered_ids
                 and connection.execute(
@@ -3147,6 +3788,7 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
                     "SELECT COUNT(*) FROM apcc_outbox WHERE state<>'DELIVERED'"
                 ).fetchone()[0]
             )
+            self._seal_mutation_checkpoint(connection)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -3156,8 +3798,54 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
         return OutboxRecoveryResult(str(len(delivered_ids)), str(pending), audit)
 
 
+_SEMANTIC_CHECKPOINT_GUARDED_TABLES = (
+    "metadata",
+    "logical_nodes",
+    "candidates",
+    "commit_index",
+    "request_index",
+    "nonce_ledger",
+    "evidence_refs",
+    "certificates",
+    "audit_events",
+    "apcc_decisions",
+    "certificate_dispositions",
+    "predecessor_edges",
+    "supersession_edges",
+    "workflow_revocations",
+    "actor_revocations",
+    "trust_log",
+    "control_events",
+    "apcc_outbox",
+    "commit_conflicts",
+)
+
+
+def _semantic_checkpoint_triggers() -> tuple[str, ...]:
+    statements: list[str] = []
+    update = (
+        "BEGIN UPDATE semantic_checkpoint SET "
+        "prior_digest=CASE WHEN signature<>'' THEN checkpoint_digest ELSE prior_digest END,"
+        "change_sequence=change_sequence+1,checkpoint_digest='',signature='' "
+        "WHERE singleton=1; "
+        "SELECT CASE WHEN changes()<>1 THEN "
+        "RAISE(ABORT, 'APCC semantic checkpoint is missing') END; END"
+    )
+    for table in _SEMANTIC_CHECKPOINT_GUARDED_TABLES:
+        for event in ("INSERT", "UPDATE", "DELETE"):
+            statements.append(
+                f"CREATE TRIGGER apcc_semantic_dirty_{table}_{event.lower()} "
+                f"AFTER {event} ON {table} {update}"
+            )
+    return tuple(statements)
+
+
+_SEMANTIC_CHECKPOINT_TRIGGERS = _semantic_checkpoint_triggers()
+
+
 _SCHEMA_STATEMENTS = (
     "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    f"CREATE TABLE semantic_checkpoint (singleton INTEGER PRIMARY KEY CHECK(singleton=1), change_sequence INTEGER NOT NULL CHECK(typeof(change_sequence)='integer' AND change_sequence BETWEEN 0 AND {_MAX_SAFE_INTEGER}), prior_digest TEXT NOT NULL, checkpoint_digest TEXT NOT NULL, key_id TEXT NOT NULL, signature TEXT NOT NULL)",
     "CREATE TABLE logical_nodes (workflow_id TEXT NOT NULL, node_id TEXT NOT NULL, version TEXT NOT NULL CHECK(version <> '' AND version NOT GLOB '*[^0-9]*' AND (version='0' OR version NOT GLOB '0*')), certificate_digest TEXT REFERENCES certificates(certificate_digest) DEFERRABLE INITIALLY DEFERRED, PRIMARY KEY(workflow_id,node_id))",
     "CREATE TABLE candidates (workflow_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, agent_id TEXT NOT NULL, lifecycle TEXT NOT NULL CHECK(lifecycle IN ('EXECUTING','RESULT_STAGED','EVIDENCE_ASSEMBLED','COMMIT_PENDING','QUARANTINED')), expected_version TEXT NOT NULL, result BLOB, subject_json TEXT NOT NULL, context_json TEXT NOT NULL, predecessors_json TEXT NOT NULL, proposal_digest TEXT, audit_event_id TEXT NOT NULL, proposal_json TEXT, PRIMARY KEY(workflow_id,node_id,attempt_id))",
     "CREATE TABLE commit_index (commit_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL, workflow_id TEXT NOT NULL, request_json TEXT NOT NULL)",
@@ -3185,6 +3873,7 @@ _SCHEMA_STATEMENTS = (
     "CREATE TRIGGER control_events_no_delete BEFORE DELETE ON control_events BEGIN SELECT RAISE(ABORT, 'control events are immutable'); END",
     "CREATE TRIGGER apcc_outbox_identity_no_update BEFORE UPDATE ON apcc_outbox WHEN NEW.event_sequence<>OLD.event_sequence OR NEW.event_id<>OLD.event_id OR NEW.event_kind<>OLD.event_kind OR NEW.operation_id<>OLD.operation_id OR NEW.event_json<>OLD.event_json OR NEW.audit_event_id<>OLD.audit_event_id OR NEW.trust_sequence<>OLD.trust_sequence BEGIN SELECT RAISE(ABORT, 'outbox identity is immutable'); END",
     "CREATE TRIGGER apcc_outbox_no_delete BEFORE DELETE ON apcc_outbox BEGIN SELECT RAISE(ABORT, 'outbox is append-only'); END",
+    *_SEMANTIC_CHECKPOINT_TRIGGERS,
     "CREATE INDEX idx_apcc_outbox_pending ON apcc_outbox(state,lease_until_ms,event_sequence)",
     "CREATE INDEX idx_apcc_outbox_head ON apcc_outbox(event_sequence) WHERE state<>'DELIVERED'",
     "CREATE INDEX idx_nonce_ledger_nonce ON nonce_ledger(nonce)",
@@ -3197,7 +3886,10 @@ def _normalize_schema_sql(value: str) -> str:
 
 
 _SCHEMA_FINGERPRINT = sha256_digest(
-    "\n".join(_normalize_schema_sql(item) for item in _SCHEMA_STATEMENTS).encode()
+    (
+        f"schema-version={_AUTHORITY_SCHEMA_VERSION}\n"
+        + "\n".join(_normalize_schema_sql(item) for item in _SCHEMA_STATEMENTS)
+    ).encode()
 )
 
 
@@ -3291,18 +3983,24 @@ _APCC_TABLES = frozenset(
 )
 
 
-def _validate_schema(connection: sqlite3.Connection) -> str:
+def _validate_schema_manifest(
+    connection: _AuthorityConnection, *, storage_checks: bool
+) -> str:
     invalid = ValueError("APCC SQLite store schema validation failed")
-    if connection.execute("PRAGMA journal_mode").fetchone() != ("wal",):
+    journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+    application_id = connection.execute("PRAGMA application_id").fetchone()
+    user_version = connection.execute("PRAGMA user_version").fetchone()
+    if journal_mode is None or tuple(journal_mode) != ("wal",):
         raise invalid
-    if connection.execute("PRAGMA application_id").fetchone() != (_APPLICATION_ID,):
+    if application_id is None or tuple(application_id) != (_APPLICATION_ID,):
         raise invalid
-    if connection.execute("PRAGMA user_version").fetchone() != (_SCHEMA_VERSION,):
-        raise invalid
-    if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
-        raise invalid
-    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-        raise invalid
+    if user_version is None or tuple(user_version) != (_SCHEMA_VERSION,):
+        raise ValueError(_SCHEMA_VERSION_INCOMPATIBLE)
+    if storage_checks:
+        if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            raise invalid
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise invalid
     rows = connection.execute(
         "SELECT type, name, tbl_name, sql FROM sqlite_master "
         "WHERE type IN ('table','index','trigger') AND name NOT LIKE 'sqlite_%'"
@@ -3331,9 +4029,13 @@ def _validate_schema(connection: sqlite3.Connection) -> str:
     values = {
         str(key): str(value)
         for key, value in connection.execute(
-            "SELECT key, value FROM metadata WHERE key IN ('config','schema_fingerprint')"
+            "SELECT key, value FROM metadata ORDER BY key"
         )
     }
+    if values.get("schema_version") != _AUTHORITY_SCHEMA_VERSION:
+        raise ValueError(_SCHEMA_VERSION_INCOMPATIBLE)
+    if set(values) != {"config", "schema_fingerprint", "schema_version"}:
+        raise invalid
     if values.get("schema_fingerprint") != _SCHEMA_FINGERPRINT:
         raise invalid
     config = values.get("config")
@@ -3345,16 +4047,39 @@ def _validate_schema(connection: sqlite3.Connection) -> str:
             raise invalid
     except (TypeError, json.JSONDecodeError) as error:
         raise ValueError("APCC SQLite store schema validation failed") from error
-    parsed_config = _config_from_object(config_object)
-    _validate_semantic_integrity(connection, parsed_config)
     return config
+
+
+def _validate_schema(connection: sqlite3.Connection) -> str:
+    config = _validate_schema_manifest(connection, storage_checks=True)
+    parsed_config = _config_from_object(_loads(config))
+    _validate_semantic_integrity(connection, parsed_config)
+    _verify_semantic_checkpoint(
+        connection,
+        parsed_config,
+        _SCHEMA_FINGERPRINT,
+    )
+    return config
+
+
+def _attest_sqlite_read_connection(
+    connection: _AuthorityConnection, config: APCCAuthorityConfig
+) -> None:
+    config_text = _validate_schema_manifest(connection, storage_checks=False)
+    if config_text != _json(_config_object(config)):
+        raise ValueError(
+            "APCC authority configuration does not match provisioned store"
+        )
+    _verify_semantic_checkpoint(connection, config, _SCHEMA_FINGERPRINT)
 
 
 def _validate_semantic_integrity(
     connection: _AuthorityConnection, config: APCCAuthorityConfig
-) -> None:
+) -> _SemanticSnapshot:
     invalid = ValueError("APCC SQLite store semantic validation failed")
     certificates: dict[str, CommitCertificate] = {}
+    envelope_sizes: dict[str, int] = {}
+    trust = _trust(config)
     for (
         digest,
         commit_id,
@@ -3383,8 +4108,22 @@ def _validate_semantic_integrity(
             ):
                 raise invalid
             certificate = decode_certificate(payload_bytes)
-            historical = verify_historical(envelope_bytes, trust=_trust(config))
-            if not historical.ok or historical.certificate != certificate:
+            if (
+                _header(certificate) is not None
+                or _verify_signature(
+                    detached.seal,
+                    certificate.header.commit_authority_key_id,
+                    trust,
+                    TrustRole.COMMIT,
+                    (certificate.header.authority_store_id,),
+                    COMMIT_DOMAIN,
+                    payload_bytes,
+                    FailureCode.INVALID_COMMIT_SEAL,
+                )
+                is not None
+                or _evidence(certificate, trust) is not None
+                or _bindings(certificate) is not None
+            ):
                 raise invalid
         except Exception as error:
             raise invalid from error
@@ -3396,6 +4135,7 @@ def _validate_semantic_integrity(
         ):
             raise invalid
         certificates[str(digest)] = certificate
+        envelope_sizes[str(digest)] = len(envelope_bytes)
 
     latest: dict[str, CertificateDisposition] = {}
     for digest, event_sequence, disposition in connection.execute(
@@ -4157,10 +4897,13 @@ def _validate_semantic_integrity(
         for values in conflict_sequences.values()
     ):
         raise invalid
+    return _SemanticSnapshot(dict(certificates), dict(latest), dict(envelope_sizes))
 
 
 def _schema(connection: sqlite3.Connection) -> None:
     for statement in _SCHEMA_STATEMENTS:
+        if statement in _SEMANTIC_CHECKPOINT_TRIGGERS:
+            continue
         connection.execute(statement)
 
 

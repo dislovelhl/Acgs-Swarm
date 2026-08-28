@@ -55,6 +55,7 @@ from constitutional_swarm.apcc.ports import (
     AssembleEvidenceRequest,
     AtomicCommitRequest,
     AuthorityRuntime,
+    LogicalNodeStatusRequest,
     ProposeCommitRequest,
     RevocationRequest,
     RevocationScope,
@@ -79,6 +80,7 @@ _DOMAIN = b"ACGS-SWARM\x00GCB\x00V1\x00"
 _VERDICT_DOMAIN = b"ACGS-SWARM\x00GCB\x00VERDICT\x00V1\x00"
 _CONTROL_DOMAIN = b"ACGS-SWARM\x00GCB\x00CONTROL\x00V1\x00"
 _CONTROL_SIGNER_DOMAIN = b"ACGS-SWARM-GCB-CONTROL-V1"
+_MAX_WORKFLOW_NODES = 1000
 _ATTEMPT_DOMAIN = b"ACGS-SWARM\x00GCB\x00ATTEMPT\x00V1\x00"
 _LegacyTransaction = sqlite3.Connection
 
@@ -570,7 +572,11 @@ class GovernedCommitBoundary:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            if hasattr(self, "_apcc_store"):
+                self._apcc_store._validate_mutation_checkpoint(conn)
             yield conn
+            if hasattr(self, "_apcc_store"):
+                self._apcc_store._finalize_attached_gcb_transaction(conn)
             conn.commit()
         except BaseException:
             conn.rollback()
@@ -1040,6 +1046,8 @@ class GovernedCommitBoundary:
                 if command.action is ControlAction.REVOKE_ROOT:
                     # The SQLite COMMIT is the fence linearization point.  A
                     # crash or response loss after it must not undo authority.
+                    if hasattr(self, "_apcc_store"):
+                        self._apcc_store._finalize_attached_gcb_transaction(conn)
                     conn.commit()
                     self._inject_fault(
                         _GCBFaultCheckpoint.AFTER_REVOCATION_FENCE_COMMIT
@@ -1092,6 +1100,8 @@ class GovernedCommitBoundary:
                 str(node_id): tuple(str(dep) for dep in dependencies)
                 for node_id, dependencies in dict(parameters["nodes"]).items()
             }
+            if len(nodes) > _MAX_WORKFLOW_NODES:
+                raise GovernanceBypassDenied("node_status_batch_too_large")
             if not workflow_id or not nodes or not parameters.get("policy_version"):
                 raise GovernanceBypassDenied("invalid_workflow_definition")
             if conn.execute(
@@ -1391,6 +1401,8 @@ class GovernedCommitBoundary:
         This is a read-only projection attach.  It never creates nodes, changes
         status, promotes staged artifacts, or rewrites policy state.
         """
+        if len(nodes) > _MAX_WORKFLOW_NODES:
+            raise GovernanceBypassDenied("node_status_batch_too_large")
         required_capabilities = required_capabilities or {}
         input_digests = input_digests or {}
         with self._transaction() as conn:
@@ -2630,36 +2642,90 @@ class GovernedCommitBoundary:
                 dispatched += 1
         return dispatched
 
-    def node_state(self, workflow_id: str, node_id: str) -> GovernedNodeState:
-        with self._connect() as conn:
-            row = self._node(conn, workflow_id, node_id)
-            state = self._effective_node_state(conn, row)
-            if hasattr(self, "_apcc_store"):
-                logical = self._apcc_store.read_logical_node(workflow_id, node_id)
-                if logical.current_certificate_digest is not None:
-                    certificate = conn.execute(
-                        "SELECT commit_id FROM certificates WHERE certificate_digest=?",
-                        (logical.current_certificate_digest,),
-                    ).fetchone()
-                    if certificate is None:
-                        raise GovernanceBypassDenied("canonical_certificate_missing")
-                    status = self._apcc_store.current_status(
-                        logical.current_certificate_digest,
-                        b64u_encode(secrets.token_bytes(16)),
+    def workflow_node_states(
+        self, workflow_id: str, node_ids: Sequence[str]
+    ) -> tuple[GovernedNodeState, ...]:
+        """Read ordered legacy/APCC node state from one attested snapshot."""
+        resolved_ids = tuple(node_ids)
+        if len(resolved_ids) > _MAX_WORKFLOW_NODES:
+            raise GovernanceBypassDenied("node_status_batch_too_large")
+        if not workflow_id or any(not node_id for node_id in resolved_ids):
+            raise ValueError("workflow and node identities cannot be empty")
+        if not hasattr(self, "_apcc_store"):
+            raise GovernanceBypassDenied("APCC authority is not configured")
+        nonces = tuple(b64u_encode(secrets.token_bytes(16)) for _ in resolved_ids)
+        if len(set(nonces)) != len(nonces):
+            raise GovernanceBypassDenied("authority_status_nonce_collision")
+        requests = tuple(
+            LogicalNodeStatusRequest(workflow_id, node_id, nonce)
+            for node_id, nonce in zip(resolved_ids, nonces, strict=True)
+        )
+        if not requests:
+            return ()
+        with self._apcc_store._read_transaction() as connection:
+            results = self._apcc_store._logical_node_status_batch_at(
+                connection, requests
+            )
+            connection.row_factory = sqlite3.Row
+            if len(results) != len(requests):
+                raise GovernanceBypassDenied("authority_status_batch_length_mismatch")
+            legacy_rows = connection.execute(
+                "SELECT * FROM nodes WHERE workflow_id=?", (workflow_id,)
+            ).fetchall()
+            if len(legacy_rows) > _MAX_WORKFLOW_NODES:
+                raise GovernanceBypassDenied("node_status_batch_too_large")
+            revoked_roots = {
+                row["root_node_id"]
+                for row in connection.execute(
+                    "SELECT root_node_id FROM revoked_roots WHERE workflow_id=?",
+                    (workflow_id,),
+                ).fetchall()
+            }
+            legacy_states = self._effective_node_states(legacy_rows, revoked_roots)
+            states: list[GovernedNodeState] = []
+            for request, result in zip(requests, results, strict=True):
+                if result.request != request:
+                    raise GovernanceBypassDenied(
+                        "authority_status_batch_order_mismatch"
                     )
-                    if status.status is not AuthorityStatusValue.CURRENT:
-                        return (
-                            state
-                            if state.status != "governed_committed"
-                            else replace(state, status="revoked")
-                        )
-                    return replace(
+                try:
+                    state = legacy_states[request.node_id]
+                except KeyError:
+                    raise KeyError(request.node_id) from None
+                logical = result.logical_node
+                if logical.current_certificate_digest is None:
+                    if (
+                        state.status == "governed_committed"
+                        or state.commit_id is not None
+                    ):
+                        raise GovernanceBypassDenied("canonical_certificate_missing")
+                    states.append(state)
+                    continue
+                if result.status is None or result.commit_id is None:
+                    raise GovernanceBypassDenied("canonical_certificate_missing")
+                if state.commit_id not in (None, result.commit_id):
+                    raise GovernanceBypassDenied(
+                        "canonical_certificate_identity_mismatch"
+                    )
+                if result.status.status is not AuthorityStatusValue.CURRENT:
+                    states.append(
+                        state
+                        if state.status != "governed_committed"
+                        else replace(state, status="revoked")
+                    )
+                    continue
+                states.append(
+                    replace(
                         state,
                         status="governed_committed",
                         version=int(logical.current_node_version),
-                        commit_id=certificate[0],
+                        commit_id=result.commit_id,
                     )
-            return state
+                )
+            return tuple(states)
+
+    def node_state(self, workflow_id: str, node_id: str) -> GovernedNodeState:
+        return self.workflow_node_states(workflow_id, (node_id,))[0]
 
     def current_status(self, certificate_digest: str, request_nonce: str) -> Any:
         if not hasattr(self, "_apcc_store"):
@@ -2788,6 +2854,43 @@ class GovernedCommitBoundary:
         else:
             status = "blocked"
         return replace(state, status=status)
+
+    @classmethod
+    def _effective_node_states(
+        cls,
+        rows: Sequence[sqlite3.Row],
+        revoked_roots: set[str],
+    ) -> dict[str, GovernedNodeState]:
+        """Compute one workflow's revocation closure without per-node SQL."""
+        row_by_id = {str(row["node_id"]): row for row in rows}
+        children: dict[str, list[str]] = {}
+        for node_id, row in row_by_id.items():
+            for predecessor in json.loads(row["predecessors"]):
+                children.setdefault(str(predecessor), []).append(node_id)
+        revoked_nodes: set[str] = set()
+        pending = list(revoked_roots)
+        while pending:
+            node_id = pending.pop()
+            if node_id in revoked_nodes:
+                continue
+            revoked_nodes.add(node_id)
+            pending.extend(children.get(node_id, ()))
+        states: dict[str, GovernedNodeState] = {}
+        for node_id, row in row_by_id.items():
+            state = cls._node_state(row)
+            if node_id not in revoked_nodes:
+                states[node_id] = state
+                continue
+            if node_id in revoked_roots:
+                status = "revoked"
+            elif row["status"] in {"revoked", "superseded", "blocked"}:
+                status = row["status"]
+            elif row["status"] == "governed_committed":
+                status = "superseded"
+            else:
+                status = "blocked"
+            states[node_id] = replace(state, status=status)
+        return states
 
     @staticmethod
     def _decision(row: sqlite3.Row) -> CommitDecision:
@@ -3098,7 +3201,7 @@ class TrustedGovernanceBootstrap:
         resolved = Path(path)
         if resolved.exists() and resolved.stat().st_size > 0:
             raise GovernanceBypassDenied("authority_store_already_exists")
-        SQLiteAuthorityStore.provision(resolved, self.config, ())
+        SQLiteAuthorityStore.provision(resolved, self.config, (), runtime=self.runtime)
         verifier_public = Ed25519PublicKey.from_public_bytes(
             bytes(self._policy_signer.public_key_bytes())
         )

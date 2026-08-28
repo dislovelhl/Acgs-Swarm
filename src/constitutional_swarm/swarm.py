@@ -35,6 +35,7 @@ from constitutional_swarm.governed_commit import (
 NodeStatus = ExecutionStatus
 _UNSET = object()
 _AUTHORITY_TRANSPORT_ERRORS = (ConnectionError, EOFError, OSError, TimeoutError)
+_MAX_WORKFLOW_NODES = 1000
 
 
 def _neg_priority(node: TaskNode) -> int:
@@ -298,6 +299,8 @@ class SwarmExecutor:
     def load_dag(self, dag: TaskDAG) -> None:
         """Load a task DAG for execution."""
         with self._lock:
+            if len(dag.nodes) > _MAX_WORKFLOW_NODES:
+                raise GovernanceBypassDenied("node_status_batch_too_large")
             if self._dag is not None and self._dag.dag_id != dag.dag_id:
                 raise GovernanceBypassDenied("executor_workflow_identity_mismatch")
             authoritative_states = None
@@ -380,11 +383,14 @@ class SwarmExecutor:
         """Refresh the in-memory projection from the SQLite authority."""
         if self._dag is None or self._execution_client is None:
             return
+        node_ids = tuple(self._dag.nodes)
         states = self._authority_call(
-            "workflow_node_states", self._dag.dag_id, tuple(self._dag.nodes)
+            "workflow_node_states", self._dag.dag_id, node_ids
         )
-        for node_id, node in self._dag.nodes.items():
-            state = states[node_id]
+        if len(states) != len(node_ids):
+            raise GovernanceBypassDenied("authority_status_batch_length_mismatch")
+        for node_id, state in zip(node_ids, states, strict=True):
+            node = self._dag.nodes[node_id]
             node.status = ExecutionStatus(state.status)
             node.claimed_by = state.claimed_by
             node.artifact_id = state.artifact_id
@@ -594,16 +600,24 @@ class SwarmExecutor:
             if decision.outcome is not CommitOutcome.COMMITTED:
                 return decision
             node = self._dag.nodes[decision.node_id]
-            authority_state = self._authority_call(
-                "node_state", self._dag.dag_id, decision.node_id
+            refreshed_ids = (
+                decision.node_id,
+                *self._children.get(decision.node_id, ()),
             )
+            refreshed_states = self._authority_call(
+                "workflow_node_states", self._dag.dag_id, refreshed_ids
+            )
+            if len(refreshed_states) != len(refreshed_ids):
+                raise GovernanceBypassDenied("authority_status_batch_length_mismatch")
+            authority_state = refreshed_states[0]
             if authority_state.status != "governed_committed":
                 raise GovernanceBypassDenied("commit_projection_authority_mismatch")
             if node.status is not ExecutionStatus.GOVERNED_COMMITTED:
                 node.status = ExecutionStatus(authority_state.status)
                 self._completed_count += 1
-            for child_id in self._children.get(decision.node_id, ()):
-                state = self._authority_call("node_state", self._dag.dag_id, child_id)
+            for child_id, state in zip(
+                refreshed_ids[1:], refreshed_states[1:], strict=True
+            ):
                 child = self._dag.nodes[child_id]
                 if state.status == "ready" and child.status == ExecutionStatus.BLOCKED:
                     child.status = ExecutionStatus.READY

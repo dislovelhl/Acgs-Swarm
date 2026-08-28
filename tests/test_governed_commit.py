@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import ast
 from dataclasses import replace
 import multiprocessing
@@ -16,7 +18,7 @@ from constitutional_swarm.governed_commit import (
     GCB_TLA_ACTION_MAP,
     CommitOutcome,
     CommitRequest,
-    GovernedReceiptPayload,
+    GovernanceBypassDenied,
     TrustedGovernanceBootstrap,
     VerdictDecision,
     _GCBFaultCheckpoint,
@@ -71,6 +73,43 @@ def _executor_claim(executor, private_key, node_id: str, agent_id: str = "agent"
             executor.prepare_claim(node_id, agent_id), private_key
         ),
     )
+
+
+class _RecordingWorkflowStatusAdmin:
+    def __init__(self, delegate) -> None:
+        self.delegate = delegate
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def __getattr__(self, name: str):
+        return getattr(self.delegate, name)
+
+    def workflow_node_states(self, workflow_id, node_ids):
+        resolved = tuple(node_ids)
+        self.calls.append((workflow_id, resolved))
+        return self.delegate.workflow_node_states(workflow_id, resolved)
+
+    def node_state(self, workflow_id, node_id):
+        raise AssertionError(
+            f"scalar authority fallback used for {workflow_id}/{node_id}"
+        )
+
+
+def _recording_executor(tmp_path):
+    boundary = _trusted_admin(tmp_path / "batch-sync.sqlite3", policy_version="1")
+    dag = TaskDAG(dag_id="batch-sync", goal="batch status synchronization")
+    dag = dag.add_node(TaskNode(node_id="root"))
+    dag = dag.add_node(TaskNode(node_id="child", depends_on=("root",)))
+    provision_executor_workflow(boundary, dag, policy_version="1")
+    recording = _RecordingWorkflowStatusAdmin(boundary)
+    executor = compose_test_executor(
+        CapabilityRegistry(),
+        ArtifactStore(),
+        InProcessExecutionClientHarness(recording),
+        policy_version="1",
+    )
+    executor.load_dag(dag)
+    recording.calls.clear()
+    return executor, recording, boundary
 
 
 def _trusted_admin(
@@ -199,12 +238,10 @@ def test_staged_artifact_is_invisible_until_outbox_projection(tmp_path) -> None:
 def test_receipt_tampering_and_replay_fail_closed(tmp_path) -> None:
     boundary, private_key, _ = _configured_boundary(tmp_path)
     request = _request(boundary, private_key)
-    tampered_payload = GovernedReceiptPayload(
-        **{
-            **request.receipt.payload.to_dict(),
-            "policy_version": "stale-policy",
-            "commit_id": "tampered-commit",
-        }
+    tampered_payload = replace(
+        request.receipt.payload,
+        policy_version="stale-policy",
+        commit_id="tampered-commit",
     )
     tampered = boundary.build_request(request.receipt.replace(payload=tampered_payload))
 
@@ -220,12 +257,10 @@ def test_invalid_signature_and_unknown_context_deny_without_exception(tmp_path) 
         boundary.commit(boundary.build_request(invalid)).reason == "invalid_signature"
     )
 
-    unknown_payload = GovernedReceiptPayload(
-        **{
-            **request.receipt.payload.to_dict(),
-            "workflow_id": "another-workflow",
-            "commit_id": "unknown-context",
-        }
+    unknown_payload = replace(
+        request.receipt.payload,
+        workflow_id="another-workflow",
+        commit_id="unknown-context",
     )
     unknown = sign_governed_receipt(unknown_payload, private_key)
     assert boundary.commit(boundary.build_request(unknown)).reason == "unknown_context"
@@ -276,12 +311,9 @@ def test_receipt_context_binding_tampering_fails_closed(
 ) -> None:
     boundary, private_key, _ = _configured_boundary(tmp_path / field)
     request = _request(boundary, private_key)
-    payload = GovernedReceiptPayload(
-        **{
-            **request.receipt.payload.to_dict(),
-            field: value,
-            "commit_id": f"tampered-{field}",
-        }
+    payload = replace(
+        request.receipt.payload,
+        **{field: value, "commit_id": f"tampered-{field}"},
     )
     tampered = boundary.build_request(sign_governed_receipt(payload, private_key))
     decision = boundary.commit(tampered)
@@ -407,9 +439,7 @@ def test_identical_commit_retry_is_idempotent_but_conflict_denies(tmp_path) -> N
     conflict = boundary.commit(
         boundary.build_request(
             sign_governed_receipt(
-                GovernedReceiptPayload(
-                    **{**request.receipt.payload.to_dict(), "nonce": "different"}
-                ),
+                replace(request.receipt.payload, nonce="different"),
                 private_key,
             )
         )
@@ -484,7 +514,9 @@ def test_missing_or_untyped_verdict_fails_closed(tmp_path) -> None:
         ),
         private_key,
     )
-    decision = boundary.commit(CommitRequest(receipt, None))  # type: ignore[arg-type]
+    invalid_request = boundary.build_request(receipt)
+    object.__setattr__(invalid_request, "verdict", None)
+    decision = boundary.commit(invalid_request)
     assert decision.outcome is CommitOutcome.DENIED
     assert decision.reason == "invalid_authoritative_verdict"
     assert boundary.node_state("wf", "root").status == "result_produced"
@@ -635,7 +667,7 @@ def test_crash_between_authority_update_and_outbox_rolls_back(
 
 def test_real_sqlite_persistence_lock_fails_closed(tmp_path) -> None:
     boundary, private_key, _ = _configured_boundary(tmp_path)
-    boundary._busy_timeout_ms = 25
+    boundary.commit_port._busy_timeout_ms = 25
     request = _request(boundary, private_key, commit_id="locked")
     blocker = sqlite3.connect(boundary.path, isolation_level=None)
     blocker.execute("PRAGMA journal_mode=WAL")
@@ -704,6 +736,7 @@ def test_commit_and_retroactive_revoke_race_never_leaves_consumable_descendant(
     setup.register_agent(
         workflow_id="wf", agent_id="agent", public_key=key.public_key(), capabilities=()
     )
+    child_request: CommitRequest | None = None
     for node_id in ("root", "child"):
         authorization = _attempt_authorization(
             setup,
@@ -740,13 +773,15 @@ def test_commit_and_retroactive_revoke_race_never_leaves_consumable_descendant(
         else:
             child_request = request
 
+    assert child_request is not None
+    resolved_child_request = child_request
     gate = threading.Barrier(2)
     commit_boundary = _trusted_admin(path)
     revoke_boundary = _trusted_admin(path)
 
     def commit_child():
         gate.wait()
-        return commit_boundary.commit(child_request)
+        return commit_boundary.commit(resolved_child_request)
 
     def revoke_root():
         gate.wait()
@@ -763,6 +798,176 @@ def test_commit_and_retroactive_revoke_race_never_leaves_consumable_descendant(
     assert decision.outcome in {CommitOutcome.COMMITTED, CommitOutcome.DENIED}
     assert setup.node_state("wf", "child").status in {"blocked", "superseded"}
     assert setup.authoritative_artifact("wf", "child-art") is None
+
+
+@pytest.mark.parametrize(
+    "accessor", ("available_tasks", "progress", "is_complete", "dag")
+)
+def test_executor_accessors_refetch_one_ordered_authority_batch_without_cache(
+    tmp_path, accessor: str
+) -> None:
+    executor, recording, _boundary = _recording_executor(tmp_path)
+
+    def invoke() -> object:
+        if accessor == "available_tasks":
+            return executor.available_tasks("agent")
+        return getattr(executor, accessor)
+
+    invoke()
+    invoke()
+
+    expected = ("batch-sync", ("root", "child"))
+    assert recording.calls == [expected, expected]
+
+
+def test_direct_workflow_status_batch_accepts_1000_and_rejects_1001(
+    tmp_path,
+) -> None:
+    boundary = _trusted_admin(tmp_path / "direct-batch-limit.sqlite3")
+    boundary.create_workflow(
+        workflow_id="wf",
+        nodes={"root": ()},
+        policy_version="1",
+    )
+
+    maximum = boundary.workflow_node_states("wf", ("root",) * 1000)
+
+    assert len(maximum) == 1000
+    with pytest.raises(GovernanceBypassDenied, match="node_status_batch_too_large"):
+        boundary.workflow_node_states("wf", ("root",) * 1001)
+
+
+def test_workflow_status_batch_bounds_legacy_reads_independent_of_batch_size(
+    tmp_path, monkeypatch
+) -> None:
+    boundary = _trusted_admin(tmp_path / "bounded-legacy-reads.sqlite3")
+    boundary.create_workflow(
+        workflow_id="wf",
+        nodes={"root": ()},
+        policy_version="1",
+    )
+    store = boundary.commit_port._apcc_store
+    original = store._read_transaction
+    statements: list[str] = []
+
+    @contextmanager
+    def traced_transaction() -> Iterator[sqlite3.Connection]:
+        with original() as connection:
+            connection.set_trace_callback(statements.append)
+            try:
+                yield connection
+            finally:
+                connection.set_trace_callback(None)
+
+    monkeypatch.setattr(store, "_read_transaction", traced_transaction)
+
+    states = boundary.workflow_node_states("wf", ("root",) * 1000)
+
+    assert len(states) == 1000
+    legacy_reads = [
+        normalized
+        for statement in statements
+        if (normalized := " ".join(statement.split()).casefold()).startswith(
+            "select * from nodes where workflow_id="
+        )
+        or normalized.startswith(
+            "select root_node_id from revoked_roots where workflow_id="
+        )
+    ]
+    assert len(legacy_reads) <= 2
+
+
+def test_executor_admission_accepts_1000_and_rejects_1001_before_authority_call() -> (
+    None
+):
+    class AdmissionClient:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        def attach_workflow(
+            self,
+            *,
+            workflow_id: str,
+            nodes: Mapping[str, Sequence[str]],
+            policy_version: str,
+            required_capabilities: Mapping[str, Sequence[str]] | None = None,
+            input_digests: Mapping[str, str] | None = None,
+        ) -> dict[str, object]:
+            del workflow_id, policy_version, required_capabilities, input_digests
+            self.calls.append(len(nodes))
+            return {}
+
+    accepted_client = AdmissionClient()
+    accepted = compose_test_executor(
+        CapabilityRegistry(),
+        ArtifactStore(),
+        accepted_client,
+        policy_version="1",
+    )
+    accepted.load_dag(
+        TaskDAG(
+            dag_id="maximum-workflow",
+            nodes={
+                f"node-{index}": TaskNode(node_id=f"node-{index}")
+                for index in range(1000)
+            },
+        )
+    )
+    assert accepted_client.calls == [1000]
+
+    rejected_client = AdmissionClient()
+    rejected = compose_test_executor(
+        CapabilityRegistry(),
+        ArtifactStore(),
+        rejected_client,
+        policy_version="1",
+    )
+    with pytest.raises(GovernanceBypassDenied, match="node_status_batch_too_large"):
+        rejected.load_dag(
+            TaskDAG(
+                dag_id="oversized-workflow",
+                nodes={
+                    f"node-{index}": TaskNode(node_id=f"node-{index}")
+                    for index in range(1001)
+                },
+            )
+        )
+    assert rejected_client.calls == []
+
+
+def test_workflow_control_rejects_1001_nodes_at_creation(tmp_path) -> None:
+    boundary = _trusted_admin(tmp_path / "oversized-workflow-control.sqlite3")
+
+    with pytest.raises(GovernanceBypassDenied, match="node_status_batch_too_large"):
+        boundary.create_workflow(
+            workflow_id="oversized-workflow",
+            nodes={f"node-{index}": () for index in range(1001)},
+            policy_version="1",
+        )
+
+
+def test_executor_commit_refreshes_node_and_children_in_one_ordered_batch(
+    tmp_path,
+) -> None:
+    executor, recording, boundary = _recording_executor(tmp_path)
+    key = producer_key()
+    boundary.register_agent(
+        workflow_id="batch-sync",
+        agent_id="agent",
+        public_key=key.public_key(),
+        capabilities=(),
+    )
+    _executor_claim(executor, key, "root")
+    payload = executor.produce_result(
+        "root", Artifact("batch-artifact", "root", "agent", "text", "result")
+    )
+    request = boundary.build_request(sign_governed_receipt(payload, key))
+    recording.calls.clear()
+
+    decision = executor.commit(request)
+
+    assert decision.outcome is CommitOutcome.COMMITTED
+    assert recording.calls == [("batch-sync", ("root", "child"))]
 
 
 def test_executor_unlocks_only_after_governed_commit(tmp_path) -> None:
