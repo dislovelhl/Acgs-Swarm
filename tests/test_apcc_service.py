@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
-from typing import get_type_hints
+from typing import cast, get_type_hints
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -44,6 +44,18 @@ from tests.test_apcc_verifier import _b64u, valid_vector
 
 
 _SEEDS = tuple(bytes(range(start, start + 32)) for start in range(0, 160, 32))
+_AUTHORITY_KEY_IDS = {
+    AuthoritySigningRole.COMMIT: next(
+        binding.key_id
+        for binding in valid_vector().trust.bindings
+        if binding.role is TrustRole.COMMIT
+    ),
+    AuthoritySigningRole.STATUS: next(
+        binding.key_id
+        for binding in valid_vector().trust.bindings
+        if binding.role is TrustRole.STATUS
+    ),
+}
 _AUTHORITY_SCOPE_MUTATIONS = tuple(
     (binding.role, index)
     for binding in valid_vector().trust.bindings
@@ -82,10 +94,14 @@ class _KeyProvider:
             AuthoritySigningRole.STATUS: status_seed,
         }
 
+    def _seed(self, role: AuthoritySigningRole, key_id: str) -> bytes:
+        if key_id != _AUTHORITY_KEY_IDS[role]:
+            raise ValueError(f"unexpected {role.value} key identity: {key_id}")
+        return self._seeds[role]
+
     def public_key(self, role: AuthoritySigningRole, key_id: str) -> bytes:
-        del key_id
         return (
-            Ed25519PrivateKey.from_private_bytes(self._seeds[role])
+            Ed25519PrivateKey.from_private_bytes(self._seed(role, key_id))
             .public_key()
             .public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         )
@@ -99,7 +115,7 @@ class _KeyProvider:
     ):
         from constitutional_swarm.apcc.model import Signature
 
-        signature = Ed25519PrivateKey.from_private_bytes(self._seeds[role]).sign(
+        signature = Ed25519PrivateKey.from_private_bytes(self._seed(role, key_id)).sign(
             domain + b"\x00" + canonical_body
         )
         return Signature("Ed25519", key_id, _b64u(signature))
@@ -149,7 +165,7 @@ def test_missing_role_is_rejected_before_store_snapshot_changes(
     )
     store = _SnapshotStore()
     with pytest.raises((ValueError, IndexError)):
-        APCCCommitService(store=store, config=_config(missing), runtime=_runtime())
+        _service(store=store, config=_config(missing), runtime=_runtime())
     assert store.calls == 0
 
 
@@ -169,12 +185,12 @@ def test_commit_and_status_store_scope_fields_are_checked_at_construction(
     )
     store = _SnapshotStore()
     with pytest.raises(ValueError):
-        APCCCommitService(store=store, config=_config(wrong), runtime=_runtime())
+        _service(store=store, config=_config(wrong), runtime=_runtime())
     assert store.calls == 0
 
 
 @pytest.mark.parametrize(("role", "scope_index"), _REQUEST_SCOPE_MUTATIONS)
-def test_request_scope_is_checked_before_store_mutation_not_at_service_construction(
+def test_request_scope_validation_is_delegated_to_the_store_guard(
     role: TrustRole, scope_index: int
 ) -> None:
     base = valid_vector().trust
@@ -188,10 +204,9 @@ def test_request_scope_is_checked_before_store_mutation_not_at_service_construct
         )
     )
     store = _SnapshotStore()
-    service = APCCCommitService(store=store, config=_config(wrong), runtime=_runtime())
-    with pytest.raises(ValueError):
-        service.commit(_typed_request())
-    assert store.calls == 0
+    service = _service(store=store, config=_config(wrong), runtime=_runtime())
+    assert service.commit(_typed_request()) is store.result
+    assert store.calls == 1
 
 
 @pytest.mark.parametrize("reused_role", range(3))
@@ -200,7 +215,7 @@ def test_runtime_commit_key_cannot_reuse_any_non_authority_role(
 ) -> None:
     store = _SnapshotStore()
     with pytest.raises(ValueError):
-        APCCCommitService(
+        _service(
             store=store,
             config=_config(),
             runtime=_runtime(commit_seed=_SEEDS[reused_role]),
@@ -219,7 +234,7 @@ def test_commit_and_status_role_scope_and_key_id_are_exact(role: TrustRole) -> N
     )
     store = _SnapshotStore()
     with pytest.raises(ValueError):
-        APCCCommitService(store=store, config=_config(wrong), runtime=_runtime())
+        _service(store=store, config=_config(wrong), runtime=_runtime())
     assert store.calls == 0
 
 
@@ -238,7 +253,7 @@ def test_authority_store_scope_is_bound_for_commit_and_status_keys(
     )
     store = _SnapshotStore()
     with pytest.raises(ValueError):
-        APCCCommitService(store=store, config=_config(wrong), runtime=_runtime())
+        _service(store=store, config=_config(wrong), runtime=_runtime())
     assert store.calls == 0
 
 
@@ -254,7 +269,7 @@ def test_both_authority_roles_cannot_agree_on_the_wrong_store() -> None:
     )
     store = _SnapshotStore(authority_store_id="store-1")
     with pytest.raises(ValueError):
-        APCCCommitService(store=store, config=_config(wrong), runtime=_runtime())
+        _service(store=store, config=_config(wrong), runtime=_runtime())
     assert store.calls == 0
 
 
@@ -274,7 +289,7 @@ def test_commit_and_status_bindings_cannot_be_swapped_or_reused() -> None:
     )
     store = _SnapshotStore()
     with pytest.raises(ValueError):
-        APCCCommitService(store=store, config=_config(swapped), runtime=_runtime())
+        _service(store=store, config=_config(swapped), runtime=_runtime())
     assert store.calls == 0
 
 
@@ -283,7 +298,7 @@ def test_runtime_status_key_cannot_reuse_any_non_authority_role(
     reused_seed: bytes,
 ) -> None:
     with pytest.raises(ValueError):
-        APCCCommitService(
+        _service(
             store=_SnapshotStore(),
             config=_config(),
             runtime=_runtime(status_seed=reused_seed),
@@ -296,7 +311,7 @@ def test_two_distinct_wrong_authority_signers_are_rejected_together() -> None:
     assert wrong_commit_seed != wrong_status_seed
     store = _SnapshotStore()
     with pytest.raises(ValueError):
-        APCCCommitService(
+        _service(
             store=store,
             config=_config(),
             runtime=_runtime(wrong_commit_seed, wrong_status_seed),
@@ -382,7 +397,7 @@ def test_service_delegates_one_commit_to_the_store_once() -> None:
     assert annotations["request"] is AtomicCommitRequest
     assert annotations["return"] is CommitResult
     store = _SnapshotStore()
-    service = APCCCommitService(store=store, config=_config(), runtime=_runtime())
+    service = _service(store=store, config=_config(), runtime=_runtime())
     marker = _typed_request()
     assert service.commit(marker) is store.result
     assert store.calls == 1
@@ -414,6 +429,18 @@ class _SnapshotStore:
         assert isinstance(request, AtomicCommitRequest)
         self.calls += 1
         return self.result
+
+
+def _service(
+    *,
+    store: _SnapshotStore,
+    config: APCCAuthorityConfig,
+    runtime: AuthorityRuntime,
+) -> APCCCommitService:
+    """Construct the service while keeping the deliberately narrow test double."""
+    return APCCCommitService(
+        store=cast(AuthorityStore, store), config=config, runtime=runtime
+    )
 
 
 def _committed_result() -> CommitResult:

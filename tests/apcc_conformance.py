@@ -11,6 +11,7 @@ from typing import Protocol
 
 import pytest
 
+from constitutional_swarm.apcc.crypto import sha256_digest
 from constitutional_swarm.apcc.model import (
     AuthorityStatus,
     CandidateLifecycle,
@@ -38,7 +39,12 @@ from constitutional_swarm.apcc.ports import (
     SupersessionDenied,
     SupersessionRequest,
 )
-from constitutional_swarm.apcc.verifier import ScopedTrust, verify_current
+from constitutional_swarm.apcc.verifier import (
+    CausalClosureLimits,
+    ScopedTrust,
+    verify_current,
+    verify_historical,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +84,13 @@ class AuthorityStoreHarness:
         [AuthoritySnapshot, AuthoritySnapshot], None
     ]
     assert_outbox_delivery_delta: Callable[[AuthoritySnapshot, AuthoritySnapshot], None]
+    commit_signature_count: Callable[[], int] | None = None
+    tamper_certificate_payload: Callable[[AuthorityStore, str], None] | None = None
+    replace_predecessor_edges: (
+        Callable[[AuthorityStore, str, tuple[str, ...]], None] | None
+    ) = None
+    set_clock_sequence: Callable[[AuthorityStore, tuple[int, ...]], None] | None = None
+    set_invalid_commit_signature: Callable[[AuthorityStore, bool], None] | None = None
 
 
 def _stage(
@@ -210,7 +223,9 @@ def assert_authority_store_conforms(
     )
     assert harness.snapshot(store) == conflicted_snapshot
 
-    nonce_replay = harness.make_request(commit_id="commit-2", nonce_byte=1)
+    nonce_replay = harness.make_request(
+        commit_id="commit-2", nonce_byte=1, node_id="child"
+    )
     _stage(store, harness, nonce_replay)
     before_nonce_denial = harness.snapshot(store)
     denied = store.atomic_commit(nonce_replay)
@@ -265,7 +280,11 @@ def assert_authority_store_conforms(
     # Same active attempt, different IDs/nonces, same expected version: one winner.
     race_store = harness.open_store(tmp_path / "race.db", None)
     race_one = harness.make_request(commit_id="race-1", nonce_byte=3)
-    race_two = harness.make_request(commit_id="race-2", nonce_byte=4)
+    race_two = harness.make_request(
+        commit_id="race-2", nonce_byte=4, attempt_id="race-attempt-2"
+    )
+    # Two distinct pending attempts contend for the same logical-node version;
+    # each candidate authorizes only its own exact proposal identity.
     _stage(race_store, harness, race_one)
     _stage(race_store, harness, race_two)
     start = Barrier(3)
@@ -571,7 +590,7 @@ def assert_authority_store_extended_conforms(
             RevocationScope.ACTOR,
             first_request.subject.workflow_id,
             first_request.subject.agent_id,
-            "1",
+            str(int(first_request.context.agent_revocation_generation) + 1),
             "workflow-scoped actor revocation",
         )
     )
@@ -704,6 +723,1113 @@ def assert_authority_store_extended_conforms(
     inactive_snapshot = harness.snapshot(attempt_store)
     assert attempt_store.atomic_commit(coherent) == inactive
     assert harness.snapshot(attempt_store) == inactive_snapshot
+
+
+def assert_staged_result_digest_binding_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "staged-output-digest", None)
+    request = harness.make_request(commit_id="staged-output-digest", nonce_byte=81)
+    wrong = replace(harness.stage_request(request), result_bytes=b"wrong-output")
+    try:
+        store.stage_result(wrong)
+    except ValueError:
+        pass
+    context_request = CommitContextRequest(
+        request.subject.workflow_id,
+        request.subject.node_id,
+        request.subject.attempt_id,
+        request.subject.agent_id,
+    )
+    context = store.read_commit_context(context_request)
+    assert context.candidate_state.lifecycle in {
+        CandidateLifecycle.EXECUTING,
+        CandidateLifecycle.QUARANTINED,
+    }
+    denied = store.atomic_commit(request)
+    assert denied.decision.outcome is RequestOutcome.DENIED
+    assert denied.decision.reason in {
+        FailureCode.RESULT_NOT_STAGED,
+        FailureCode.QUARANTINED,
+    }
+    assert denied.certificate_digest is None
+    assert store.get_certificate(request.commit_id) is None
+    assert (
+        store.read_commit_context(
+            context_request
+        ).logical_node_state.current_certificate_digest
+        is None
+    )
+
+
+def assert_stage_after_commit_pending_cannot_regress_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "stage-after-pending", None)
+    request = harness.make_request(commit_id="stage-after-pending", nonce_byte=98)
+    _stage(store, harness, request)
+    context_request = CommitContextRequest(
+        request.subject.workflow_id,
+        request.subject.node_id,
+        request.subject.attempt_id,
+        request.subject.agent_id,
+    )
+    before = harness.snapshot(store)
+    replacement_bytes = b"replacement-output"
+    replacement = StageResultRequest(
+        replace(
+            request.subject,
+            output_digest=sha256_digest(replacement_bytes),
+        ),
+        request.bindings.expected_node_version,
+        replacement_bytes,
+    )
+    with pytest.raises(ValueError, match=FailureCode.ILLEGAL_NODE_STATE.value):
+        store.stage_result(replacement)
+    assert harness.snapshot(store) == before
+    assert (
+        store.read_commit_context(context_request).candidate_state.lifecycle
+        is CandidateLifecycle.COMMIT_PENDING
+    )
+    committed = store.atomic_commit(request)
+    assert committed.decision.outcome is RequestOutcome.COMMITTED
+
+
+def assert_pending_proposal_identity_is_exact_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "pending-proposal-identity", None)
+    pending = harness.make_request(commit_id="pending-a", nonce_byte=131)
+    substituted = harness.make_request(commit_id="pending-b", nonce_byte=132)
+    _stage(store, harness, pending)
+    before = harness.snapshot(store)
+
+    denied = store.atomic_commit(substituted)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=substituted.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.STAGED_RESULT_CONFLICT,
+    )
+    assert store.get_certificate(substituted.commit_id) is None
+    context = store.read_commit_context(
+        CommitContextRequest(
+            pending.subject.workflow_id,
+            pending.subject.node_id,
+            pending.subject.attempt_id,
+            pending.subject.agent_id,
+        )
+    )
+    assert context.candidate_state.lifecycle is CandidateLifecycle.COMMIT_PENDING
+    assert before.current_pointers == harness.snapshot(store).current_pointers
+    assert store.atomic_commit(substituted) == denied
+    committed = store.atomic_commit(pending)
+    assert committed.decision.outcome is RequestOutcome.COMMITTED
+
+
+def assert_commit_signer_is_authority_only_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    count = harness.commit_signature_count
+    assert count is not None
+    store = harness.open_store(tmp_path / "commit-signer-boundary", None)
+    request = harness.make_request(commit_id="signer-success", nonce_byte=133)
+    baseline = count()
+    store.stage_result(harness.stage_request(request))
+    store.assemble_evidence(harness.assemble_evidence_request(request))
+    store.propose_commit(harness.propose_commit_request(request))
+    assert count() == baseline
+    committed = store.atomic_commit(request)
+    assert committed.decision.outcome is RequestOutcome.COMMITTED
+    assert count() == baseline + 1
+
+    invalid = harness.make_request(
+        commit_id="signer-invalid", nonce_byte=134, node_id="child"
+    )
+    invalid = replace(
+        invalid,
+        signatures=replace(
+            invalid.signatures,
+            producer=replace(
+                invalid.signatures.producer,
+                signature_b64u="A" * 86,
+            ),
+        ),
+    )
+    before_invalid = count()
+    invalid_result = store.atomic_commit(invalid)
+    assert invalid_result.decision.reason is FailureCode.INVALID_PRODUCER_SIGNATURE
+    assert invalid_result.certificate_digest is None
+    assert count() == before_invalid
+
+    unstaged = harness.make_request(
+        commit_id="signer-denied", nonce_byte=135, node_id="leaf"
+    )
+    before_denial = count()
+    denied = store.atomic_commit(unstaged)
+    assert denied.decision.reason is FailureCode.RESULT_NOT_STAGED
+    assert denied.certificate_digest is None
+    assert count() == before_denial
+
+
+def assert_reachable_ancestor_integrity_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    tamper = harness.tamper_certificate_payload
+    assert tamper is not None
+    store = harness.open_store(tmp_path / "reachable-ancestor-integrity", None)
+    root_request = harness.make_request(
+        commit_id="integrity-root", nonce_byte=136, node_id="root"
+    )
+    _stage(store, harness, root_request)
+    root = store.atomic_commit(root_request)
+    middle_request = harness.make_request(
+        commit_id="integrity-middle",
+        nonce_byte=137,
+        node_id="middle",
+        predecessors=[_predecessor(root_request, root)],
+    )
+    _stage(store, harness, middle_request)
+    middle = store.atomic_commit(middle_request)
+    assert root.certificate_digest is not None
+    tamper(store, root.certificate_digest)
+
+    leaf_request = harness.make_request(
+        commit_id="integrity-leaf",
+        nonce_byte=138,
+        node_id="leaf",
+        predecessors=[_predecessor(middle_request, middle)],
+    )
+    _stage(store, harness, leaf_request)
+    denied = store.atomic_commit(leaf_request)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=leaf_request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.INVALID_PREDECESSOR,
+    )
+    assert store.get_certificate(leaf_request.commit_id) is None
+
+
+def assert_reachable_adjacency_matches_signed_bindings_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    replace_edges = harness.replace_predecessor_edges
+    assert replace_edges is not None
+    store = harness.open_store(tmp_path / "reachable-adjacency-binding", None)
+    first_request = harness.make_request(
+        commit_id="adjacency-first", nonce_byte=139, node_id="root"
+    )
+    second_request = harness.make_request(
+        commit_id="adjacency-second", nonce_byte=140, node_id="child"
+    )
+    _stage(store, harness, first_request)
+    first = store.atomic_commit(first_request)
+    _stage(store, harness, second_request)
+    second = store.atomic_commit(second_request)
+    middle_request = harness.make_request(
+        commit_id="adjacency-middle",
+        nonce_byte=141,
+        node_id="middle",
+        predecessors=[_predecessor(first_request, first)],
+    )
+    _stage(store, harness, middle_request)
+    middle = store.atomic_commit(middle_request)
+    assert second.certificate_digest is not None
+    replace_edges(store, middle_request.commit_id, (second.certificate_digest,))
+
+    leaf_request = harness.make_request(
+        commit_id="adjacency-leaf",
+        nonce_byte=142,
+        node_id="leaf",
+        predecessors=[_predecessor(middle_request, middle)],
+    )
+    _stage(store, harness, leaf_request)
+    before = harness.snapshot(store)
+    denied = store.atomic_commit(leaf_request)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=leaf_request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.INVALID_PREDECESSOR,
+    )
+    after = harness.snapshot(store)
+    harness.assert_denied_decision_delta(before, after, leaf_request.commit_id)
+    assert store.get_certificate(leaf_request.commit_id) is None
+    assert store.atomic_commit(leaf_request) == denied
+    assert harness.snapshot(store) == after
+
+
+def assert_reachable_adjacency_cycle_fails_closed_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    replace_edges = harness.replace_predecessor_edges
+    assert replace_edges is not None
+    store = harness.open_store(tmp_path / "reachable-adjacency-cycle", None)
+    root_request = harness.make_request(
+        commit_id="cycle-root", nonce_byte=143, node_id="root"
+    )
+    _stage(store, harness, root_request)
+    root = store.atomic_commit(root_request)
+    middle_request = harness.make_request(
+        commit_id="cycle-middle",
+        nonce_byte=144,
+        node_id="middle",
+        predecessors=[_predecessor(root_request, root)],
+    )
+    _stage(store, harness, middle_request)
+    middle = store.atomic_commit(middle_request)
+    assert middle.certificate_digest is not None
+    replace_edges(store, root_request.commit_id, (middle.certificate_digest,))
+
+    leaf_request = harness.make_request(
+        commit_id="cycle-leaf",
+        nonce_byte=145,
+        node_id="leaf",
+        predecessors=[_predecessor(middle_request, middle)],
+    )
+    _stage(store, harness, leaf_request)
+    denied = store.atomic_commit(leaf_request)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=leaf_request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.INVALID_PREDECESSOR,
+    )
+    assert store.get_certificate(leaf_request.commit_id) is None
+
+
+def assert_default_causal_limits_are_enforced_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    assert CausalClosureLimits() == CausalClosureLimits(
+        max_depth=64,
+        max_certificates=4096,
+        max_total_bytes=64 * 1024 * 1024,
+    )
+    store = harness.open_store(tmp_path / "default-causal-depth", None)
+    predecessor: dict[str, str] | None = None
+    for index in range(65):
+        request = harness.make_request(
+            commit_id=f"depth-{index}",
+            nonce_byte=146 + index,
+            node_id=f"depth-node-{index}",
+            attempt_id=f"depth-attempt-{index}",
+            expected_node_version="0",
+            predecessors=[] if predecessor is None else [predecessor],
+        )
+        _stage(store, harness, request)
+        committed = store.atomic_commit(request)
+        assert committed.decision.outcome is RequestOutcome.COMMITTED
+        predecessor = _predecessor(request, committed)
+    assert predecessor is not None
+    boundary = harness.make_request(
+        commit_id="depth-boundary",
+        nonce_byte=211,
+        node_id="depth-node-65",
+        attempt_id="depth-boundary",
+        expected_node_version="0",
+        predecessors=[predecessor],
+    )
+    _stage(store, harness, boundary)
+    denied = store.atomic_commit(boundary)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=boundary.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.DEPTH_LIMIT_EXCEEDED,
+    )
+    assert store.get_certificate(boundary.commit_id) is None
+
+
+def assert_final_certificate_is_the_validated_certificate_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    set_clock = harness.set_clock_sequence
+    assert set_clock is not None
+    store = harness.open_store(tmp_path / "final-certificate-clock", None)
+    request = harness.make_request(commit_id="final-clock", nonce_byte=213)
+    _stage(store, harness, request)
+    set_clock(store, (1_760_000_001_000, 1_760_000_006_000))
+    committed = store.atomic_commit(request)
+    assert committed.decision.outcome is RequestOutcome.COMMITTED
+    assert committed.certificate_envelope_bytes is not None
+    assert verify_historical(
+        committed.certificate_envelope_bytes, trust=harness.trust
+    ).ok
+
+
+def assert_invalid_final_commit_signature_is_atomic_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    set_invalid = harness.set_invalid_commit_signature
+    count = harness.commit_signature_count
+    assert set_invalid is not None
+    assert count is not None
+    store = harness.open_store(tmp_path / "invalid-final-signature", None)
+    request = harness.make_request(commit_id="invalid-final-signature", nonce_byte=214)
+    _stage(store, harness, request)
+    before = harness.snapshot(store)
+    baseline = count()
+    set_invalid(store, True)
+    with pytest.raises(ValueError, match=FailureCode.INVALID_COMMIT_SEAL.value):
+        store.atomic_commit(request)
+    assert count() == baseline + 1
+    assert harness.snapshot(store) == before
+    assert store.get_certificate(request.commit_id) is None
+
+
+def assert_root_revocation_generation_is_current_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path, scope: RevocationScope
+) -> None:
+    assert scope in {RevocationScope.ACTOR, RevocationScope.WORKFLOW}
+    store = harness.open_store(tmp_path / f"root-generation-{scope.value}", None)
+    request = harness.make_request(
+        commit_id=f"root-generation-{scope.value}", nonce_byte=215
+    )
+    target = (
+        request.subject.agent_id
+        if scope is RevocationScope.ACTOR
+        else request.subject.workflow_id
+    )
+    claimed_generation = int(
+        request.context.agent_revocation_generation
+        if scope is RevocationScope.ACTOR
+        else request.context.workflow_revocation_generation
+    )
+    for generation in range(1, claimed_generation + 2):
+        store.revoke(
+            RevocationRequest(
+                scope,
+                request.subject.workflow_id,
+                target,
+                str(generation),
+                "advance root governance generation",
+            )
+        )
+    _stage(store, harness, request)
+    before = harness.snapshot(store)
+    denied = store.atomic_commit(request)
+    expected = (
+        FailureCode.ACTOR_REVOKED
+        if scope is RevocationScope.ACTOR
+        else FailureCode.WORKFLOW_REVOKED
+    )
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=expected,
+    )
+    after = harness.snapshot(store)
+    harness.assert_denied_decision_delta(before, after, request.commit_id)
+    assert len(after.tables["nonce_ledger"]) == len(before.tables["nonce_ledger"]) + 1
+    assert store.get_certificate(request.commit_id) is None
+    assert before.current_pointers == after.current_pointers
+    assert store.atomic_commit(request) == denied
+    assert harness.snapshot(store) == after
+
+
+def assert_equal_revocation_generation_is_not_retroactive_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path, scope: RevocationScope
+) -> None:
+    assert scope in {RevocationScope.ACTOR, RevocationScope.WORKFLOW}
+    store = harness.open_store(tmp_path / f"equal-generation-{scope.value}", None)
+    root_request = harness.make_request(
+        commit_id=f"equal-generation-root-{scope.value}",
+        nonce_byte=224,
+        node_id="root",
+        attempt_id=f"equal-generation-root-{scope.value}",
+    )
+    claimed_generation = int(
+        root_request.context.agent_revocation_generation
+        if scope is RevocationScope.ACTOR
+        else root_request.context.workflow_revocation_generation
+    )
+    target = (
+        root_request.subject.agent_id
+        if scope is RevocationScope.ACTOR
+        else root_request.subject.workflow_id
+    )
+    for generation in range(1, claimed_generation + 1):
+        store.revoke(
+            RevocationRequest(
+                scope,
+                root_request.subject.workflow_id,
+                target,
+                str(generation),
+                "advance to the certificate issuance generation",
+            )
+        )
+    _stage(store, harness, root_request)
+    root = store.atomic_commit(root_request)
+    assert_commit_tuple_is_exact(store, root)
+    assert root.certificate_digest is not None
+    equal_status = store.current_status(root.certificate_digest, root_request.nonce)
+    assert equal_status.status.value == "current"
+
+    equal_child_request = harness.make_request(
+        commit_id=f"equal-generation-child-{scope.value}",
+        nonce_byte=225,
+        node_id="child",
+        attempt_id=f"equal-generation-child-{scope.value}",
+        predecessors=[_predecessor(root_request, root)],
+    )
+    _stage(store, harness, equal_child_request)
+    equal_child = store.atomic_commit(equal_child_request)
+    assert_commit_tuple_is_exact(store, equal_child)
+
+    store.revoke(
+        RevocationRequest(
+            scope,
+            root_request.subject.workflow_id,
+            target,
+            str(claimed_generation + 1),
+            "advance beyond the certificate issuance generation",
+        )
+    )
+    stale_status = store.current_status(root.certificate_digest, root_request.nonce)
+    assert stale_status.status.value == "revoked"
+    current_generation = str(claimed_generation + 1)
+    stale_child_request = harness.make_request(
+        commit_id=f"stale-ancestor-child-{scope.value}",
+        nonce_byte=226,
+        node_id="middle",
+        attempt_id=f"stale-ancestor-child-{scope.value}",
+        predecessors=[_predecessor(root_request, root)],
+        **(
+            {"agent_revocation_generation": current_generation}
+            if scope is RevocationScope.ACTOR
+            else {"workflow_revocation_generation": current_generation}
+        ),
+    )
+    _stage(store, harness, stale_child_request)
+    before = harness.snapshot(store)
+    denied = store.atomic_commit(stale_child_request)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=stale_child_request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.INVALID_PREDECESSOR,
+    )
+    after = harness.snapshot(store)
+    harness.assert_denied_decision_delta(before, after, stale_child_request.commit_id)
+    assert store.get_certificate(stale_child_request.commit_id) is None
+
+
+def assert_request_digest_cache_is_not_authority_bearing_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "request-digest-cache", None)
+    request = harness.make_request(commit_id="request-digest-cache", nonce_byte=227)
+    _stage(store, harness, request)
+    changed_cache = replace(request, request_digest="A" * 43)
+    committed = store.atomic_commit(changed_cache)
+    assert_commit_tuple_is_exact(store, committed)
+    committed_snapshot = harness.snapshot(store)
+    assert store.atomic_commit(request) == committed
+    assert harness.snapshot(store) == committed_snapshot
+
+    changed_subject = replace(
+        request,
+        subject=replace(request.subject, actor_authority="mutated-authority"),
+    )
+    conflict = store.atomic_commit(changed_subject)
+    assert_non_authoritative_tuple_is_exact(
+        conflict,
+        commit_id=request.commit_id,
+        outcome=RequestOutcome.CONFLICTED,
+        reason=FailureCode.COMMIT_ID_EQUIVOCATION,
+    )
+    harness.assert_conflict_and_audit_delta(
+        committed_snapshot, harness.snapshot(store), request.commit_id
+    )
+
+
+def assert_ordinary_commit_requires_empty_pointer_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "ordinary-empty-pointer", None)
+    original_request = harness.make_request(
+        commit_id="ordinary-original", nonce_byte=216
+    )
+    _stage(store, harness, original_request)
+    original = store.atomic_commit(original_request)
+    assert_commit_tuple_is_exact(store, original)
+    replacement_request = harness.make_request(
+        commit_id="ordinary-second",
+        nonce_byte=217,
+        expected_node_version="1",
+        attempt_id="ordinary-second-attempt",
+    )
+    _stage(store, harness, replacement_request)
+    before = harness.snapshot(store)
+    denied = store.atomic_commit(replacement_request)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=replacement_request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.ILLEGAL_NODE_STATE,
+    )
+    after = harness.snapshot(store)
+    harness.assert_denied_decision_delta(before, after, replacement_request.commit_id)
+    assert len(after.tables["nonce_ledger"]) == len(before.tables["nonce_ledger"]) + 1
+    assert store.get_certificate(original_request.commit_id) == (
+        original.certificate_envelope_bytes
+    )
+    assert store.get_certificate(replacement_request.commit_id) is None
+    assert before.current_pointers == after.current_pointers
+    assert store.atomic_commit(replacement_request) == denied
+    assert harness.snapshot(store) == after
+
+
+def assert_revoked_current_certificate_cannot_be_superseded_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "revoked-supersession", None)
+    original_request = harness.make_request(
+        commit_id="revoked-supersession-original", nonce_byte=218, node_id="root"
+    )
+    _stage(store, harness, original_request)
+    original = store.atomic_commit(original_request)
+    child_request = harness.make_request(
+        commit_id="revoked-supersession-child",
+        nonce_byte=219,
+        node_id="child",
+        predecessors=[_predecessor(original_request, original)],
+    )
+    _stage(store, harness, child_request)
+    child = store.atomic_commit(child_request)
+    assert original.certificate_digest is not None
+    assert child.certificate_digest is not None
+    store.revoke(
+        RevocationRequest(
+            RevocationScope.CERTIFICATE,
+            original_request.subject.workflow_id,
+            original.certificate_digest,
+            "1",
+            "terminal root revocation",
+        )
+    )
+    replacement = harness.make_request(
+        commit_id="revoked-supersession-replacement",
+        nonce_byte=220,
+        node_id="root",
+        expected_node_version="1",
+        attempt_id="revoked-supersession-replacement",
+    )
+    _stage(store, harness, replacement)
+    before = harness.snapshot(store)
+    denied = store.supersede(
+        SupersessionRequest(original.certificate_digest, replacement)
+    )
+    assert isinstance(denied, SupersessionDenied)
+    assert_non_authoritative_tuple_is_exact(
+        denied.commit_result,
+        commit_id=replacement.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.PREDECESSOR_REPLACED,
+    )
+    after = harness.snapshot(store)
+    harness.assert_denied_decision_delta(before, after, replacement.commit_id)
+    assert len(after.tables["nonce_ledger"]) == len(before.tables["nonce_ledger"]) + 1
+    root_status = store.current_status(
+        original.certificate_digest, original_request.nonce
+    )
+    child_status = store.current_status(child.certificate_digest, child_request.nonce)
+    assert root_status.status.value == "revoked"
+    assert child_status.status.value == "revoked"
+    assert before.current_pointers == after.current_pointers
+    assert (
+        store.supersede(SupersessionRequest(original.certificate_digest, replacement))
+        == denied
+    )
+    assert harness.snapshot(store) == after
+
+
+def assert_complete_request_identity_is_guarded_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    original = harness.make_request(
+        commit_id="complete-request-identity", nonce_byte=221
+    )
+
+    def mutate_policy(request: AtomicCommitRequest) -> AtomicCommitRequest:
+        statement = dict(request.evidence.policy_statement)
+        statement["policy_version"] = "mutated-policy-version"
+        return replace(
+            request,
+            evidence=replace(request.evidence, policy_statement=statement),
+        )
+
+    def mutate_authority(request: AtomicCommitRequest) -> AtomicCommitRequest:
+        statement = dict(request.evidence.authority_statement)
+        statement["authority_epoch"] = "mutated-authority-epoch"
+        return replace(
+            request,
+            evidence=replace(request.evidence, authority_statement=statement),
+        )
+
+    mutations: tuple[
+        tuple[str, Callable[[AtomicCommitRequest], AtomicCommitRequest]], ...
+    ] = (
+        ("policy", mutate_policy),
+        ("authority", mutate_authority),
+        (
+            "signature",
+            lambda request: replace(
+                request,
+                signatures=replace(
+                    request.signatures,
+                    policy_authority=replace(
+                        request.signatures.policy_authority,
+                        signature_b64u="A" * 86,
+                    ),
+                ),
+            ),
+        ),
+        (
+            "subject",
+            lambda request: replace(
+                request, subject=replace(request.subject, actor_authority="mutated")
+            ),
+        ),
+        (
+            "context",
+            lambda request: replace(
+                request, context=replace(request.context, policy_epoch="mutated")
+            ),
+        ),
+        (
+            "bindings",
+            lambda request: replace(
+                request,
+                bindings=replace(
+                    request.bindings,
+                    expected_node_version="9",
+                    committed_node_version="10",
+                ),
+            ),
+        ),
+        ("nonce", lambda request: replace(request, nonce="C" * 21 + "A")),
+    )
+    for label, mutate in mutations:
+        store = harness.open_store(tmp_path / f"request-identity-{label}", None)
+        _stage(store, harness, original)
+        committed = store.atomic_commit(original)
+        committed_snapshot = harness.snapshot(store)
+        cached_digest_only = replace(original, request_digest="D" * 43)
+        assert store.atomic_commit(cached_digest_only) == committed
+        assert harness.snapshot(store) == committed_snapshot
+        conflicting = mutate(original)
+        conflict = store.atomic_commit(conflicting)
+        assert_non_authoritative_tuple_is_exact(
+            conflict,
+            commit_id=original.commit_id,
+            outcome=RequestOutcome.CONFLICTED,
+            reason=FailureCode.COMMIT_ID_EQUIVOCATION,
+        )
+        after = harness.snapshot(store)
+        harness.assert_conflict_and_audit_delta(
+            committed_snapshot, after, original.commit_id
+        )
+        assert store.atomic_commit(conflicting) == conflict
+        assert harness.snapshot(store) == after
+
+
+def assert_negative_decisions_reserve_nonce_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    for label, reason in (
+        ("static", FailureCode.INVALID_PRODUCER_SIGNATURE),
+        ("active", FailureCode.RESULT_NOT_STAGED),
+    ):
+        store = harness.open_store(tmp_path / f"negative-nonce-{label}", None)
+        denied_request = harness.make_request(
+            commit_id=f"negative-nonce-{label}", nonce_byte=222
+        )
+        if label == "static":
+            denied_request = replace(
+                denied_request,
+                signatures=replace(
+                    denied_request.signatures,
+                    producer=replace(
+                        denied_request.signatures.producer, signature_b64u="A" * 86
+                    ),
+                ),
+            )
+        before = harness.snapshot(store)
+        denied = store.atomic_commit(denied_request)
+        assert_non_authoritative_tuple_is_exact(
+            denied,
+            commit_id=denied_request.commit_id,
+            outcome=RequestOutcome.DENIED,
+            reason=reason,
+        )
+        denied_snapshot = harness.snapshot(store)
+        assert (
+            len(denied_snapshot.tables["nonce_ledger"])
+            == len(before.tables["nonce_ledger"]) + 1
+        )
+        assert store.atomic_commit(denied_request) == denied
+        assert harness.snapshot(store) == denied_snapshot
+
+        reused = harness.make_request(
+            commit_id=f"negative-nonce-{label}-reused",
+            nonce_byte=222,
+            node_id="child",
+        )
+        replay_denied = store.atomic_commit(reused)
+        assert_non_authoritative_tuple_is_exact(
+            replay_denied,
+            commit_id=reused.commit_id,
+            outcome=RequestOutcome.DENIED,
+            reason=FailureCode.NONCE_REPLAY,
+        )
+        replay_snapshot = harness.snapshot(store)
+        assert store.atomic_commit(reused) == replay_denied
+        assert harness.snapshot(store) == replay_snapshot
+
+
+def assert_predecessor_reference_field_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path, field_name: str
+) -> None:
+    assert field_name in {"committed_node_version", "output_digest"}
+    store = harness.open_store(tmp_path / f"predecessor-{field_name}", None)
+    parent_request = harness.make_request(
+        commit_id=f"predecessor-{field_name}-parent", nonce_byte=82, node_id="root"
+    )
+    _stage(store, harness, parent_request)
+    parent = store.atomic_commit(parent_request)
+    reference = _predecessor(parent_request, parent)
+    assert set(reference) == {
+        "workflow_id",
+        "node_id",
+        "committed_node_version",
+        "commit_id",
+        "certificate_digest",
+        "output_digest",
+    }
+    reference[field_name] = (
+        "999" if field_name == "committed_node_version" else "A" * 43
+    )
+    child_request = harness.make_request(
+        commit_id=f"predecessor-{field_name}-child",
+        nonce_byte=83,
+        node_id="child",
+        predecessors=[reference],
+    )
+    _stage(store, harness, child_request)
+    denied = store.atomic_commit(child_request)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=child_request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.INVALID_PREDECESSOR,
+    )
+
+
+def assert_transitive_ancestor_revocation_admission_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "transitive-revocation-admission", None)
+    root_request = harness.make_request(
+        commit_id="revoked-root", nonce_byte=84, node_id="root"
+    )
+    _stage(store, harness, root_request)
+    root = store.atomic_commit(root_request)
+    middle_request = harness.make_request(
+        commit_id="revoked-middle",
+        nonce_byte=85,
+        node_id="middle",
+        predecessors=[_predecessor(root_request, root)],
+    )
+    _stage(store, harness, middle_request)
+    middle = store.atomic_commit(middle_request)
+    assert root.certificate_digest is not None
+    store.revoke(
+        RevocationRequest(
+            RevocationScope.CERTIFICATE,
+            root_request.subject.workflow_id,
+            root.certificate_digest,
+            "1",
+            "ancestor revoked before descendant admission",
+        )
+    )
+    leaf_request = harness.make_request(
+        commit_id="revoked-leaf",
+        nonce_byte=86,
+        node_id="leaf",
+        predecessors=[_predecessor(middle_request, middle)],
+    )
+    _stage(store, harness, leaf_request)
+    denied = store.atomic_commit(leaf_request)
+    assert_non_authoritative_tuple_is_exact(
+        denied,
+        commit_id=leaf_request.commit_id,
+        outcome=RequestOutcome.DENIED,
+        reason=FailureCode.INVALID_PREDECESSOR,
+    )
+
+
+def assert_revocation_generation_monotonicity_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path, scope: RevocationScope
+) -> None:
+    assert scope in {RevocationScope.ACTOR, RevocationScope.WORKFLOW}
+    store = harness.open_store(tmp_path / f"generation-{scope.value.lower()}", None)
+    request = harness.make_request(commit_id=f"generation-{scope.value}", nonce_byte=87)
+    target = (
+        request.subject.agent_id
+        if scope is RevocationScope.ACTOR
+        else request.subject.workflow_id
+    )
+    first = RevocationRequest(
+        scope, request.subject.workflow_id, target, "2", "advance generation"
+    )
+    store.revoke(first)
+    before = harness.snapshot(store)
+    with pytest.raises(ValueError):
+        store.revoke(replace(first, next_generation="1", reason="generation rollback"))
+    assert harness.snapshot(store) == before
+
+
+def assert_certificate_revocation_terminality_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path, case: str
+) -> None:
+    assert case in {"unknown", "revoked", "superseded"}
+    store = harness.open_store(tmp_path / f"terminal-revocation-{case}", None)
+    request = harness.make_request(
+        commit_id=f"terminal-revocation-{case}", nonce_byte=88
+    )
+    _stage(store, harness, request)
+    committed = store.atomic_commit(request)
+    assert committed.certificate_digest is not None
+    target = committed.certificate_digest
+    exact_request = RevocationRequest(
+        RevocationScope.CERTIFICATE,
+        request.subject.workflow_id,
+        target,
+        "1",
+        "first terminal event",
+    )
+    prior = None
+    if case == "unknown":
+        target = "A" * 43
+        exact_request = replace(exact_request, target_id=target)
+    elif case == "revoked":
+        prior = store.revoke(exact_request)
+    else:
+        replacement = harness.make_request(
+            commit_id="terminal-replacement",
+            nonce_byte=89,
+            expected_node_version="1",
+            attempt_id="terminal-replacement",
+        )
+        _stage(store, harness, replacement)
+        superseded = store.supersede(SupersessionRequest(target, replacement))
+        assert isinstance(superseded, SupersessionCommitted)
+    before = harness.snapshot(store)
+    if case == "revoked":
+        try:
+            replay = store.revoke(exact_request)
+        except ValueError:
+            pass
+        else:
+            assert replay == prior
+    else:
+        with pytest.raises(ValueError):
+            store.revoke(
+                RevocationRequest(
+                    RevocationScope.CERTIFICATE,
+                    request.subject.workflow_id,
+                    target,
+                    "2",
+                    "terminal or unknown target must not mutate",
+                )
+            )
+    assert harness.snapshot(store) == before
+
+
+def assert_supersession_replay_identity_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path, branch: str
+) -> None:
+    assert branch in {"committed", "denied", "conflicted"}
+    path = tmp_path / f"supersession-replay-{branch}"
+    store = harness.open_store(path, None)
+    old_request = harness.make_request(
+        commit_id=f"supersession-replay-{branch}-old", nonce_byte=90
+    )
+    _stage(store, harness, old_request)
+    old = store.atomic_commit(old_request)
+    assert old.certificate_digest is not None
+    if branch == "committed":
+        replay_old_digest = old.certificate_digest
+        proposal = harness.make_request(
+            commit_id="supersession-replay-committed-new",
+            nonce_byte=91,
+            expected_node_version="1",
+            attempt_id="committed-replacement",
+        )
+        _stage(store, harness, proposal)
+        original = store.supersede(
+            SupersessionRequest(old.certificate_digest, proposal)
+        )
+        assert isinstance(original, SupersessionCommitted)
+    elif branch == "denied":
+        replay_old_digest = "A" * 43
+        proposal = harness.make_request(
+            commit_id="supersession-replay-denied-new",
+            nonce_byte=92,
+            expected_node_version="1",
+            attempt_id="denied-replacement",
+        )
+        _stage(store, harness, proposal)
+        original = store.supersede(SupersessionRequest(replay_old_digest, proposal))
+        assert isinstance(original, SupersessionDenied)
+    else:
+        replay_old_digest = old.certificate_digest
+        first_proposal = harness.make_request(
+            commit_id="supersession-replay-conflicted-new",
+            nonce_byte=93,
+            expected_node_version="1",
+            attempt_id="conflicted-replacement",
+        )
+        _stage(store, harness, first_proposal)
+        first = store.supersede(
+            SupersessionRequest(old.certificate_digest, first_proposal)
+        )
+        assert isinstance(first, SupersessionCommitted)
+        proposal = harness.make_request(
+            commit_id=first_proposal.commit_id,
+            nonce_byte=99,
+            workflow_id="workflow-2",
+        )
+        original = store.supersede(
+            SupersessionRequest(old.certificate_digest, proposal)
+        )
+        assert isinstance(original, SupersessionConflicted)
+    terminal = harness.snapshot(store)
+    store = harness.reopen_store(path)
+    replay = store.supersede(SupersessionRequest(replay_old_digest, proposal))
+    assert replay == original
+    assert harness.snapshot(store) == terminal
+
+
+def assert_repeated_supersession_chain_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    path = tmp_path / "repeated-supersession"
+    store = harness.open_store(path, None)
+    a_request = harness.make_request(commit_id="chain-a", nonce_byte=201)
+    _stage(store, harness, a_request)
+    a = store.atomic_commit(a_request)
+    assert a.certificate_digest is not None
+    b_request = harness.make_request(
+        commit_id="chain-b",
+        nonce_byte=202,
+        expected_node_version="1",
+        attempt_id="chain-b-attempt",
+    )
+    _stage(store, harness, b_request)
+    b = store.supersede(SupersessionRequest(a.certificate_digest, b_request))
+    assert isinstance(b, SupersessionCommitted)
+    assert b.commit_result.certificate_digest is not None
+    c_request = harness.make_request(
+        commit_id="chain-c",
+        nonce_byte=203,
+        expected_node_version="2",
+        attempt_id="chain-c-attempt",
+    )
+    _stage(store, harness, c_request)
+    c = store.supersede(
+        SupersessionRequest(b.commit_result.certificate_digest, c_request)
+    )
+    assert isinstance(c, SupersessionCommitted)
+    assert c.commit_result.certificate_digest is not None
+    terminal = harness.snapshot(store)
+    reopened = harness.reopen_store(path)
+    assert harness.snapshot(reopened) == terminal
+    context = reopened.read_commit_context(
+        CommitContextRequest(
+            c_request.subject.workflow_id,
+            c_request.subject.node_id,
+            c_request.subject.attempt_id,
+            c_request.subject.agent_id,
+        )
+    )
+    assert (
+        context.logical_node_state.current_certificate_digest
+        == c.commit_result.certificate_digest
+    )
+
+
+def assert_canonical_request_digest_recomputation_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "canonical-request-digest", None)
+    request = harness.make_request(commit_id="canonical-request-digest", nonce_byte=94)
+    _stage(store, harness, request)
+    committed = store.atomic_commit(request)
+    changed_statement = dict(request.evidence.producer_statement)
+    changed_statement["issued_at_ms"] = str(int(changed_statement["issued_at_ms"]) + 1)
+    modified = replace(
+        request,
+        evidence=replace(request.evidence, producer_statement=changed_statement),
+    )
+    assert modified.request_digest == request.request_digest
+    assert modified.evidence.producer_statement != request.evidence.producer_statement
+    conflicted = store.atomic_commit(modified)
+    assert_non_authoritative_tuple_is_exact(
+        conflicted,
+        commit_id=request.commit_id,
+        outcome=RequestOutcome.CONFLICTED,
+        reason=FailureCode.COMMIT_ID_EQUIVOCATION,
+    )
+    assert conflicted != committed
+
+
+def assert_repeated_single_event_outbox_recovery_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "repeated-single-outbox", None)
+    first_request = harness.make_request(commit_id="outbox-one", nonce_byte=95)
+    second_request = harness.make_request(
+        commit_id="outbox-two", nonce_byte=96, workflow_id="workflow-2"
+    )
+    for request in (first_request, second_request):
+        _stage(store, harness, request)
+        assert store.atomic_commit(request).decision.outcome is RequestOutcome.COMMITTED
+    first = store.recover_outbox(OutboxRecoveryRequest(max_items="1"))
+    second = store.recover_outbox(OutboxRecoveryRequest(max_items="1"))
+    assert first.delivered_count == second.delivered_count == "1"
+    assert first.audit_event_id != second.audit_event_id
+    assert not harness.outbox_event(store, first_request.commit_id).pending
+    assert not harness.outbox_event(store, second_request.commit_id).pending
+
+
+def assert_lifecycle_outcome_orthogonality_conforms(
+    harness: AuthorityStoreHarness, tmp_path: Path
+) -> None:
+    store = harness.open_store(tmp_path / "lifecycle-outcome", None)
+    request = harness.make_request(commit_id="lifecycle-outcome", nonce_byte=97)
+    _stage(store, harness, request)
+    context_request = CommitContextRequest(
+        request.subject.workflow_id,
+        request.subject.node_id,
+        request.subject.attempt_id,
+        request.subject.agent_id,
+    )
+    before = store.read_commit_context(context_request)
+    assert before.candidate_state.lifecycle is CandidateLifecycle.COMMIT_PENDING
+    committed = store.atomic_commit(request)
+    after = store.read_commit_context(context_request)
+    assert committed.decision.outcome is RequestOutcome.COMMITTED
+    assert after.candidate_state.lifecycle is CandidateLifecycle.COMMIT_PENDING
+    assert type(committed.decision.outcome) is not type(after.candidate_state.lifecycle)
+    assert (
+        after.logical_node_state.current_certificate_digest
+        == committed.certificate_digest
+    )
 
 
 def assert_fault_is_atomic(
