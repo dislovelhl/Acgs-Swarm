@@ -1,0 +1,3 @@
+f919446ca5fae99d2297161959e0017250c402e542275a369b55b8281d158721  /home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/experiments/apcc-1/matrix.v1.json
+7d869fd99381cd0ec65a1e9780ddf82b9a0700f11319c371f7b909a60a44fbae  /home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/experiments/apcc-1/raw-result.schema.json
+6c26c7df94b53529f4a37fb1417241f3ec163b1238a012a3c563aaf6a149cfd5  /home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/uv.lock

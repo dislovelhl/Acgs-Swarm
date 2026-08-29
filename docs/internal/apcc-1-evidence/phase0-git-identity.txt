@@ -1,0 +1,5 @@
+/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit
+branch=apcc-1-atomic-proof-carrying-commit
+HEAD=e2e87f9891adf3cea6af6d8a9375e4f40dae11e9
+df30286=df30286be482ece23536abf689f328472a565e69
+upstream=NONE

@@ -45,3 +45,17 @@ codex-default.*.json
 dist_review/
 logs/
 missions/
+
+# Qualification-live runtime databases (JSONL/summaries may be committed)
+experiments/apcc-1/qualification-live/runs/**/*.sqlite3
+experiments/apcc-1/qualification-live/runs/**/*.db
+experiments/apcc-1/qualification-live/runs/**/*.db-wal
+experiments/apcc-1/qualification-live/runs/**/*.db-shm
+experiments/apcc-1/qualification-live/runs/**/*-wal
+experiments/apcc-1/qualification-live/runs/**/*-shm
+experiments/apcc-1/qualification-live/runs/**/.*.apcc-b5/
+experiments/apcc-1/qualification-live/runs/**/.*.apcc-b5.lock
+experiments/apcc-1/qualification-live/runs/**/scenario-db/
+experiments/apcc-1/qualification-live/runs/**/perf-db/
+experiments/apcc-1/qualification-live/runs/**/perf-b6-sqlite/
+experiments/apcc-1/qualification-live/runs/**/b6-sqlite/

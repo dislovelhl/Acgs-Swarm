@@ -1,0 +1,23 @@
+ docs/internal/APCC-1-B2-Postgres-Close.md       |  111 +
+ src/constitutional_swarm/apcc/codec.py          |   43 +
+ src/constitutional_swarm/apcc/gcb_projection.py |  531 ++
+ src/constitutional_swarm/apcc/observation.py    | 1398 ++++
+ src/constitutional_swarm/apcc/ports.py          |   79 +-
+ src/constitutional_swarm/apcc/postgres_store.py | 2752 +++++++-
+ src/constitutional_swarm/apcc/service.py        |    6 +-
+ src/constitutional_swarm/apcc/sqlite_store.py   | 1133 ++--
+ src/constitutional_swarm/authority_child.py     |   74 +-
+ src/constitutional_swarm/authority_isolation.py |  273 +
+ src/constitutional_swarm/authority_observer.py  |  172 +
+ src/constitutional_swarm/authority_service.py   | 2053 +++++-
+ src/constitutional_swarm/governed_commit.py     |    4 +-
+ tests/test_apcc_architecture.py                 |   61 +
+ tests/test_apcc_authority_backend.py            |   91 +
+ tests/test_apcc_authority_service.py            |  745 ++-
+ tests/test_apcc_gcb_projection_contract.py      |   90 +
+ tests/test_apcc_observation.py                  | 2059 ++++++
+ tests/test_apcc_observation_semantics.py        |  441 ++
+ tests/test_apcc_postgres.py                     | 8108 +++++++++++++++++++++--
+ tests/test_apcc_service.py                      |   49 +-
+ tests/test_apcc_sqlite.py                       |   13 +-
+ 22 files changed, 19045 insertions(+), 1241 deletions(-)
