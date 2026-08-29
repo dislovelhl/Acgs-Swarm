@@ -1,0 +1,16 @@
+start=2026-08-29T16:08:42Z
+=== go test ===
+?   	github.com/acgs/apcc-go-verifier/cmd/apcc-verify	[no test files]
+ok  	github.com/acgs/apcc-go-verifier/internal/apcc	(cached)
+ok  	github.com/acgs/apcc-go-verifier/internal/cj1	(cached)
+ok  	github.com/acgs/apcc-go-verifier/internal/cli	(cached)
+go_test_exit=0
+=== gofmt ===
+gofmt_exit=0
+=== go vet ===
+go_vet_exit=0
+=== python go+verifier ===
+..................................................................       [100%]
+66 passed in 1.38s
+pytest_exit=0
+end=2026-08-29T16:08:45Z

@@ -59,3 +59,4 @@ experiments/apcc-1/qualification-live/runs/**/scenario-db/
 experiments/apcc-1/qualification-live/runs/**/perf-db/
 experiments/apcc-1/qualification-live/runs/**/perf-b6-sqlite/
 experiments/apcc-1/qualification-live/runs/**/b6-sqlite/
+experiments/apcc-1/qualification-live/runs/**/MANIFEST.sha256
