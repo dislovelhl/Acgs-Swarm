@@ -1,0 +1,6 @@
+start=2026-08-29T17:55:31Z
+HEAD=86baaf2f431e761a8bfc91f4048bb89e84a342f8
+capabilities []
+exception ScenarioExecutionError
+message B6 execution requires trusted supervisor preflight
+end=2026-08-29T17:55:31Z

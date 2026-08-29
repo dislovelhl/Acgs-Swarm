@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""APCC-1 qualification-live v1 runner.
+"""APCC-1 qualification-live runner.
 
+v1: apcc-1.qualification-live.v1 (1 ms sleep cap; do not reuse for 10/s).
+v2: apcc-1.qualification-live.v2 (sleep until next beat).
 Does not close apcc-1.matrix.v1. Protocol:
 docs/internal/APCC-1-Qualification-Live-Protocol.md
 """
@@ -24,7 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-PROTOCOL_ID = "apcc-1.qualification-live.v1"
+PROTOCOL_ID = "apcc-1.qualification-live.v2"
+PACER = "sleep-until-next-beat"
 SEED = 104729
 PAYLOAD = os.urandom(1024)
 OUTPUT = os.urandom(4096)
@@ -426,6 +429,210 @@ def run_b6_sqlite_negatives(run_dir: Path, git_sha: str) -> dict[str, Any]:
     }
 
 
+def _b6_negative_cases(
+    store: Any,
+    sqlite_tests: Any,
+    RequestOutcome: Any,
+    Signature: Any,
+    ReplayCommitRequest: Any,
+    *,
+    cell: str,
+    commit_prefix: str,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    valid = _unique_request(
+        sqlite_tests,
+        commit_id=f"{commit_prefix}-0001",
+        nonce_index=1,
+        node_id="node-1",
+        result_bytes=OUTPUT,
+    )
+    _advance_candidate(store, valid, OUTPUT)
+    first = store.atomic_commit(valid)
+    records.append(
+        {
+            "cell": cell,
+            "case_id": "valid-first-commit",
+            "outcome": first.decision.outcome.value,
+            "reason": first.decision.reason,
+            "authoritative": first.decision.outcome is RequestOutcome.COMMITTED,
+            "certificate_digest": first.certificate_digest,
+            "certificate_bytes": (
+                len(first.certificate_envelope_bytes)
+                if first.certificate_envelope_bytes is not None
+                else 0
+            ),
+        }
+    )
+    replay = store.atomic_commit(valid)
+    same_envelope = (
+        first.certificate_envelope_bytes is not None
+        and replay.certificate_envelope_bytes == first.certificate_envelope_bytes
+    )
+    replay_via_api = store.replay_commit(
+        ReplayCommitRequest(valid.commit_id, valid.request_digest)
+    )
+    records.append(
+        {
+            "cell": cell,
+            "case_id": "exact-replay",
+            "outcome": replay.decision.outcome.value,
+            "reason": replay.decision.reason,
+            "authoritative": replay.decision.outcome is RequestOutcome.COMMITTED,
+            "same_envelope_bytes": same_envelope,
+            "replay_api_outcome": replay_via_api.decision.outcome.value,
+            "second_authority": (
+                replay.decision.outcome is RequestOutcome.COMMITTED
+                and replay.certificate_digest != first.certificate_digest
+            ),
+        }
+    )
+    conflict = _unique_request(
+        sqlite_tests,
+        commit_id=f"{commit_prefix}-0001",
+        nonce_index=2,
+        node_id="root",
+        result_bytes=OUTPUT + b"x",
+    )
+    try:
+        _advance_candidate(store, conflict, OUTPUT + b"x")
+    except Exception as error:
+        records.append(
+            {
+                "cell": cell,
+                "case_id": "commit-id-equivocation-advance",
+                "error": f"{type(error).__name__}: {error}",
+                "authoritative": False,
+            }
+        )
+    conflicted = store.atomic_commit(conflict)
+    records.append(
+        {
+            "cell": cell,
+            "case_id": "commit-id-equivocation",
+            "outcome": conflicted.decision.outcome.value,
+            "reason": conflicted.decision.reason,
+            "authoritative": conflicted.decision.outcome is RequestOutcome.COMMITTED,
+            "second_authority": conflicted.decision.outcome is RequestOutcome.COMMITTED,
+        }
+    )
+    try:
+        unsigned_base = _unique_request(
+            sqlite_tests,
+            commit_id=f"{commit_prefix}-0002",
+            nonce_index=3,
+            node_id="middle",
+            result_bytes=OUTPUT,
+        )
+        _advance_candidate(store, unsigned_base, OUTPUT)
+        producer = unsigned_base.signatures.producer
+        flipped = (
+            "A" if producer.signature_b64u[0] != "A" else "B"
+        ) + producer.signature_b64u[1:]
+        tampered_sig = Signature(producer.algorithm, producer.key_id, flipped)
+        tampered = replace(
+            unsigned_base,
+            signatures=replace(unsigned_base.signatures, producer=tampered_sig),
+        )
+        denied = store.atomic_commit(tampered)
+        records.append(
+            {
+                "cell": cell,
+                "case_id": "invalid-commit-request",
+                "outcome": denied.decision.outcome.value,
+                "reason": denied.decision.reason,
+                "authoritative": denied.decision.outcome is RequestOutcome.COMMITTED,
+                "construction": "tampered-producer-signature",
+            }
+        )
+    except Exception as error:
+        records.append(
+            {
+                "cell": cell,
+                "case_id": "invalid-commit-request",
+                "outcome": "construction-or-commit-error",
+                "error": f"{type(error).__name__}: {error}",
+                "authoritative": False,
+            }
+        )
+    return records
+
+
+def run_b6_postgres_negatives(run_dir: Path, git_sha: str) -> dict[str, Any]:
+    start = _utc()
+    dsn = os.environ.get("APCC_POSTGRES_DSN")
+    if not dsn:
+        return {
+            "start_utc": start,
+            "end_utc": _utc(),
+            "status": "BLOCKED_MISSING_SERVICE",
+            "reason": "APCC_POSTGRES_DSN unset",
+        }
+    sqlite_tests, RequestOutcome, Signature, ReplayCommitRequest, _ = _b6_helpers()
+    import tests.test_apcc_postgres as pg_tests
+
+    env_gen = pg_tests.postgres_environment()
+    store = None
+    records: list[dict[str, Any]] = []
+    try:
+        env = next(env_gen)
+        harness = pg_tests._harness(env)
+        store = harness.open_store(run_dir / "b6-postgres-marker", None)
+        records = _b6_negative_cases(
+            store,
+            sqlite_tests,
+            RequestOutcome,
+            Signature,
+            ReplayCommitRequest,
+            cell="b6-postgres-negative",
+            commit_prefix="ql-commit-pg",
+        )
+    except Exception as error:
+        return {
+            "start_utc": start,
+            "end_utc": _utc(),
+            "status": "error",
+            "error": f"{type(error).__name__}: {error}",
+            "traceback": traceback.format_exc(limit=12),
+            "git_sha": git_sha,
+            "protocol_id": PROTOCOL_ID,
+        }
+    finally:
+        if store is not None and hasattr(store, "close"):
+            try:
+                store.close()
+            except Exception:
+                pass
+        try:
+            env_gen.close()
+        except Exception:
+            pass
+    out = run_dir / "b6-postgres-negatives.jsonl"
+    for record in records:
+        record.update({"git_sha": git_sha, "protocol_id": PROTOCOL_ID, "seed": SEED})
+        _append(out, record)
+    invalid_authority = sum(
+        1
+        for record in records
+        if record.get("second_authority") is True
+        or (
+            record.get("case_id")
+            in {"commit-id-equivocation", "invalid-commit-request"}
+            and record.get("authoritative") is True
+        )
+    )
+    return {
+        "start_utc": start,
+        "end_utc": _utc(),
+        "status": "LIVE_MEASURED",
+        "store": "postgresql",
+        "artifact": str(out.relative_to(ROOT)),
+        "cases": [record.get("case_id") for record in records],
+        "invalid_authoritative_commits": invalid_authority,
+        "records": records,
+    }
+
+
 def _measure_loop(
     label: str,
     operation: Callable[[], None],
@@ -434,13 +641,14 @@ def _measure_loop(
 ) -> dict[str, Any]:
     samples: list[int] = []
     failures = 0
-    deadline = time.perf_counter() + duration_s
+    t0 = time.perf_counter()
+    deadline = t0 + duration_s
     interval = 1.0 / target_rate
-    next_beat = time.perf_counter()
+    next_beat = t0
     while time.perf_counter() < deadline:
         now = time.perf_counter()
         if now < next_beat:
-            time.sleep(min(next_beat - now, 0.001))
+            time.sleep(next_beat - now)
         started = time.perf_counter_ns()
         try:
             operation()
@@ -451,8 +659,7 @@ def _measure_loop(
         next_beat += interval
         if next_beat < time.perf_counter() - 1:
             next_beat = time.perf_counter()
-    elapsed = max(sum(samples) / 1e9, duration_s * 0.0)
-    wall = duration_s
+    wall = max(time.perf_counter() - t0, 1e-9)
     completed = len(samples) - failures
     return {
         "label": label,
@@ -460,12 +667,15 @@ def _measure_loop(
         "failures": failures,
         "attempted": len(samples),
         "duration_seconds": wall,
-        "ops_per_second": completed / wall if wall else 0.0,
+        "scheduled_duration_seconds": duration_s,
+        "ops_per_second": completed / wall,
         "p50_ns": _percentile(samples, 50),
         "p95_ns": _percentile(samples, 95),
         "p99_ns": _percentile(samples, 99),
         "incomplete_run": completed < MIN_OPS,
         "sample_count": len(samples),
+        "pacer": PACER,
+        "target_rate_enforced": True,
     }
 
 
@@ -475,7 +685,9 @@ def run_performance(run_dir: Path, git_sha: str) -> dict[str, Any]:
     start = _utc()
     b5_blocked = False
 
-    def execute_adapter(baseline_id: str, db: Path) -> Callable[[], None]:
+    def execute_adapter(
+        baseline_id: str, db: Path
+    ) -> tuple[Callable[[], None], Callable[[], None] | None]:
         adapter = create_baseline_adapter(baseline_id, db)
         payload = PAYLOAD
         stimulus = TrialStimulus.control(payload)
@@ -483,7 +695,7 @@ def run_performance(run_dir: Path, git_sha: str) -> dict[str, Any]:
         def op() -> None:
             adapter.execute(stimulus)
 
-        return op
+        return op, getattr(adapter, "close", None)
 
     for baseline_id in ("B0", "B1", "B2", "B3", "B4", "B5"):
         runs: list[dict[str, Any]] = []
@@ -525,7 +737,7 @@ def run_performance(run_dir: Path, git_sha: str) -> dict[str, Any]:
                             adapter.execute(stimulus)
 
                     else:
-                        op = execute_adapter(baseline_id, db)
+                        op, closer = execute_adapter(baseline_id, db)
                     result = _measure_loop(
                         f"{baseline_id}-{phase}-{index}",
                         op,
@@ -583,6 +795,7 @@ def run_performance(run_dir: Path, git_sha: str) -> dict[str, Any]:
                 "median_p95_ns": int(statistics.median(p95)) if p95 else None,
                 "incomplete_runs": sum(1 for item in runs if item["incomplete_run"]),
                 "status": "LIVE_MEASURED",
+                "pacer": PACER,
             }
 
     sqlite_tests, RequestOutcome, _Signature, _Replay, SQLiteAuthorityStore = (
@@ -715,6 +928,7 @@ def run_performance(run_dir: Path, git_sha: str) -> dict[str, Any]:
             "incomplete_runs": sum(1 for item in b6_runs if item["incomplete_run"]),
             "status": "LIVE_MEASURED",
             "workload": "QL-INDEP-NODE",
+            "pacer": PACER,
         }
     else:
         summary["baselines"]["B6"] = {"status": "error-or-empty"}
@@ -728,13 +942,14 @@ def run_performance(run_dir: Path, git_sha: str) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="APCC-1 qualification-live v1")
+    parser = argparse.ArgumentParser(description="APCC-1 qualification-live v2")
     parser.add_argument("--scenarios", action="store_true")
     parser.add_argument("--b6-sqlite", action="store_true")
+    parser.add_argument("--b6-postgres", action="store_true")
     parser.add_argument("--performance", action="store_true")
     parser.add_argument("--run-id", default="")
     args = parser.parse_args()
-    selected = args.scenarios or args.b6_sqlite or args.performance
+    selected = args.scenarios or args.b6_sqlite or args.b6_postgres or args.performance
     if not selected:
         args.scenarios = args.b6_sqlite = args.performance = True
     git_sha = _git_sha()
@@ -759,6 +974,8 @@ def main() -> int:
         report["scenarios"] = run_scenarios(run_dir, git_sha)
     if args.b6_sqlite:
         report["b6_sqlite_negatives"] = run_b6_sqlite_negatives(run_dir, git_sha)
+    if args.b6_postgres:
+        report["b6_postgres_negatives"] = run_b6_postgres_negatives(run_dir, git_sha)
     if args.performance:
         report["performance"] = run_performance(run_dir, git_sha)
     report["end_utc"] = _utc()
