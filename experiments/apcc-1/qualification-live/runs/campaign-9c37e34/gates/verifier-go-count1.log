@@ -1,0 +1,7 @@
+start=2026-08-29T16:16:44Z
+?   	github.com/acgs/apcc-go-verifier/cmd/apcc-verify	[no test files]
+ok  	github.com/acgs/apcc-go-verifier/internal/apcc	0.022s
+ok  	github.com/acgs/apcc-go-verifier/internal/cj1	0.002s
+ok  	github.com/acgs/apcc-go-verifier/internal/cli	0.109s
+exit=0
+end=2026-08-29T16:16:44Z

@@ -1,0 +1,9 @@
+start=2026-08-29T17:56:14Z
+HEAD=3d4d9dd4bf8b6f6071fd823e17fb96110c11ccd1
+{
+  "run_id": "campaign-3d4d9dd-perf",
+  "git_sha": "3d4d9dd4bf8b6f6071fd823e17fb96110c11ccd1",
+  "summary": "/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/experiments/apcc-1/qualification-live/runs/campaign-3d4d9dd-perf/summary.json"
+}
+exit=0
+end=2026-08-29T18:42:11Z

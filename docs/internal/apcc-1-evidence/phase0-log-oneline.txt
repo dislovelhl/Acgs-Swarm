@@ -1,0 +1,6 @@
+e2e87f9 (HEAD -> apcc-1-atomic-proof-carrying-commit) feat(runtime): isolate APCC authority process roles
+99b9081 feat(storage): add GCB projection contract for APCC commits
+8bea7c4 feat(storage): harden PostgreSQL APCC catalog admission
+6497a57 feat(storage): share APCC authority-store core with PostgreSQL
+b1ab1cd feat(protocol): add APCC authority observation records
+65921c7 docs(research): record APCC B2 PostgreSQL close evidence

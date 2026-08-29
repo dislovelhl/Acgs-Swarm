@@ -19,10 +19,16 @@ EXTRAS ?= dev transport
 SYNC_FLAGS ?= --no-sources $(addprefix --extra ,$(EXTRAS))
 # Test selection: skip slow/network/research/bittensor by default (matches CI).
 TEST_MARKERS ?= not slow and not benchmark and not e2e and not research and not bittensor
-PYTEST = $(UV) run --no-sync pytest tests/ --import-mode=importlib
+# Live PostgreSQL contracts run in CI job test-postgres (requires APCC_POSTGRES_DSN
+# + [postgres]). Default verify must not import psycopg via that frozen suite.
+TEST_IGNORE ?= --ignore=tests/test_apcc_postgres.py
+PYTEST = $(UV) run --no-sync pytest tests/ --import-mode=importlib $(TEST_IGNORE)
+TLA2TOOLS_JAR ?=
+TLC_TIMEOUT ?= 180
+TLC_LOG ?= tlc-gcb-witness.log
 
 .DEFAULT_GOAL := help
-.PHONY: help setup dev test test-all lint format typecheck typecheck-coverage smoke verify verify-wheel agent-check agent-self-evolve clean
+.PHONY: help setup dev test test-all lint format typecheck typecheck-coverage smoke verify verify-wheel agent-check agent-self-evolve tla-gcb-coverage clean
 
 help: ## Show this help
 	@echo "constitutional-swarm — make targets:"
@@ -66,6 +72,11 @@ typecheck-coverage: ## Assert every optional extra is type-checked or excepted (
 
 agent-self-evolve: ## Build offline self-evolution harnesses for every repo agent
 	$(UV) run --no-sync acgs-agent-self-evolve --json --write-report .omx/state/agent-self-evolve-report.json --fail-under 1.0
+
+tla-gcb-coverage: ## Prove the exact GCB non-vacuity witness with pinned TLC v1.7.4
+	@test -n "$(TLA2TOOLS_JAR)" || { echo "ERROR: set TLA2TOOLS_JAR to the pinned TLC v1.7.4 jar"; exit 2; }
+	$(UV) run --no-sync python scripts/run_tlc_expected_witness.py \
+		--tlc-jar "$(TLA2TOOLS_JAR)" --timeout "$(TLC_TIMEOUT)" --log "$(TLC_LOG)"
 
 verify: lint typecheck agent-check typecheck-coverage smoke test ## Full local gate: lint -> typecheck -> registry/doc + coverage check -> smoke -> tests
 	@echo "OK: verify passed."

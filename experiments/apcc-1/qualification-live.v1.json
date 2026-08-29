@@ -1,0 +1,34 @@
+{
+  "protocol_id": "apcc-1.qualification-live.v1",
+  "frozen_at_utc": "2026-08-29T16:00:00Z",
+  "does_not_close": "apcc-1.matrix.v1",
+  "seeds": [104729],
+  "scenario_variants": "default_scenario_catalog",
+  "scenario_baselines": ["B0", "B1", "B2", "B3", "B4", "B5", "B6"],
+  "b6_public_adapter": "BLOCKED_MISSING_DEPENDENCY",
+  "b6_sqlite_negatives": [
+    "valid-first-commit",
+    "exact-replay",
+    "commit-id-equivocation",
+    "invalid-commit-request"
+  ],
+  "performance": {
+    "payload_pair": [1024, 4096],
+    "target_rate_per_second": 10,
+    "warmup_runs": 3,
+    "measured_runs": 10,
+    "run_duration_seconds": 30,
+    "minimum_completed_operations": 10000,
+    "b6_sqlite_workload": "QL-INDEP-NODE",
+    "b6_sqlite_nodes": 400,
+    "b6_postgres_performance": "BLOCKED_MISSING_DEPENDENCY",
+    "bootstrap_resamples": 0
+  },
+  "thresholds": {
+    "invalid_b6_authoritative_commits": 0,
+    "flag_p95_latency_overhead_vs_b5": 0.25,
+    "flag_throughput_loss_vs_b5": 0.25,
+    "flag_median_certificate_kib_vs_b5": 4
+  },
+  "empirical_ablations": "BLOCKED_MISSING_DEPENDENCY"
+}

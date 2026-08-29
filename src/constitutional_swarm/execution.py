@@ -23,6 +23,11 @@ class ExecutionStatus(Enum):
     READY = "ready"
     CLAIMED = "claimed"
     RUNNING = "running"
+    RESULT_PRODUCED = "result_produced"
+    GOVERNED_COMMITTED = "governed_committed"
+    DENIED = "denied"
+    REVOKED = "revoked"
+    SUPERSEDED = "superseded"
     COMPLETED = "completed"
     FAILED = "failed"
     REJECTED = "rejected"
@@ -35,6 +40,7 @@ class ContractStatus(Enum):
     PENDING = "pending"
     CLAIMED = "claimed"
     IN_PROGRESS = "in_progress"
+    REQUIRES_REVALIDATION = "requires_revalidation"
     COMPLETED = "completed"
     FAILED = "failed"
     REJECTED = "rejected"
@@ -45,6 +51,7 @@ _CONTRACT_TO_EXECUTION: dict[ContractStatus, ExecutionStatus] = {
     ContractStatus.PENDING: ExecutionStatus.READY,
     ContractStatus.CLAIMED: ExecutionStatus.CLAIMED,
     ContractStatus.IN_PROGRESS: ExecutionStatus.RUNNING,
+    ContractStatus.REQUIRES_REVALIDATION: ExecutionStatus.RESULT_PRODUCED,
     ContractStatus.COMPLETED: ExecutionStatus.COMPLETED,
     ContractStatus.FAILED: ExecutionStatus.FAILED,
     ContractStatus.REJECTED: ExecutionStatus.REJECTED,
@@ -56,7 +63,12 @@ _EXECUTION_TO_CONTRACT: dict[ExecutionStatus, ContractStatus] = {
     ExecutionStatus.READY: ContractStatus.PENDING,
     ExecutionStatus.CLAIMED: ContractStatus.CLAIMED,
     ExecutionStatus.RUNNING: ContractStatus.IN_PROGRESS,
-    ExecutionStatus.COMPLETED: ContractStatus.COMPLETED,
+    ExecutionStatus.RESULT_PRODUCED: ContractStatus.IN_PROGRESS,
+    ExecutionStatus.GOVERNED_COMMITTED: ContractStatus.COMPLETED,
+    ExecutionStatus.DENIED: ContractStatus.REJECTED,
+    ExecutionStatus.REVOKED: ContractStatus.REJECTED,
+    ExecutionStatus.SUPERSEDED: ContractStatus.REJECTED,
+    ExecutionStatus.COMPLETED: ContractStatus.REQUIRES_REVALIDATION,
     ExecutionStatus.FAILED: ContractStatus.FAILED,
     ExecutionStatus.REJECTED: ContractStatus.REJECTED,
     ExecutionStatus.EXPIRED: ContractStatus.EXPIRED,
@@ -68,7 +80,9 @@ def contract_status_from_execution(status: ExecutionStatus) -> ContractStatus:
     try:
         return _EXECUTION_TO_CONTRACT[status]
     except KeyError as exc:
-        raise ValueError(f"Execution status {status.value} has no receipt mapping") from exc
+        raise ValueError(
+            f"Execution status {status.value} has no receipt mapping"
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,12 +121,12 @@ class WorkReceipt:
         )
 
     def complete(self, result: Any) -> WorkReceipt:
-        """Return a completed copy of this receipt."""
+        """Return a non-authoritative result that requires governed commit."""
         if self.status not in (ContractStatus.CLAIMED, ContractStatus.IN_PROGRESS):
             raise ValueError(f"Cannot complete receipt in state {self.status.value}")
         return replace(
             self,
-            status=ContractStatus.COMPLETED,
+            status=ContractStatus.REQUIRES_REVALIDATION,
             completed_at=time.time(),
             result=result,
             error=None,

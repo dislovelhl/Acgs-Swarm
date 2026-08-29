@@ -16,13 +16,13 @@ Organized by component:
 
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
 from acgs_lite import ConstitutionalViolationError
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from constitutional_swarm.artifact import Artifact, ArtifactStore
 from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.compiler import DAGCompiler, GoalSpec
@@ -33,7 +33,70 @@ from constitutional_swarm.execution import (
     WorkReceipt,
     contract_status_from_execution,
 )
+from constitutional_swarm.governed_commit import (
+    GovernanceBypassDenied,
+    sign_attempt_authorization,
+    sign_governed_receipt,
+)
 from constitutional_swarm.swarm import SwarmExecutor, TaskDAG, TaskNode
+from tests.gcb_apcc_support import (
+    InProcessExecutionClientHarness,
+    TrustedAuthorityLifecycleHarness,
+    compose_test_executor,
+    provision_executor_workflow,
+    typed_bootstrap,
+)
+
+
+def _configured_executor(tmp_path, registry, dag, store=None, predeclared_keys=None):
+    keys = {agent_id: Ed25519PrivateKey.generate() for agent_id in registry.agents}
+    keys.update(predeclared_keys or {})
+    bootstrap = typed_bootstrap(policy_versions=(("1", 1),), producers=keys)
+    boundary = bootstrap.provision(tmp_path / f"{dag.dag_id}.sqlite3")
+    provision_executor_workflow(boundary, dag, policy_version="1")
+    for agent_id in registry.agents:
+        private_key = keys[agent_id]
+        boundary.register_agent(
+            workflow_id=dag.dag_id,
+            agent_id=agent_id,
+            public_key=private_key.public_key(),
+            capabilities=tuple(
+                capability.name
+                for capability in registry.get_agent_capabilities(agent_id)
+            ),
+        )
+    resolved_store = store if store is not None else ArtifactStore()
+    executor = compose_test_executor(
+        registry,
+        resolved_store,
+        InProcessExecutionClientHarness(boundary),
+        policy_version="1",
+    )
+    executor._test_authority_lifecycle = TrustedAuthorityLifecycleHarness(
+        boundary, dag.dag_id, resolved_store
+    )
+    executor.load_dag(dag)
+    return executor, boundary, keys
+
+
+def _commit(executor, boundary, private_key, node_id, artifact) -> None:
+    payload = executor.produce_result(node_id, artifact)
+    decision = executor.commit(
+        boundary.build_request(sign_governed_receipt(payload, private_key))
+    )
+    assert decision.reason == "verified"
+    executor._test_authority_lifecycle.dispatch_after_commit()
+
+
+def _claim(executor, private_key, node_id, agent_id):
+    return executor.claim(
+        node_id,
+        agent_id,
+        sign_attempt_authorization(
+            executor.prepare_claim(node_id, agent_id), private_key
+        ),
+    )
+
 
 # ---------------------------------------------------------------------------
 # 1. TaskDAG — immutability, ready_nodes, error paths, wide parallelism
@@ -72,23 +135,22 @@ class TestTaskDAGImmutability:
             .mark_ready()
             .claim_node("A", "agent-01")
         )
-        dag2 = dag1.complete_node("A", "art-A")
+        with pytest.raises(GovernanceBypassDenied):
+            dag1.complete_node("A", "art-A")
         assert dag1.nodes["A"].status == ExecutionStatus.CLAIMED
-        assert dag2.nodes["A"].status == ExecutionStatus.COMPLETED
-        assert dag2.nodes["A"].artifact_id == "art-A"
 
     def test_chain_of_operations_preserves_all_intermediates(self) -> None:
         dag0 = TaskDAG(goal="chain")
         dag1 = dag0.add_node(TaskNode(node_id="X", title="X"))
         dag2 = dag1.mark_ready()
         dag3 = dag2.claim_node("X", "a1")
-        dag4 = dag3.complete_node("X", "art-X")
+        with pytest.raises(GovernanceBypassDenied):
+            dag3.complete_node("X", "art-X")
 
         assert len(dag0.nodes) == 0
         assert dag1.nodes["X"].status == ExecutionStatus.BLOCKED
         assert dag2.nodes["X"].status == ExecutionStatus.READY
         assert dag3.nodes["X"].status == ExecutionStatus.CLAIMED
-        assert dag4.nodes["X"].status == ExecutionStatus.COMPLETED
 
 
 class TestTaskDAGReadyNodes:
@@ -119,17 +181,23 @@ class TestTaskDAGReadyNodes:
         # Can't mark_ready — circular. Test ready_nodes on the blocked DAG.
         # Actually this would raise KeyError on mark_ready. Test without mark_ready:
         blocked_dag = TaskDAG(goal="test")
-        blocked_dag = blocked_dag.add_node(TaskNode(node_id="X", title="X", depends_on=("Y",)))
+        blocked_dag = blocked_dag.add_node(
+            TaskNode(node_id="X", title="X", depends_on=("Y",))
+        )
         blocked_dag = blocked_dag.add_node(TaskNode(node_id="Y", title="Y"))
         # Y has no deps but is BLOCKED. ready_nodes scans for BLOCKED nodes with
         # satisfied deps — but ready_nodes only works AFTER mark_ready
         marked = blocked_dag.mark_ready()
         ready = marked.ready_nodes()
         # Y should be ready (no deps), X should still be blocked
-        assert {n.node_id for n in ready} == set()  # ready_nodes only finds BLOCKED nodes
+        assert {
+            n.node_id for n in ready
+        } == set()  # ready_nodes only finds BLOCKED nodes
         # Actually ready_nodes returns BLOCKED nodes with satisfied deps
         # After mark_ready, Y is already READY, not BLOCKED
-        ready_nodes = [n for n in marked.nodes.values() if n.status == ExecutionStatus.READY]
+        ready_nodes = [
+            n for n in marked.nodes.values() if n.status == ExecutionStatus.READY
+        ]
         assert {n.node_id for n in ready_nodes} == {"Y"}
 
 
@@ -137,7 +205,9 @@ class TestTaskDAGErrorPaths:
     """Test error conditions in DAG operations."""
 
     def test_claim_nonexistent_node_raises(self) -> None:
-        dag = TaskDAG(goal="test").add_node(TaskNode(node_id="A", title="A")).mark_ready()
+        dag = (
+            TaskDAG(goal="test").add_node(TaskNode(node_id="A", title="A")).mark_ready()
+        )
         with pytest.raises(KeyError, match="ghost"):
             dag.claim_node("ghost", "agent-01")
 
@@ -150,13 +220,15 @@ class TestTaskDAGErrorPaths:
             dag.claim_node("B", "agent-01")
 
     def test_complete_unclaimed_node_raises(self) -> None:
-        dag = TaskDAG(goal="test").add_node(TaskNode(node_id="A", title="A")).mark_ready()
-        with pytest.raises(ValueError, match="not claimed"):
+        dag = (
+            TaskDAG(goal="test").add_node(TaskNode(node_id="A", title="A")).mark_ready()
+        )
+        with pytest.raises(GovernanceBypassDenied):
             dag.complete_node("A", "art-A")
 
     def test_complete_nonexistent_node_raises(self) -> None:
         dag = TaskDAG(goal="test")
-        with pytest.raises(KeyError, match="ghost"):
+        with pytest.raises(GovernanceBypassDenied):
             dag.complete_node("ghost", "art-X")
 
     def test_double_claim_raises(self) -> None:
@@ -188,9 +260,13 @@ class TestTaskDAGWideParallelism:
         assert len(ready) == 1
 
         # Complete root → all 100 children become ready
-        dag = dag.claim_node("root", "a1").complete_node("root", "art-root").mark_ready()
-        ready = [n for n in dag.nodes.values() if n.status == ExecutionStatus.READY]
-        assert len(ready) == 100
+        dag = dag.claim_node("root", "a1")
+        with pytest.raises(GovernanceBypassDenied):
+            dag.complete_node("root", "art-root")
+        assert all(
+            dag.nodes[f"child-{i}"].status == ExecutionStatus.BLOCKED
+            for i in range(100)
+        )
 
     def test_fan_in_100_nodes(self) -> None:
         """100 independent nodes all feed into a single sink."""
@@ -210,36 +286,27 @@ class TestTaskDAGWideParallelism:
         ready = [n for n in dag.nodes.values() if n.status == ExecutionStatus.READY]
         assert len(ready) == 100
 
-        # Complete 99 of them — sink still blocked
-        for i in range(99):
-            dag = dag.claim_node(f"src-{i}", "a1").complete_node(f"src-{i}", f"art-{i}")
-        dag = dag.mark_ready()
+        # Direct completion is denied, so the fan-in sink cannot unlock.
+        with pytest.raises(GovernanceBypassDenied):
+            dag.claim_node("src-0", "a1").complete_node("src-0", "art-0")
         sink = dag.nodes["sink"]
         assert sink.status == ExecutionStatus.BLOCKED
-
-        # Complete the last one → sink becomes ready
-        dag = dag.claim_node("src-99", "a1").complete_node("src-99", "art-99").mark_ready()
-        assert dag.nodes["sink"].status == ExecutionStatus.READY
 
     def test_diamond_with_priority(self) -> None:
         """Diamond DAG with different priorities — highest priority first."""
         dag = TaskDAG(goal="priority")
         dag = dag.add_node(TaskNode(node_id="A", title="A"))
-        dag = dag.add_node(TaskNode(node_id="B", title="B", depends_on=("A",), priority=10))
-        dag = dag.add_node(TaskNode(node_id="C", title="C", depends_on=("A",), priority=1))
+        dag = dag.add_node(
+            TaskNode(node_id="B", title="B", depends_on=("A",), priority=10)
+        )
+        dag = dag.add_node(
+            TaskNode(node_id="C", title="C", depends_on=("A",), priority=1)
+        )
         dag = dag.add_node(TaskNode(node_id="D", title="D", depends_on=("B", "C")))
-        dag = dag.mark_ready().claim_node("A", "a1").complete_node("A", "x").mark_ready()
-
-        # Both B and C are ready — verify priority ordering via SwarmExecutor
-        registry = CapabilityRegistry()
-        registry.register("agent", [Capability(name="work", domain="")])
-        store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-        executor.load_dag(dag)
-        tasks = executor.available_tasks("agent")
-        # Highest priority first
-        assert tasks[0].node_id == "B"
-        assert tasks[0].priority == 10
+        dag = dag.mark_ready().claim_node("A", "a1")
+        with pytest.raises(GovernanceBypassDenied):
+            dag.complete_node("A", "x")
+        assert dag.nodes["B"].status == ExecutionStatus.BLOCKED
 
 
 # ---------------------------------------------------------------------------
@@ -271,15 +338,29 @@ class TestArtifactStoreIndexing:
         store = ArtifactStore()
         store.publish(
             Artifact(
-                artifact_id="a1", task_id="t1", agent_id="alice", content_type="t", content="x"
+                artifact_id="a1",
+                task_id="t1",
+                agent_id="alice",
+                content_type="t",
+                content="x",
             )
         )
         store.publish(
-            Artifact(artifact_id="a2", task_id="t2", agent_id="bob", content_type="t", content="y")
+            Artifact(
+                artifact_id="a2",
+                task_id="t2",
+                agent_id="bob",
+                content_type="t",
+                content="y",
+            )
         )
         store.publish(
             Artifact(
-                artifact_id="a3", task_id="t3", agent_id="alice", content_type="t", content="z"
+                artifact_id="a3",
+                task_id="t3",
+                agent_id="alice",
+                content_type="t",
+                content="z",
             )
         )
         alice_arts = store.get_by_agent("alice")
@@ -290,12 +371,20 @@ class TestArtifactStoreIndexing:
         store = ArtifactStore()
         store.publish(
             Artifact(
-                artifact_id="a1", task_id="task-X", agent_id="a", content_type="t", content="x"
+                artifact_id="a1",
+                task_id="task-X",
+                agent_id="a",
+                content_type="t",
+                content="x",
             )
         )
         store.publish(
             Artifact(
-                artifact_id="a2", task_id="task-X", agent_id="b", content_type="t", content="y"
+                artifact_id="a2",
+                task_id="task-X",
+                agent_id="b",
+                content_type="t",
+                content="y",
             )
         )
         arts = store.get_by_task("task-X")
@@ -352,9 +441,27 @@ class TestArtifactIntegrity:
             agent_id="ag1",
             content_type="text",
             content="hello world",
+            timestamp=1.0,
         )
-        expected = hashlib.sha256(b"hello world").hexdigest()[:32]
-        assert art.content_hash == expected
+        same = Artifact(
+            artifact_id="a1",
+            task_id="t1",
+            agent_id="ag1",
+            content_type="text",
+            content="hello world",
+            timestamp=1.0,
+        )
+        changed_metadata = Artifact(
+            artifact_id="a1",
+            task_id="t1",
+            agent_id="ag1",
+            content_type="text",
+            content="hello world",
+            timestamp=1.0,
+            metadata={"untrusted": True},
+        )
+        assert art.content_hash == same.content_hash
+        assert art.content_hash != changed_metadata.content_hash
 
     def test_verify_integrity_returns_false_for_unknown(self) -> None:
         store = ArtifactStore()
@@ -391,12 +498,20 @@ class TestArtifactStoreWatchers:
         store.watch("task-X", lambda a: received.append(a.artifact_id))
         store.publish(
             Artifact(
-                artifact_id="a1", task_id="task-X", agent_id="ag1", content_type="t", content="x"
+                artifact_id="a1",
+                task_id="task-X",
+                agent_id="ag1",
+                content_type="t",
+                content="x",
             )
         )
         store.publish(
             Artifact(
-                artifact_id="a2", task_id="task-Y", agent_id="ag1", content_type="t", content="y"
+                artifact_id="a2",
+                task_id="task-Y",
+                agent_id="ag1",
+                content_type="t",
+                content="y",
             )
         )
         assert received == ["a1"]
@@ -492,7 +607,9 @@ class TestCapabilityRegistryAdvanced:
     def test_find_best_prefer_cheap(self) -> None:
         reg = CapabilityRegistry()
         reg.register("cheap", [Capability(name="work", domain="d", cost_per_task=0.01)])
-        reg.register("expensive", [Capability(name="work", domain="d", cost_per_task=1.00)])
+        reg.register(
+            "expensive", [Capability(name="work", domain="d", cost_per_task=1.00)]
+        )
         best = reg.find_best("work", domain="d", prefer_cheap=True)
         assert best is not None
         assert best[0] == "cheap"
@@ -525,20 +642,21 @@ class TestCapabilityRegistryAdvanced:
 class TestSwarmExecutorMACIEnforcement:
     """Test that submit() enforces agent == claimant."""
 
-    def test_wrong_agent_submit_raises_permission_error(self) -> None:
+    def test_wrong_agent_submit_raises_permission_error(self, tmp_path) -> None:
         registry = CapabilityRegistry()
         registry.register("agent-01", [Capability(name="work", domain="d")])
         registry.register("agent-02", [Capability(name="work", domain="d")])
-        store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-
-        dag = TaskDAG(goal="test").add_node(TaskNode(node_id="A", title="A", domain="d"))
-        executor.load_dag(dag)
-        executor.claim("A", "agent-01")
+        dag = TaskDAG(goal="test").add_node(
+            TaskNode(node_id="A", title="A", domain="d")
+        )
+        executor, _boundary, keys = _configured_executor(tmp_path, registry, dag)
+        _claim(executor, keys["agent-01"], "A", "agent-01")
 
         # agent-02 tries to submit for agent-01's claimed task
-        with pytest.raises(PermissionError, match="agent-02"):
-            executor.submit(
+        with pytest.raises(
+            GovernanceBypassDenied, match="stale_or_mismatched_attempt_agent_id"
+        ):
+            executor.produce_result(
                 "A",
                 Artifact(
                     artifact_id="art-A",
@@ -549,16 +667,18 @@ class TestSwarmExecutorMACIEnforcement:
                 ),
             )
 
-    def test_correct_agent_submit_succeeds(self) -> None:
+    def test_correct_agent_submit_succeeds(self, tmp_path) -> None:
         registry = CapabilityRegistry()
         registry.register("agent-01", [Capability(name="work", domain="d")])
-        store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-
-        dag = TaskDAG(goal="test").add_node(TaskNode(node_id="A", title="A", domain="d"))
-        executor.load_dag(dag)
-        executor.claim("A", "agent-01")
-        executor.submit(
+        dag = TaskDAG(goal="test").add_node(
+            TaskNode(node_id="A", title="A", domain="d")
+        )
+        executor, boundary, keys = _configured_executor(tmp_path, registry, dag)
+        _claim(executor, keys["agent-01"], "A", "agent-01")
+        _commit(
+            executor,
+            boundary,
+            keys["agent-01"],
             "A",
             Artifact(
                 artifact_id="art-A",
@@ -582,8 +702,12 @@ class TestSwarmExecutorPriority:
 
         dag = TaskDAG(goal="priority")
         dag = dag.add_node(TaskNode(node_id="low", title="Low", domain="d", priority=1))
-        dag = dag.add_node(TaskNode(node_id="high", title="High", domain="d", priority=100))
-        dag = dag.add_node(TaskNode(node_id="mid", title="Mid", domain="d", priority=50))
+        dag = dag.add_node(
+            TaskNode(node_id="high", title="High", domain="d", priority=100)
+        )
+        dag = dag.add_node(
+            TaskNode(node_id="mid", title="Mid", domain="d", priority=50)
+        )
         executor.load_dag(dag)
 
         tasks = executor.available_tasks("agent")
@@ -616,10 +740,16 @@ class TestSwarmExecutorEmptyDAG:
 
     def test_submit_no_dag_raises(self) -> None:
         executor = SwarmExecutor(CapabilityRegistry(), ArtifactStore())
-        with pytest.raises(RuntimeError, match="No DAG"):
+        with pytest.raises(GovernanceBypassDenied, match="stage and commit"):
             executor.submit(
                 "A",
-                Artifact(artifact_id="x", task_id="A", agent_id="a", content_type="t", content="c"),
+                Artifact(
+                    artifact_id="x",
+                    task_id="A",
+                    agent_id="a",
+                    content_type="t",
+                    content="c",
+                ),
             )
 
 
@@ -647,7 +777,10 @@ class TestSwarmExecutorCapabilityFiltering:
         )
         dag = dag.add_node(
             TaskNode(
-                node_id="F", title="Frontend", domain="frontend", required_capabilities=("react",)
+                node_id="F",
+                title="Frontend",
+                domain="frontend",
+                required_capabilities=("react",),
             )
         )
         executor.load_dag(dag)
@@ -697,25 +830,24 @@ class TestSwarmExecutorCapabilityFiltering:
 class TestSwarmExecutorConcurrency:
     """Test thread-safety of the executor."""
 
-    def test_concurrent_claims_no_double_claim(self) -> None:
+    def test_concurrent_claims_no_double_claim(self, tmp_path) -> None:
         """Two threads race to claim the same task — only one succeeds."""
         registry = CapabilityRegistry()
         for i in range(2):
             registry.register(f"agent-{i}", [Capability(name="work", domain="d")])
-        store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-
-        dag = TaskDAG(goal="race").add_node(TaskNode(node_id="A", title="A", domain="d"))
-        executor.load_dag(dag)
+        dag = TaskDAG(goal="race").add_node(
+            TaskNode(node_id="A", title="A", domain="d")
+        )
+        executor, _boundary, keys = _configured_executor(tmp_path, registry, dag)
 
         results: list[str] = []
         errors: list[Exception] = []
 
         def try_claim(agent_id: str) -> None:
             try:
-                executor.claim("A", agent_id)
+                _claim(executor, keys[agent_id], "A", agent_id)
                 results.append(agent_id)
-            except (ValueError, KeyError) as e:
+            except (ValueError, KeyError, GovernanceBypassDenied) as e:
                 errors.append(e)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -726,21 +858,20 @@ class TestSwarmExecutorConcurrency:
         assert len(results) == 1  # exactly one agent claimed
         # The other got an error (already claimed)
 
-    def test_concurrent_submit_and_claim_pipeline(self) -> None:
+    def test_concurrent_submit_and_claim_pipeline(self, tmp_path) -> None:
         """10 agents concurrently process a 10-node linear chain."""
         registry = CapabilityRegistry()
         for i in range(10):
             registry.register(f"a-{i}", [Capability(name="work", domain="d")])
-        store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-
         dag = TaskDAG(goal="chain")
         for i in range(10):
             deps = (f"node-{i - 1}",) if i > 0 else ()
             dag = dag.add_node(
-                TaskNode(node_id=f"node-{i}", title=f"N{i}", domain="d", depends_on=deps)
+                TaskNode(
+                    node_id=f"node-{i}", title=f"N{i}", domain="d", depends_on=deps
+                )
             )
-        executor.load_dag(dag)
+        executor, boundary, keys = _configured_executor(tmp_path, registry, dag)
 
         # Process sequentially but verify thread-safety
         for i in range(10):
@@ -748,8 +879,11 @@ class TestSwarmExecutorConcurrency:
             tasks = executor.available_tasks(agent)
             assert len(tasks) >= 1
             task = tasks[0]
-            executor.claim(task.node_id, agent)
-            executor.submit(
+            _claim(executor, keys[agent], task.node_id, agent)
+            _commit(
+                executor,
+                boundary,
+                keys[agent],
                 task.node_id,
                 Artifact(
                     artifact_id=f"art-{task.node_id}",
@@ -762,7 +896,7 @@ class TestSwarmExecutorConcurrency:
             )
 
         assert executor.is_complete
-        assert store.count == 10
+        assert executor._store.count == 10
 
 
 # ---------------------------------------------------------------------------
@@ -807,12 +941,30 @@ class TestStatusMappings:
             assert isinstance(result, ContractStatus)
 
     def test_specific_mappings(self) -> None:
-        assert contract_status_from_execution(ExecutionStatus.BLOCKED) == ContractStatus.PENDING
-        assert contract_status_from_execution(ExecutionStatus.READY) == ContractStatus.PENDING
-        assert contract_status_from_execution(ExecutionStatus.CLAIMED) == ContractStatus.CLAIMED
-        assert contract_status_from_execution(ExecutionStatus.RUNNING) == ContractStatus.IN_PROGRESS
-        assert contract_status_from_execution(ExecutionStatus.COMPLETED) == ContractStatus.COMPLETED
-        assert contract_status_from_execution(ExecutionStatus.FAILED) == ContractStatus.FAILED
+        assert (
+            contract_status_from_execution(ExecutionStatus.BLOCKED)
+            == ContractStatus.PENDING
+        )
+        assert (
+            contract_status_from_execution(ExecutionStatus.READY)
+            == ContractStatus.PENDING
+        )
+        assert (
+            contract_status_from_execution(ExecutionStatus.CLAIMED)
+            == ContractStatus.CLAIMED
+        )
+        assert (
+            contract_status_from_execution(ExecutionStatus.RUNNING)
+            == ContractStatus.IN_PROGRESS
+        )
+        assert (
+            contract_status_from_execution(ExecutionStatus.COMPLETED)
+            == ContractStatus.REQUIRES_REVALIDATION
+        )
+        assert (
+            contract_status_from_execution(ExecutionStatus.FAILED)
+            == ContractStatus.FAILED
+        )
 
     def test_work_receipt_execution_status_property(self) -> None:
         r = WorkReceipt(title="T")
@@ -820,7 +972,7 @@ class TestStatusMappings:
         claimed = r.claim("a1")
         assert claimed.execution_status == ExecutionStatus.CLAIMED
         completed = claimed.complete("done")
-        assert completed.execution_status == ExecutionStatus.COMPLETED
+        assert completed.execution_status == ExecutionStatus.RESULT_PRODUCED
         failed = r.claim("a1").fail("err")
         assert failed.execution_status == ExecutionStatus.FAILED
 
@@ -880,7 +1032,9 @@ class TestDAGCompilerEdgeCases:
 
     def test_wide_flat_dag_no_dependencies(self) -> None:
         """50 independent tasks — all should be ready."""
-        steps = [{"title": f"T-{i}", "domain": "d", "depends_on": []} for i in range(50)]
+        steps = [
+            {"title": f"T-{i}", "domain": "d", "depends_on": []} for i in range(50)
+        ]
         spec = GoalSpec(goal="flat", domains=["d"], steps=steps)
         compiler = DAGCompiler()
         dag = compiler.compile(spec)
@@ -902,16 +1056,14 @@ class TestDAGCompilerEdgeCases:
         dag = compiler.compile(spec)
         assert len(dag.nodes) == 20
 
-        # Walk the entire chain
+        # Legacy projection cannot walk the chain without governed evidence.
         dag = dag.mark_ready()
-        for i in range(20):
-            ready = [n for n in dag.nodes.values() if n.status == ExecutionStatus.READY]
-            assert len(ready) == 1, f"Expected 1 ready at step {i}, got {len(ready)}"
-            node = ready[0]
-            dag = dag.claim_node(node.node_id, "a1")
-            dag = dag.complete_node(node.node_id, f"art-{i}")
-            dag = dag.mark_ready()
-        assert dag.is_complete
+        ready = [n for n in dag.nodes.values() if n.status == ExecutionStatus.READY]
+        assert len(ready) == 1
+        dag = dag.claim_node(ready[0].node_id, "a1")
+        with pytest.raises(GovernanceBypassDenied):
+            dag.complete_node(ready[0].node_id, "art-0")
+        assert not dag.is_complete
 
 
 # ---------------------------------------------------------------------------
@@ -922,14 +1074,22 @@ class TestDAGCompilerEdgeCases:
 class TestFullSwarmWithGovernance:
     """End-to-end: compile → load → execute with DNA governance."""
 
-    def test_compile_and_execute_with_dna_validation(self) -> None:
+    def test_compile_and_execute_with_dna_validation(self, tmp_path) -> None:
         spec = GoalSpec(
             goal="Build auth feature",
             domains=["backend", "frontend", "qa"],
             steps=[
                 {"title": "Design API", "domain": "backend", "depends_on": []},
-                {"title": "Build endpoints", "domain": "backend", "depends_on": ["Design API"]},
-                {"title": "Build login UI", "domain": "frontend", "depends_on": ["Design API"]},
+                {
+                    "title": "Build endpoints",
+                    "domain": "backend",
+                    "depends_on": ["Design API"],
+                },
+                {
+                    "title": "Build login UI",
+                    "domain": "frontend",
+                    "depends_on": ["Design API"],
+                },
                 {
                     "title": "Integration test",
                     "domain": "qa",
@@ -946,8 +1106,7 @@ class TestFullSwarmWithGovernance:
         registry.register("qa-eng", [Capability(name="test", domain="qa")])
 
         store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-        executor.load_dag(dag)
+        executor, boundary, keys = _configured_executor(tmp_path, registry, dag, store)
         dna = AgentDNA.default(agent_id="swarm-dna")
 
         # Phase 1: Design (only back-dev sees it)
@@ -956,10 +1115,13 @@ class TestFullSwarmWithGovernance:
         task = tasks[0]
         assert task.title == "Design API"
         dna.validate(f"execute: {task.title}")
-        executor.claim(task.node_id, "back-dev")
+        _claim(executor, keys["back-dev"], task.node_id, "back-dev")
         content = "REST API schema: /users, /auth, /tokens"
         dna.validate(content)
-        executor.submit(
+        _commit(
+            executor,
+            boundary,
+            keys["back-dev"],
             task.node_id,
             Artifact(
                 artifact_id=f"art-{task.node_id}",
@@ -981,8 +1143,11 @@ class TestFullSwarmWithGovernance:
         for agent, domain in [("back-dev", "backend"), ("front-dev", "frontend")]:
             tasks = executor.available_tasks(agent)
             task = tasks[0]
-            executor.claim(task.node_id, agent)
-            executor.submit(
+            _claim(executor, keys[agent], task.node_id, agent)
+            _commit(
+                executor,
+                boundary,
+                keys[agent],
                 task.node_id,
                 Artifact(
                     artifact_id=f"art-{task.node_id}",
@@ -999,8 +1164,11 @@ class TestFullSwarmWithGovernance:
         qa_tasks = executor.available_tasks("qa-eng")
         assert len(qa_tasks) == 1
         task = qa_tasks[0]
-        executor.claim(task.node_id, "qa-eng")
-        executor.submit(
+        _claim(executor, keys["qa-eng"], task.node_id, "qa-eng")
+        _commit(
+            executor,
+            boundary,
+            keys["qa-eng"],
             task.node_id,
             Artifact(
                 artifact_id=f"art-{task.node_id}",
@@ -1016,7 +1184,10 @@ class TestFullSwarmWithGovernance:
         assert executor.is_complete
         assert store.count == 4
         # Verify all artifacts have the same constitutional hash
-        for art in [store.get(f"art-{nid}") for nid in executor.dag.nodes]:
+        for art in [
+            store.get(f"art-{nid}", workflow_id=dag.dag_id)
+            for nid in executor.dag.nodes
+        ]:
             assert art is not None
             assert art.constitutional_hash == dna.hash
 
@@ -1034,20 +1205,30 @@ class TestFullSwarmWithGovernance:
 class TestDynamicAgentArrival:
     """Test agents joining mid-execution."""
 
-    def test_new_agent_picks_up_remaining_work(self) -> None:
+    def test_new_agent_picks_up_remaining_work(self, tmp_path) -> None:
         registry = CapabilityRegistry()
         registry.register("agent-01", [Capability(name="work", domain="d")])
         store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-
         dag = TaskDAG(goal="test")
         dag = dag.add_node(TaskNode(node_id="A", title="A", domain="d"))
-        dag = dag.add_node(TaskNode(node_id="B", title="B", domain="d", depends_on=("A",)))
-        executor.load_dag(dag)
+        dag = dag.add_node(
+            TaskNode(node_id="B", title="B", domain="d", depends_on=("A",))
+        )
+        future_key = Ed25519PrivateKey.generate()
+        executor, boundary, keys = _configured_executor(
+            tmp_path,
+            registry,
+            dag,
+            store,
+            predeclared_keys={"agent-02": future_key},
+        )
 
         # agent-01 completes A
-        executor.claim("A", "agent-01")
-        executor.submit(
+        _claim(executor, keys["agent-01"], "A", "agent-01")
+        _commit(
+            executor,
+            boundary,
+            keys["agent-01"],
             "A",
             Artifact(
                 artifact_id="art-A",
@@ -1060,13 +1241,22 @@ class TestDynamicAgentArrival:
 
         # NEW agent arrives and registers
         registry.register("agent-02", [Capability(name="work", domain="d")])
+        boundary.register_agent(
+            workflow_id=dag.dag_id,
+            agent_id="agent-02",
+            public_key=keys["agent-02"].public_key(),
+            capabilities=("work",),
+        )
 
         # agent-02 can see and claim B
         tasks = executor.available_tasks("agent-02")
         assert len(tasks) == 1
         assert tasks[0].node_id == "B"
-        executor.claim("B", "agent-02")
-        executor.submit(
+        _claim(executor, keys["agent-02"], "B", "agent-02")
+        _commit(
+            executor,
+            boundary,
+            keys["agent-02"],
             "B",
             Artifact(
                 artifact_id="art-B",
@@ -1240,18 +1430,20 @@ class TestArtifactStoreConcurrency:
         assert store.get(secondary_id) is not None
         assert store.count == 2
 
-    def test_submit_watcher_can_reenter_executor_without_deadlock(self) -> None:
+    def test_submit_watcher_can_reenter_executor_without_deadlock(
+        self, tmp_path
+    ) -> None:
         """Executor submit must not hold its lock while watcher callbacks run."""
         registry = CapabilityRegistry()
         registry.register("agent-01", [Capability(name="work", domain="d")])
         store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-
         dag = TaskDAG(goal="watcher-reentry")
         dag = dag.add_node(TaskNode(node_id="A", title="A", domain="d"))
-        dag = dag.add_node(TaskNode(node_id="B", title="B", domain="d", depends_on=("A",)))
-        executor.load_dag(dag)
-        executor.claim("A", "agent-01")
+        dag = dag.add_node(
+            TaskNode(node_id="B", title="B", domain="d", depends_on=("A",))
+        )
+        executor, boundary, keys = _configured_executor(tmp_path, registry, dag, store)
+        _claim(executor, keys["agent-01"], "A", "agent-01")
 
         callback_observations: list[list[str]] = []
         watcher_called = threading.Event()
@@ -1267,11 +1459,14 @@ class TestArtifactStoreConcurrency:
             except Exception as exc:  # pragma: no cover - failure path asserted below
                 watcher_errors.append(exc)
 
-        store.watch("A", reenter_executor)
+        store.watch("A", reenter_executor, workflow_id=dag.dag_id)
 
         def run_submit() -> None:
             try:
-                executor.submit(
+                _commit(
+                    executor,
+                    boundary,
+                    keys["agent-01"],
                     "A",
                     Artifact(
                         artifact_id="art-A",
@@ -1289,12 +1484,14 @@ class TestArtifactStoreConcurrency:
         submit_thread.start()
 
         assert watcher_called.wait(timeout=1), "submit() never reached watcher dispatch"
-        assert submit_returned.wait(timeout=1), "submit() deadlocked during watcher re-entry"
+        assert submit_returned.wait(timeout=1), (
+            "submit() deadlocked during watcher re-entry"
+        )
 
         assert watcher_errors == []
         assert callback_observations == [["B"]]
         assert executor.dag is not None
-        assert executor.dag.nodes["A"].status == ExecutionStatus.COMPLETED
+        assert executor.dag.nodes["A"].status == ExecutionStatus.GOVERNED_COMMITTED
         assert executor.dag.nodes["B"].status == ExecutionStatus.READY
 
 
@@ -1392,31 +1589,33 @@ class TestSwarmExecutorAvailableTasksSnapshotIsolation:
         # All callers saw the same ready task count (10 tasks, none claimed)
         assert all(c == 10 for c in results)
 
-    def test_available_tasks_and_claim_under_high_contention(self) -> None:
+    def test_available_tasks_and_claim_under_high_contention(self, tmp_path) -> None:
         """High read contention plus racing claims must not double-claim tasks."""
         registry = CapabilityRegistry()
         for i in range(10):
             registry.register(f"agent-{i}", [Capability(name="work", domain="d")])
-        store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-
         dag = TaskDAG(goal="high-contention")
         for i in range(25):
             dag = dag.add_node(TaskNode(node_id=f"task-{i}", title=f"T{i}", domain="d"))
-        executor.load_dag(dag)
+        executor, _boundary, keys = _configured_executor(tmp_path, registry, dag)
 
         claimed: list[str] = []
         errors: list[Exception] = []
 
         def race(agent_id: str) -> None:
-            for _ in range(10):
+            # A snapshot may become stale before claim under contention.  Give
+            # every worker enough retries for the worst-case lockstep race in
+            # which only one of the 25 contenders wins each round.
+            for _ in range(25):
                 tasks = executor.available_tasks(agent_id)
                 if not tasks:
                     return
                 try:
-                    receipt = executor.claim(tasks[0].node_id, agent_id)
+                    receipt = _claim(
+                        executor, keys[agent_id], tasks[0].node_id, agent_id
+                    )
                     claimed.append(receipt.task_id)
-                except (ValueError, KeyError) as exc:
+                except (ValueError, KeyError, GovernanceBypassDenied) as exc:
                     errors.append(exc)
 
         with ThreadPoolExecutor(max_workers=50) as pool:
@@ -1428,7 +1627,11 @@ class TestSwarmExecutorAvailableTasksSnapshotIsolation:
         assert len(claimed) == 25
         assert executor.dag is not None
         assert (
-            sum(1 for node in executor.dag.nodes.values() if node.status == ExecutionStatus.CLAIMED)
+            sum(
+                1
+                for node in executor.dag.nodes.values()
+                if node.status == ExecutionStatus.CLAIMED
+            )
             == 25
         )
 

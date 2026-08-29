@@ -7,6 +7,8 @@ no coordination messages. Works identically for 8 or 800 agents.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import uuid
 from dataclasses import dataclass, field, replace
@@ -20,9 +22,20 @@ from constitutional_swarm.execution import (
     WorkReceipt,
     contract_status_from_execution,
 )
+from constitutional_swarm.governed_commit import (
+    AttemptAuthorizationPayload,
+    CommitDecision,
+    CommitOutcome,
+    CommitRequest,
+    GovernanceBypassDenied,
+    GovernedReceiptPayload,
+    SignedAttemptAuthorization,
+)
 
 NodeStatus = ExecutionStatus
 _UNSET = object()
+_AUTHORITY_TRANSPORT_ERRORS = (ConnectionError, EOFError, OSError, TimeoutError)
+_MAX_WORKFLOW_NODES = 1000
 
 
 def _neg_priority(node: TaskNode) -> int:
@@ -46,6 +59,10 @@ def _with_status(
     if artifact_id is not _UNSET:
         updates["artifact_id"] = artifact_id
     return replace(node, **updates)
+
+
+def _node_snapshot(node: TaskNode) -> TaskNode:
+    return replace(node, metadata=dict(node.metadata))
 
 
 @dataclass
@@ -87,8 +104,13 @@ class TaskDAG:
         """Check whether a node's dependencies exist and are completed."""
         missing = tuple(dep for dep in node.depends_on if dep not in self.nodes)
         if missing:
-            raise KeyError(f"Node {node.node_id} depends on missing node(s): {', '.join(missing)}")
-        return all(self.nodes[dep].status == ExecutionStatus.COMPLETED for dep in node.depends_on)
+            raise KeyError(
+                f"Node {node.node_id} depends on missing node(s): {', '.join(missing)}"
+            )
+        return all(
+            self.nodes[dep].status == ExecutionStatus.GOVERNED_COMMITTED
+            for dep in node.depends_on
+        )
 
     def add_node(self, node: TaskNode) -> TaskDAG:
         """Add a node to the DAG. Returns new DAG (immutable pattern)."""
@@ -141,25 +163,20 @@ class TaskDAG:
         return TaskDAG(dag_id=self.dag_id, goal=self.goal, nodes=new_nodes)
 
     def complete_node(self, node_id: str, artifact_id: str) -> TaskDAG:
-        """Mark a node as completed with its output artifact."""
-        node = self.nodes.get(node_id)
-        if node is None:
-            raise KeyError(f"Node {node_id} not found")
-        if node.status not in (ExecutionStatus.CLAIMED, ExecutionStatus.RUNNING):
-            raise ValueError(f"Node {node_id} is {node.status.value}, not claimed")
-        new_nodes = dict(self.nodes)
-        new_nodes[node_id] = _with_status(
-            node,
-            ExecutionStatus.COMPLETED,
-            claimed_by=node.claimed_by,
-            artifact_id=artifact_id,
-        )
-        return TaskDAG(dag_id=self.dag_id, goal=self.goal, nodes=new_nodes)
+        """Reject the legacy authority bypass.
+
+        Execution completion is not an authoritative transition.  Callers must
+        stage a result and submit a signed receipt to ``SwarmExecutor.commit``.
+        """
+        del node_id, artifact_id
+        raise GovernanceBypassDenied("TaskDAG.complete_node cannot create authority")
 
     @property
     def is_complete(self) -> bool:
         """Check if all nodes in the DAG are completed."""
-        return all(n.status == ExecutionStatus.COMPLETED for n in self.nodes.values())
+        return all(
+            n.status == ExecutionStatus.GOVERNED_COMMITTED for n in self.nodes.values()
+        )
 
     @property
     def progress(self) -> dict[str, int]:
@@ -201,9 +218,20 @@ class SwarmExecutor:
         self,
         registry: CapabilityRegistry,
         store: ArtifactStore,
+        boundary: object = _UNSET,
+        *,
+        policy_version: str = "",
+        trusted_admin: object = _UNSET,
     ) -> None:
+        if boundary is not _UNSET or trusted_admin is not _UNSET:
+            raise TypeError(
+                "legacy boundary/admin access is forbidden; execution_client is "
+                "injected only by AuthorityServiceHandle.spawn_executor()"
+            )
         self._registry = registry
         self._store = store
+        self._execution_client: object | None = None
+        self._policy_version = policy_version
         self._dag: TaskDAG | None = None
         self._lock = threading.Lock()
         self._ready_ids: set[str] = set()
@@ -222,6 +250,18 @@ class SwarmExecutor:
         self._all_ready_unconstrained: bool = True
         # Whether the DAG has any constrained nodes at all. Set once at load.
         self._dag_has_constrained: bool = False
+
+    def _authority_call(self, operation: str, /, *args: Any, **kwargs: Any) -> Any:
+        client = self._execution_client
+        if client is None:
+            raise GovernanceBypassDenied("governed boundary is not configured")
+        try:
+            method = getattr(client, operation)
+            return method(*args, **kwargs)
+        except GovernanceBypassDenied:
+            raise
+        except _AUTHORITY_TRANSPORT_ERRORS as exc:
+            raise GovernanceBypassDenied("authority_unavailable") from exc
 
     def _rebuild_ready_index(self) -> None:
         self._ready_ids = set()
@@ -250,16 +290,82 @@ class SwarmExecutor:
                 if dep not in nodes:
                     raise KeyError(f"Node {nid} depends on missing node {dep}")
                 self._children.setdefault(dep, []).append(nid)
-                if nodes[dep].status != ExecutionStatus.COMPLETED:
+                if nodes[dep].status != ExecutionStatus.GOVERNED_COMMITTED:
                     pending += 1
             self._pending_deps[nid] = pending
-            if node.status == ExecutionStatus.COMPLETED:
+            if node.status == ExecutionStatus.GOVERNED_COMMITTED:
                 self._completed_count += 1
 
     def load_dag(self, dag: TaskDAG) -> None:
         """Load a task DAG for execution."""
         with self._lock:
-            self._dag = dag.mark_ready()
+            if len(dag.nodes) > _MAX_WORKFLOW_NODES:
+                raise GovernanceBypassDenied("node_status_batch_too_large")
+            if self._dag is not None and self._dag.dag_id != dag.dag_id:
+                raise GovernanceBypassDenied("executor_workflow_identity_mismatch")
+            authoritative_states = None
+            if self._execution_client is not None:
+                if not self._policy_version:
+                    raise GovernanceBypassDenied(
+                        "policy_version is required for governed execution"
+                    )
+                topology = {
+                    node.node_id: node.depends_on for node in dag.nodes.values()
+                }
+                capabilities = {
+                    node.node_id: node.required_capabilities
+                    for node in dag.nodes.values()
+                }
+                input_digests = {
+                    node.node_id: hashlib.sha256(
+                        json.dumps(
+                            {
+                                "title": node.title,
+                                "description": node.description,
+                                "domain": node.domain,
+                                "required_capabilities": node.required_capabilities,
+                                "depends_on": node.depends_on,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest()
+                    for node in dag.nodes.values()
+                }
+                try:
+                    authoritative_states = self._authority_call(
+                        "attach_workflow",
+                        workflow_id=dag.dag_id,
+                        nodes=topology,
+                        policy_version=self._policy_version,
+                        required_capabilities=capabilities,
+                        input_digests=input_digests,
+                    )
+                except KeyError:
+                    raise GovernanceBypassDenied(
+                        "workflow_requires_signed_trusted_provisioning"
+                    ) from None
+            normalized_nodes: dict[str, TaskNode] = {}
+            for node_id, source_node in dag.nodes.items():
+                normalized = _with_status(
+                    source_node,
+                    ExecutionStatus.BLOCKED,
+                    claimed_by=None,
+                    artifact_id=None,
+                )
+                normalized.metadata.pop("attempt_id", None)
+                normalized_nodes[node_id] = normalized
+            self._dag = TaskDAG(
+                dag_id=dag.dag_id, goal=dag.goal, nodes=normalized_nodes
+            ).mark_ready()
+            if authoritative_states is not None:
+                for node_id, state in authoritative_states.items():
+                    node = self._dag.nodes[node_id]
+                    node.status = ExecutionStatus(state.status)
+                    node.claimed_by = state.claimed_by
+                    node.artifact_id = state.artifact_id
+                    if state.attempt_id is not None:
+                        node.metadata["attempt_id"] = state.attempt_id
             self._rebuild_ready_index()
             self._build_dep_index()
             self._dag_has_constrained = any(
@@ -267,10 +373,43 @@ class SwarmExecutor:
             )
             if self._dag_has_constrained:
                 self._all_ready_unconstrained = not any(
-                    self._dag.nodes[nid].required_capabilities for nid in self._ready_ids
+                    self._dag.nodes[nid].required_capabilities
+                    for nid in self._ready_ids
                 )
             else:
                 self._all_ready_unconstrained = True
+
+    def _synchronize_authoritative_states(self) -> None:
+        """Refresh the in-memory projection from the SQLite authority."""
+        if self._dag is None or self._execution_client is None:
+            return
+        node_ids = tuple(self._dag.nodes)
+        states = self._authority_call(
+            "workflow_node_states", self._dag.dag_id, node_ids
+        )
+        if len(states) != len(node_ids):
+            raise GovernanceBypassDenied("authority_status_batch_length_mismatch")
+        for node_id, state in zip(node_ids, states, strict=True):
+            node = self._dag.nodes[node_id]
+            node.status = ExecutionStatus(state.status)
+            node.claimed_by = state.claimed_by
+            node.artifact_id = state.artifact_id
+            if state.attempt_id is None:
+                node.metadata.pop("attempt_id", None)
+            else:
+                node.metadata["attempt_id"] = state.attempt_id
+        self._rebuild_ready_index()
+        self._build_dep_index()
+
+    def authoritative_artifact(self, artifact_id: str) -> Artifact | None:
+        """Read only an artifact backed by a currently valid governed commit."""
+        with self._lock:
+            if self._dag is None:
+                raise RuntimeError("No DAG loaded")
+            if self._execution_client is None:
+                raise GovernanceBypassDenied("governed boundary is not configured")
+            workflow_id = self._dag.dag_id
+        return self._authority_call("authoritative_artifact", workflow_id, artifact_id)
 
     def available_tasks(self, agent_id: str) -> list[TaskNode]:
         """Get tasks an agent can claim based on its capabilities.
@@ -283,6 +422,7 @@ class SwarmExecutor:
         so concurrent callers are not serialised on registry I/O.
         """
         with self._lock:
+            self._synchronize_authoritative_states()
             if self._dag is None or not self._ready_ids:
                 return []
             cached = self._caps_cache.get(agent_id)
@@ -321,9 +461,36 @@ class SwarmExecutor:
                 if node.priority != first_priority:
                     available.sort(key=_neg_priority)
                     break
-        return available
+        return [_node_snapshot(node) for node in available]
 
-    def claim(self, node_id: str, agent_id: str) -> WorkReceipt:
+    def prepare_claim(self, node_id: str, agent_id: str) -> AttemptAuthorizationPayload:
+        """Create a fresh, context-bound claim payload for the agent to sign."""
+        with self._lock:
+            if self._dag is None:
+                raise RuntimeError("No DAG loaded")
+            if self._execution_client is None:
+                raise GovernanceBypassDenied("claim requires a governed boundary")
+            node = self._dag.nodes.get(node_id)
+            if node is None:
+                raise KeyError(f"Node {node_id} not found")
+            if node.status != ExecutionStatus.READY:
+                raise ValueError(f"Node {node_id} is {node.status.value}, not ready")
+            payload = self._authority_call(
+                "prepare_attempt_authorization",
+                workflow_id=self._dag.dag_id,
+                node_id=node_id,
+                attempt_id=uuid.uuid4().hex,
+                agent_id=agent_id,
+                nonce=uuid.uuid4().hex,
+            )
+            return payload
+
+    def claim(
+        self,
+        node_id: str,
+        agent_id: str,
+        authorization: SignedAttemptAuthorization | None = None,
+    ) -> WorkReceipt:
         """Agent claims a task. Returns the immutable work receipt."""
         with self._lock:
             if self._dag is None:
@@ -334,8 +501,24 @@ class SwarmExecutor:
                 raise KeyError(f"Node {node_id} not found")
             if node.status != ExecutionStatus.READY:
                 raise ValueError(f"Node {node_id} is {node.status.value}, not ready")
+            if not isinstance(authorization, SignedAttemptAuthorization):
+                raise GovernanceBypassDenied("signed_attempt_authorization_required")
+            attempt_id = authorization.payload.attempt_id
+            if self._execution_client is None:
+                raise GovernanceBypassDenied("claim requires a governed boundary")
+            self._authority_call(
+                "claim",
+                workflow_id=self._dag.dag_id,
+                node_id=node_id,
+                attempt_id=attempt_id,
+                agent_id=agent_id,
+                authorization=authorization,
+                required_capabilities=node.required_capabilities,
+            )
             node.status = ExecutionStatus.CLAIMED
             node.claimed_by = agent_id
+            node.metadata["attempt_id"] = attempt_id
+            node.metadata["attempt_authorization"] = authorization
             self._ready_ids.discard(node_id)
             idx = self._ready_index.pop(node_id, -1)
             if idx >= 0:
@@ -357,64 +540,124 @@ class SwarmExecutor:
             )
 
     def submit(self, node_id: str, artifact: Artifact) -> None:
-        """Agent submits completed work. Artifact is stored, DAG updated.
+        """Reject the legacy publish-and-complete bypass."""
+        del node_id, artifact
+        raise GovernanceBypassDenied(
+            "submit cannot create authority; stage and commit a receipt"
+        )
 
-        Verifies the submitting agent matches the claimant (MACI: no
-        self-validation via unauthorized submit).
-        """
-        callbacks: tuple[Any, ...] = ()
+    def produce_result(
+        self,
+        node_id: str,
+        artifact: Artifact,
+        *,
+        authorization: SignedAttemptAuthorization | None = None,
+    ) -> GovernedReceiptPayload:
+        """Stage a result using the retained signed attempt capability."""
         with self._lock:
             if self._dag is None:
                 raise RuntimeError("No DAG loaded")
-            nodes = self._dag.nodes
-            node = nodes.get(node_id)
+            if self._execution_client is None:
+                raise GovernanceBypassDenied("governed boundary is not configured")
+            node = self._dag.nodes.get(node_id)
             if node is None:
-                raise KeyError(f"Node {node_id} not found")
-            if node.claimed_by is not None and artifact.agent_id != node.claimed_by:
-                raise PermissionError(
-                    f"Agent {artifact.agent_id} cannot submit for node claimed by {node.claimed_by}"
-                )
-            if node.status not in (ExecutionStatus.CLAIMED, ExecutionStatus.RUNNING):
-                raise ValueError(f"Node {node_id} is {node.status.value}, not claimed")
-            callbacks = self._store.publish_deferred(artifact)
-            node.status = ExecutionStatus.COMPLETED
+                raise KeyError(node_id)
+            attempt_id = str(node.metadata.get("attempt_id", ""))
+            if authorization is None:
+                authorization = node.metadata.get("attempt_authorization")
+            if not isinstance(authorization, SignedAttemptAuthorization):
+                raise GovernanceBypassDenied("signed_attempt_authorization_required")
+            self._authority_call(
+                "stage_result",
+                workflow_id=self._dag.dag_id,
+                node_id=node_id,
+                attempt_id=attempt_id,
+                artifact=artifact,
+                authorization=authorization,
+            )
+            node.status = ExecutionStatus.RESULT_PRODUCED
             node.artifact_id = artifact.artifact_id
-            self._completed_count += 1
-            # Incremental ready propagation: only visit children of the just-completed node
-            for child_id in self._children.get(node_id, ()):
-                remaining = self._pending_deps.get(child_id, 0) - 1
-                self._pending_deps[child_id] = remaining
-                if remaining <= 0:
-                    child = nodes.get(child_id)
-                    if child is not None and child.status == ExecutionStatus.BLOCKED:
-                        child.status = ExecutionStatus.READY
-                        self._ready_ids.add(child_id)
-                        self._ready_index[child_id] = len(self._ready_list)
-                        self._ready_list.append(child)
-                        if child.required_capabilities:
-                            self._all_ready_unconstrained = False
-        self._store.dispatch_callbacks(artifact, callbacks)
+            return self._authority_call(
+                "prepare_receipt_payload",
+                workflow_id=self._dag.dag_id,
+                node_id=node_id,
+                attempt_id=attempt_id,
+                agent_id=artifact.agent_id,
+                commit_id=uuid.uuid4().hex,
+                nonce=uuid.uuid4().hex,
+            )
+
+    def commit(self, request: CommitRequest) -> CommitDecision:
+        """Commit through GCB and then refresh non-authoritative projections."""
+        with self._lock:
+            if self._dag is None:
+                raise RuntimeError("No DAG loaded")
+            if self._execution_client is None:
+                raise GovernanceBypassDenied("governed boundary is not configured")
+            if request.receipt.payload.workflow_id != self._dag.dag_id:
+                raise GovernanceBypassDenied("executor_workflow_identity_mismatch")
+            decision = self._authority_call("commit", request)
+            if decision.outcome is not CommitOutcome.COMMITTED:
+                return decision
+            node = self._dag.nodes[decision.node_id]
+            refreshed_ids = (
+                decision.node_id,
+                *self._children.get(decision.node_id, ()),
+            )
+            refreshed_states = self._authority_call(
+                "workflow_node_states", self._dag.dag_id, refreshed_ids
+            )
+            if len(refreshed_states) != len(refreshed_ids):
+                raise GovernanceBypassDenied("authority_status_batch_length_mismatch")
+            authority_state = refreshed_states[0]
+            if authority_state.status != "governed_committed":
+                raise GovernanceBypassDenied("commit_projection_authority_mismatch")
+            if node.status is not ExecutionStatus.GOVERNED_COMMITTED:
+                node.status = ExecutionStatus(authority_state.status)
+                self._completed_count += 1
+            for child_id, state in zip(
+                refreshed_ids[1:], refreshed_states[1:], strict=True
+            ):
+                child = self._dag.nodes[child_id]
+                if state.status == "ready" and child.status == ExecutionStatus.BLOCKED:
+                    child.status = ExecutionStatus.READY
+                    self._ready_ids.add(child_id)
+                    self._ready_index[child_id] = len(self._ready_list)
+                    self._ready_list.append(child)
+        return decision
 
     @property
     def is_complete(self) -> bool:
         """Check if the entire DAG is done."""
-        if self._dag is None:
-            return False
-        if self._total_count > 0:
-            return self._completed_count >= self._total_count
         with self._lock:
+            self._synchronize_authoritative_states()
+            if self._dag is None:
+                return False
+            if self._total_count > 0:
+                return self._completed_count >= self._total_count
             return self._dag.is_complete
 
     @property
     def progress(self) -> dict[str, int]:
         """Current DAG progress by status."""
         with self._lock:
+            self._synchronize_authoritative_states()
             if self._dag is None:
                 return {}
             return self._dag.progress
 
     @property
     def dag(self) -> TaskDAG | None:
-        """Current DAG state."""
+        """Return a defensive, non-authoritative DAG projection."""
         with self._lock:
-            return self._dag
+            self._synchronize_authoritative_states()
+            if self._dag is None:
+                return None
+            return TaskDAG(
+                dag_id=self._dag.dag_id,
+                goal=self._dag.goal,
+                nodes={
+                    node_id: _node_snapshot(node)
+                    for node_id, node in self._dag.nodes.items()
+                },
+            )

@@ -18,6 +18,10 @@ jobs:
         extras: ["dev"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          # HistoricalGCBAdapter pins GCB-1 at 6e65db3 and git-archives it.
+          # The default depth-1 checkout cannot rev-parse that ancestor.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
@@ -30,7 +34,10 @@ jobs:
           OPENAI_API_KEY: test-key-for-unit-tests
           ANTHROPIC_API_KEY: test-key-for-unit-tests
         run: |
+          # Live PostgreSQL + psycopg live in test-postgres. Default jobs do not
+          # install that extra; catalog tests import postgres_store (hard import).
           python -m pytest tests/ \
+            --ignore=tests/test_apcc_postgres.py \
             --import-mode=importlib \
             -m "not slow and not benchmark and not e2e and not research and not bittensor" \
             -v --tb=short
@@ -68,10 +75,83 @@ jobs:
       - name: Type-check
         run: mypy
 
+  test-postgres:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: apcc_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: apcc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apcc -d apcc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      APCC_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=apcc_test user=apcc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Configure PostgreSQL 17 contention capacity
+        run: |
+          service_id="${{ job.services.postgres.id }}"
+          docker exec "$service_id" \
+            psql -v ON_ERROR_STOP=1 -U apcc -d apcc_test \
+            -c "ALTER SYSTEM SET max_connections = '200'"
+          docker restart "$service_id"
+          for attempt in {1..30}; do
+            if docker exec "$service_id" pg_isready -U apcc -d apcc_test; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              echo "PostgreSQL did not become ready after restart" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(docker exec "$service_id" psql -At -U apcc -d apcc_test \
+            -c "SHOW server_version_num")" -ge 170000
+          test "$(docker exec "$service_id" psql -At -U apcc -d apcc_test \
+            -c "SHOW server_version_num")" -lt 180000
+          test "$(docker exec "$service_id" psql -At -U apcc -d apcc_test \
+            -c "SHOW max_connections")" -eq 200
+      - name: Install with PostgreSQL support
+        run: pip install -e ".[dev,postgres]"
+      # Production postgres_store.py only. tests/test_apcc_postgres.py is in the
+      # frozen B2 pair (content dff15b7f…); its test-local Protocols omit
+      # psycopg.errors / Cursor.rowcount and fail mypy 2.x attr-defined/misc.
+      # Default [tool.mypy] files already exclude tests/; do not type-check the
+      # frozen pair here.
+      - name: Type-check PostgreSQL backend
+        run: mypy src/constitutional_swarm/apcc/postgres_store.py
+      - name: Test PostgreSQL authority store without skips
+        run: |
+          python -m pytest -q tests/test_apcc_postgres.py \
+            --import-mode=importlib --junitxml=postgres-results.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("postgres-results.xml").getroot()
+          skipped = sum(
+              int(suite.attrib.get("skipped", "0"))
+              for suite in root.iter("testsuite")
+          )
+          if skipped:
+              raise SystemExit(f"PostgreSQL suite skipped {skipped} test(s)")
+          PY
+
   test-research:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -83,6 +163,7 @@ jobs:
           ANTHROPIC_API_KEY: test-key-for-unit-tests
         run: |
           python -m pytest tests/ \
+            --ignore=tests/test_apcc_postgres.py \
             --import-mode=importlib \
             -m "not slow and not benchmark and not e2e" \
             -v --tb=short

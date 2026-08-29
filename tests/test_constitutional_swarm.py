@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from acgs_lite import (
     Constitution,
     ConstitutionalViolationError,
@@ -16,8 +17,39 @@ from constitutional_swarm.capability import Capability, CapabilityRegistry
 from constitutional_swarm.contract import ContractStatus, TaskContract
 from constitutional_swarm.dna import AgentDNA, constitutional_dna
 from constitutional_swarm.execution import ExecutionStatus, WorkReceipt
+from constitutional_swarm.governed_commit import (
+    GovernanceBypassDenied,
+    sign_attempt_authorization,
+    sign_governed_receipt,
+)
 from constitutional_swarm.mesh import ConstitutionalMesh
 from constitutional_swarm.swarm import NodeStatus, SwarmExecutor, TaskDAG, TaskNode
+from tests.gcb_apcc_support import (
+    InProcessExecutionClientHarness,
+    TrustedAuthorityLifecycleHarness,
+    compose_test_executor,
+    provision_executor_workflow,
+    typed_bootstrap,
+)
+
+
+def _governed_submit(executor, boundary, private_key, node_id, artifact) -> None:
+    payload = executor.produce_result(node_id, artifact)
+    decision = executor.commit(
+        boundary.build_request(sign_governed_receipt(payload, private_key))
+    )
+    assert decision.reason == "verified"
+    executor._test_authority_lifecycle.dispatch_after_commit()
+
+
+def _governed_claim(executor, private_key, node_id, agent_id) -> None:
+    executor.claim(
+        node_id,
+        agent_id,
+        sign_attempt_authorization(
+            executor.prepare_claim(node_id, agent_id), private_key
+        ),
+    )
 
 
 def _signed_mesh_vote(
@@ -310,7 +342,7 @@ class TestTaskContract:
         assert claimed.claimed_by == "agent-01"
 
         completed = claimed.complete("LGTM")
-        assert completed.status == ContractStatus.COMPLETED
+        assert completed.status == ContractStatus.REQUIRES_REVALIDATION
         assert completed.result == "LGTM"
 
     def test_cannot_double_claim(self) -> None:
@@ -368,7 +400,9 @@ class TestArtifactStore:
         )
         store.publish(artifact)
         assert store.count == 1
-        assert store.get("art-001") is artifact
+        retrieved = store.get("art-001")
+        assert retrieved == artifact
+        assert retrieved is not artifact
 
     def test_query_by_domain(self) -> None:
         store = ArtifactStore()
@@ -480,28 +514,18 @@ class TestTaskDAG:
 
         # Claim and complete A
         dag = dag.claim_node("A", "architect-01")
-        dag = dag.complete_node("A", "art-A")
-        dag = dag.mark_ready()
-
-        # B and C should now be ready (parallel)
-        ready = [n for n in dag.nodes.values() if n.status == NodeStatus.READY]
-        assert len(ready) == 2
-        ready_ids = {n.node_id for n in ready}
-        assert ready_ids == {"B", "C"}
+        with pytest.raises(GovernanceBypassDenied):
+            dag.complete_node("A", "art-A")
+        assert all(
+            dag.nodes[node_id].status == NodeStatus.BLOCKED for node_id in ("B", "C")
+        )
 
     def test_dag_completion(self) -> None:
         dag = self._sample_dag().mark_ready()
         dag = dag.claim_node("A", "a1")
-        dag = dag.complete_node("A", "x")
-        dag = dag.mark_ready()
-        dag = dag.claim_node("B", "a2")
-        dag = dag.complete_node("B", "x")
-        dag = dag.claim_node("C", "a3")
-        dag = dag.complete_node("C", "x")
-        dag = dag.mark_ready()
-        dag = dag.claim_node("D", "a4")
-        dag = dag.complete_node("D", "x")
-        assert dag.is_complete
+        with pytest.raises(GovernanceBypassDenied):
+            dag.complete_node("A", "x")
+        assert not dag.is_complete
 
     def test_progress_tracking(self) -> None:
         dag = self._sample_dag().mark_ready()
@@ -527,7 +551,7 @@ class TestTaskDAG:
 class TestSwarmExecutor:
     """Test orchestrator-free execution."""
 
-    def test_full_swarm_execution(self) -> None:
+    def test_full_swarm_execution(self, tmp_path) -> None:
         # Setup registry
         registry = CapabilityRegistry()
         registry.register(
@@ -548,8 +572,6 @@ class TestSwarmExecutor:
         )
 
         store = ArtifactStore()
-        executor = SwarmExecutor(registry, store)
-
         # Build DAG: A → B,C → D
         dag = TaskDAG(goal="Build feature")
         dag = dag.add_node(TaskNode(node_id="A", title="Design", domain="architecture"))
@@ -557,12 +579,39 @@ class TestSwarmExecutor:
             TaskNode(node_id="B", title="Backend", domain="backend", depends_on=("A",))
         )
         dag = dag.add_node(
-            TaskNode(node_id="C", title="Frontend", domain="frontend", depends_on=("A",))
+            TaskNode(
+                node_id="C", title="Frontend", domain="frontend", depends_on=("A",)
+            )
         )
         dag = dag.add_node(
-            TaskNode(node_id="D", title="Integration", domain="qa", depends_on=("B", "C"))
+            TaskNode(
+                node_id="D", title="Integration", domain="qa", depends_on=("C", "B")
+            )
+        )
+        keys = {agent_id: Ed25519PrivateKey.generate() for agent_id in registry.agents}
+        bootstrap = typed_bootstrap(policy_versions=(("1", 1),), producers=keys)
+        boundary = bootstrap.provision(tmp_path / "authority.sqlite3")
+        provision_executor_workflow(boundary, dag, policy_version="1")
+        executor = compose_test_executor(
+            registry,
+            store,
+            InProcessExecutionClientHarness(boundary),
+            policy_version="1",
+        )
+        executor._test_authority_lifecycle = TrustedAuthorityLifecycleHarness(
+            boundary, dag.dag_id, store
         )
         executor.load_dag(dag)
+        for agent_id, private_key in keys.items():
+            boundary.register_agent(
+                workflow_id=dag.dag_id,
+                agent_id=agent_id,
+                public_key=private_key.public_key(),
+                capabilities=tuple(
+                    capability.name
+                    for capability in registry.get_agent_capabilities(agent_id)
+                ),
+            )
 
         # Architect sees task A
         tasks = executor.available_tasks("architect-01")
@@ -570,8 +619,11 @@ class TestSwarmExecutor:
         assert tasks[0].node_id == "A"
 
         # Architect claims and completes A
-        executor.claim("A", "architect-01")
-        executor.submit(
+        _governed_claim(executor, keys["architect-01"], "A", "architect-01")
+        _governed_submit(
+            executor,
+            boundary,
+            keys["architect-01"],
             "A",
             Artifact(
                 artifact_id="art-A",
@@ -590,8 +642,11 @@ class TestSwarmExecutor:
         assert any(t.node_id == "C" for t in frontend_tasks)
 
         # Complete B and C in parallel
-        executor.claim("B", "backend-01")
-        executor.submit(
+        _governed_claim(executor, keys["backend-01"], "B", "backend-01")
+        _governed_submit(
+            executor,
+            boundary,
+            keys["backend-01"],
             "B",
             Artifact(
                 artifact_id="art-B",
@@ -602,8 +657,11 @@ class TestSwarmExecutor:
                 domain="backend",
             ),
         )
-        executor.claim("C", "frontend-01")
-        executor.submit(
+        _governed_claim(executor, keys["frontend-01"], "C", "frontend-01")
+        _governed_submit(
+            executor,
+            boundary,
+            keys["frontend-01"],
             "C",
             Artifact(
                 artifact_id="art-C",
@@ -620,8 +678,11 @@ class TestSwarmExecutor:
         assert any(t.node_id == "D" for t in qa_tasks)
 
         # Complete D
-        executor.claim("D", "qa-01")
-        executor.submit(
+        _governed_claim(executor, keys["qa-01"], "D", "qa-01")
+        _governed_submit(
+            executor,
+            boundary,
+            keys["qa-01"],
             "D",
             Artifact(
                 artifact_id="art-D",
@@ -635,11 +696,13 @@ class TestSwarmExecutor:
 
         assert executor.is_complete
         assert store.count == 4
-        assert executor.progress == {"completed": 4}
+        assert executor.progress == {"governed_committed": 4}
 
     def test_submit_requires_claim(self) -> None:
         registry = CapabilityRegistry()
-        registry.register("backend-01", [Capability(name="implement", domain="backend")])
+        registry.register(
+            "backend-01", [Capability(name="implement", domain="backend")]
+        )
         store = ArtifactStore()
         executor = SwarmExecutor(registry, store)
 
@@ -648,7 +711,7 @@ class TestSwarmExecutor:
         )
         executor.load_dag(dag)
 
-        with pytest.raises(ValueError, match="not claimed"):
+        with pytest.raises(GovernanceBypassDenied, match="stage and commit"):
             executor.submit(
                 "B",
                 Artifact(
@@ -802,7 +865,14 @@ class TestRiskScoring:
 
     def test_from_rules_forwards_risk_scoring(self) -> None:
         dna = AgentDNA.from_rules(
-            [Rule(id="T-001", text="no bypasses", severity="critical", keywords=["bypass"])],
+            [
+                Rule(
+                    id="T-001",
+                    text="no bypasses",
+                    severity="critical",
+                    keywords=["bypass"],
+                )
+            ],
             agent_id="w",
             risk_scoring=True,
         )
@@ -893,7 +963,9 @@ class TestByzantineMajorityReject:
         assert result.proof.verify() is True
         assert result.votes_against >= 3
 
-    def test_byzantine_boundary_accepts_with_exact_floor_n_over_3_faulty_peers(self) -> None:
+    def test_byzantine_boundary_accepts_with_exact_floor_n_over_3_faulty_peers(
+        self,
+    ) -> None:
         from constitutional_swarm.mesh import ConstitutionalMesh
 
         constitution = Constitution.default()
