@@ -231,6 +231,8 @@ _DIGESTS = frozenset(
         "certificate_digest",
         "payload_sha256",
         "trust_log_head",
+        "expected_operation_digest",
+        "public_request_digest",
     }
 )
 _IDS = frozenset(
@@ -243,6 +245,7 @@ _IDS = frozenset(
         "agent_id",
         "policy_id",
         "commit_id",
+        "expected_commit_id",
         "producer_key_id",
         "policy_key_id",
         "authority_key_id",
@@ -666,6 +669,46 @@ def normalize_authority_status(
     if isinstance(value, bytes):
         return decode_authority_status(value)
     return decode_authority_status(_canonical(dict(value)))
+
+
+def validate_authority_observation_request(value: object) -> None:
+    """Compatibility delegate to the canonical observation codec."""
+    from .observation import (
+        AuthorityObservationRequest,
+        encode_authority_observation_request,
+    )
+
+    if type(value) is not AuthorityObservationRequest:
+        raise TypeError("observation request has the wrong type")
+    encode_authority_observation_request(value)
+
+
+def encode_authority_observation_request(value: object) -> bytes:
+    """Compatibility delegate to :mod:`apcc.observation`."""
+    from .observation import encode_authority_observation_request as encode
+
+    return encode(value)  # type: ignore[arg-type]
+
+
+def decode_authority_observation_request(raw: bytes):
+    """Compatibility delegate to :mod:`apcc.observation`."""
+    from .observation import decode_authority_observation_request as decode
+
+    return decode(raw)
+
+
+def encode_observer_launch_attestation(value: object) -> bytes:
+    """Compatibility delegate to :mod:`apcc.observation`."""
+    from .observation import encode_observer_launch_attestation as encode
+
+    return encode(value)  # type: ignore[arg-type]
+
+
+def decode_observer_launch_attestation(raw: bytes):
+    """Compatibility delegate to :mod:`apcc.observation`."""
+    from .observation import decode_observer_launch_attestation as decode
+
+    return decode(raw)
 
 
 def canonical_statement(statement: Mapping[str, str]) -> bytes:

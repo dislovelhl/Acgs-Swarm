@@ -22,6 +22,11 @@ from .model import (
     RequestOutcome,
     Signature,
 )
+from .observation import (
+    AuthorityObservationRequest,
+    AuthorityObservationSnapshot,
+    AuthorityObservationState as AuthorityObservationState,
+)
 from .verifier import TrustBinding, TrustRole
 
 
@@ -535,8 +540,78 @@ class AuthorityReader(Protocol):
     def get_outbox_event(self, commit_id: str) -> PersistedOutboxEvent: ...
 
 
-class AuthorityStore(AuthorityReader, Protocol):
-    """Capabilities required from a linearizable APCC authority boundary."""
+@runtime_checkable
+class AuthorityObservationStatusSigner(Protocol):
+    """One-purpose capability: derive one exact current-status wrapper."""
+
+    def current_status(self, certificate_digest: str, request_nonce: str) -> bytes: ...
+
+
+@runtime_checkable
+class AuthorityObservationStore(Protocol):
+    """Narrow signer-free, read-only capability exposed to an observer process."""
+
+    authority_store_id: str
+
+    def observe_authority(
+        self, request: AuthorityObservationRequest
+    ) -> AuthorityObservationSnapshot: ...
+
+
+@runtime_checkable
+class AuthorityExecutionStore(AuthorityReader, Protocol):
+    """APCC execution capability without control operations."""
+
+    authority_store_id: str
+
+    def stage_result(self, request: StageResultRequest) -> StageResultResult: ...
+
+    def assemble_evidence(
+        self, request: AssembleEvidenceRequest
+    ) -> AssembleEvidenceResult: ...
+
+    def propose_commit(self, request: ProposeCommitRequest) -> ProposeCommitResult: ...
+
+    def atomic_commit(self, request: AtomicCommitRequest) -> CommitResult: ...
+
+    def current_status(
+        self, certificate_digest: str, request_nonce: str
+    ) -> AuthorityStatus: ...
+
+    def current_status_batch(
+        self, requests: Sequence[CurrentStatusRequest]
+    ) -> tuple[CurrentStatusResult, ...]: ...
+
+    def logical_node_status_batch(
+        self, requests: Sequence[LogicalNodeStatusRequest]
+    ) -> tuple[LogicalNodeStatusResult, ...]: ...
+
+
+@runtime_checkable
+class AuthorityControlStore(AuthorityReader, Protocol):
+    """Supervisor-facing APCC mutation and recovery capability."""
+
+    authority_store_id: str
+
+    def revoke(self, request: RevocationRequest) -> RevocationResult: ...
+
+    def supersede(self, request: SupersessionRequest) -> SupersessionResult: ...
+
+    def recover(self, request: RecoveryRequest) -> CommitResult: ...
+
+    def recover_outbox(
+        self, request: OutboxRecoveryRequest
+    ) -> OutboxRecoveryResult: ...
+
+
+@runtime_checkable
+class AuthorityStore(AuthorityExecutionStore, AuthorityControlStore, Protocol):
+    """Backward-compatible aggregate authority capability.
+
+    New callers should depend on :class:`AuthorityExecutionStore` or
+    :class:`AuthorityControlStore` so execution channels cannot acquire
+    revocation, supersession, or recovery authority by construction.
+    """
 
     authority_store_id: str
 
