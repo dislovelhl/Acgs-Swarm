@@ -1,0 +1,7 @@
+HEAD=4ef82a21af884e749cee31e79b9ee6360ad3cfa8
+utc=2026-08-29T18:04:07Z
+capabilities []
+exception ScenarioExecutionError
+message B6 execution requires trusted supervisor preflight
+in_tree_supervisor_for_catalog=false
+execute_trusted_requires=_SwarmExecutionHandle

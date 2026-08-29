@@ -1,0 +1,8 @@
+HEAD=4ef82a21af884e749cee31e79b9ee6360ad3cfa8
+utc=2026-08-29T18:04:07Z
+command=ls experiments/apcc-1 scripts | rg -i ablat
+exit=1
+result=no_ablation_runner_in_experiments; no_ablation_script
+contract.ABLATION_IDS=present
+modules=adapters,artifacts,contract,historical_gcb,scenarios
+status=BLOCKED_MISSING_DEPENDENCY

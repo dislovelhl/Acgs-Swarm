@@ -1,36 +1,55 @@
 # APCC-1 qualification results
 
-Recorded `2026-08-29T17:25:12Z`. Campaign measurements bound to git SHA
-`9c37e34a9a1971057d304dab1bc4b893dafc17a6`. This file is not a production
-acceptance, not a close of `apcc-1.matrix.v1`, and not a mechanism-novelty GO.
+Recorded `2026-08-29T19:45:00Z`. This file is not a production acceptance,
+not a close of `apcc-1.matrix.v1`, and not a mechanism-novelty GO.
+
+Measurement SHAs (do not mix rows):
+
+| Kind | SHA |
+| --- | --- |
+| v1 catalog / PG 366 / SQLite 383 / TLC / empirical contract | `9c37e34a9a1971057d304dab1bc4b893dafc17a6` |
+| v2 performance only | `3d4d9dd4bf8b6f6071fd823e17fb96110c11ccd1` |
+| v2 PG/SQLite four-case negatives, Go RFC, Python/Go 66 | `4ef82a21af884e749cee31e79b9ee6360ad3cfa8` |
+| Results/evidence checkpoint (this write) | HEAD at commit time |
 
 ## 1. Verdict banner
 
 ```
 APCC-1 QUALIFICATION PARTIAL
+CANDIDATE VERDICT UNDETERMINED
 NOVELTY UNDETERMINED
 PRODUCTION READINESS NOT CLAIMED
 ```
 
+PARTIAL because mandatory frozen-plan cells remain unrun or blocked
+(`apcc-1.matrix.v1`, B6 public execute, empirical ablations, B6 PostgreSQL
+performance, RFC 8785 appendix / independent JCS). Executable remaining
+gates from the continue order were run or captured as hard blockers.
+That is not a candidate pass.
+
 ## 2. Scope and claim discipline
 
-- Qualification-live protocol `apcc-1.qualification-live.v1` was frozen and
-  committed **before** campaign execution (`9c37e34`). It does **not** close
-  frozen `apcc-1.matrix.v1` (102,416 planner IDs).
+- `apcc-1.qualification-live.v1` at `9c37e34` does **not** close
+  `apcc-1.matrix.v1` (102,416 planner IDs).
+- `apcc-1.qualification-live.v2` at `3d4d9dd` supersedes **performance
+  methodology only**. v1 performance rows stay INCONCLUSIVE.
 - Contract tests, catalog-construction tests, schema validators, and the
   formal pytest wrapper are not live measurements.
 - ScenarioRunner `blocked` on `B6AuthorityAdapter` is not a live APCC-store
   measurement.
 - TLC witness/ablation exit 12 is harness-PASS of intended named invariant
   violations, not ordinary safety success.
-- `summary.json` writes `status: LIVE_MEASURED` on performance cells. Reviewer A
-  P0: those cells are **not** the precommitted open-loop 10/s experiment
-  (`TARGET_RATE_NOT_ENFORCED`). This document classifies them INCONCLUSIVE.
-- Relative 25% p95 / 25% throughput / 4 KiB certificate flags vs B5 are omitted
-  because every measured run is `incomplete_run=true`.
+- Runner `summary.json` writes `status: LIVE_MEASURED`.
+  `_measure_loop` hardcodes `target_rate_enforced: True`. Those labels are
+  not copied onto the frozen-plan W1 cell.
+- Relative 25% p95 / 25% throughput / 4 KiB certificate flags vs B5 are
+  omitted because every measured run is `incomplete_run=true`.
 - Words “material”, “significant”, and “better” are not used as findings.
 - Interrupted Codex run remains `INTERRUPTED_USAGE_LIMIT_NO_TEST_VERDICT`.
   Its partial output is not merged.
+- Same four case IDs on SQLite and PostgreSQL with matching **dispositions**
+  are not identical certificates and are not storage-independence of the
+  full suites.
 
 ## 3. Candidate identity
 
@@ -38,87 +57,67 @@ PRODUCTION READINESS NOT CLAIMED
 | --- | --- |
 | Worktree | `/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit` |
 | Branch | `apcc-1-atomic-proof-carrying-commit` |
-| Phase 0 HEAD | `e2e87f9891adf3cea6af6d8a9375e4f40dae11e9` |
-| Protocol/harness commit (campaign SHA) | `9c37e34a9a1971057d304dab1bc4b893dafc17a6` |
 | Implementation base | `df30286be482ece23536abf689f328472a565e69` |
 | GCB-1 snapshot used by B5 | `6e65db3e478fa315119038b616d78f4f171422db` |
-| Protocol ID | `apcc-1.qualification-live.v1` |
+| v1 protocol ID | `apcc-1.qualification-live.v1` |
+| v2 protocol ID | `apcc-1.qualification-live.v2` |
 | Frozen matrix ID (unclosed) | `apcc-1.matrix.v1` |
 | Upstream / push | none; no fetch; no push |
 
 ## 4. Starting and ending repository state
 
-Phase 0 (`2026-08-29T15:51:09Z`): clean tree, HEAD `e2e87f9`, six local commits
-after `df30286`, no upstream.
+Continue Phase 0 (`2026-08-29T18:03:58Z`): HEAD `4ef82a2`, clean tracked
+tree, no upstream. Untracked preserved: `ql-smoke-b6{,b,c}/` and campaign
+run dirs. Local commits after `df30286` include `9c37e34`, `c5be1d4`,
+`86baaf2`, `3d4d9dd`, `4ef82a2`.
 
-After protocol checkpoint `9c37e34` (21 files, +1251): campaign executed on that
-SHA. Evidence checkpoint `c5be1d49eea7b779378182fd2db4df2255c65df1` records
-curated JSONL/logs (does not change measurement SHA). Results/novelty commit
-follows this file. Smoke run directories `ql-smoke-b6{,b,c}/` remain untracked
-(pre-campaign harness smokes; not mixed into campaign artifacts).
-
-`git diff --check` and `git diff --check df30286..HEAD`: no whitespace errors
-at Phase 0 and at results-write (no tracked mutations after `9c37e34` except
-untracked evidence).
+Frozen pair **not** staged in harness commits. `git diff --check` on those
+commits: no whitespace errors recorded.
 
 ## 5. Frozen-pair integrity
 
 | Tree | `postgres_store.py` | `test_apcc_postgres.py` |
 | --- | --- | --- |
-| Campaign SHA / HEAD / `8bea7c4` | `576c0449a55a86b6d35499f3b7acd86fdca95603fe416385264705f386aaec6a` | `dff15b7f8b0aa6ebe3fad19305ea829faf05f71836b1ea91daa5d55c8dfb9a22` |
+| HEAD / `8bea7c4` / campaign SHAs | `576c0449a55a86b6d35499f3b7acd86fdca95603fe416385264705f386aaec6a` | `dff15b7f8b0aa6ebe3fad19305ea829faf05f71836b1ea91daa5d55c8dfb9a22` |
+| git blobs at `4ef82a2` | `da5071e6608d42c6ace296bff6d022afffc708c1` | `ed9e04f28dfeb1621c0a26a49cf5a79a5df3c319` |
 | `df30286` | `fc1c1345fbe8d7486089e6025a46a0a6a861c241b44041e18dccbc686dd78749` | `ad77a7ecd39de434ee455ab5155def1842b925c9ac1c275c22ea91ff5e494f2c` |
 
-Pair was **not** repaired. Independent static verdict `APPROVE-WITH-P2`
-applies to pair **content** `576c0449` / `dff15b7f`, not to `df30286` blobs.
-`docs/internal/APCC-1-B2-Postgres-Close.md` lists the HEAD hashes but attributes
-them to HEAD `df30286` — that attribution is false.
-
-Pre-checkpoint PG `366 passed in 2224.68s` is bound to `df30286` only.
-This campaign re-ran the file at `9c37e34`.
+Pair was **not** repaired. Required hashes **match**. Independent static
+verdict `APPROVE-WITH-P2` applies to pair **content** `576c0449` /
+`dff15b7f`. P2s remain visible (§17).
 
 ## 6. Environment and dependency versions
 
-From Phase 0 plus live-window checks. Redacted: no DSN passwords observed
-(`postgresql://apcc@127.0.0.1:55434/apcc_test`).
-
 | Item | Value |
 | --- | --- |
-| OS | Fedora 44, Linux `7.1.9-200.fc44.x86_64`, x86_64 |
-| CPU | AMD Ryzen 7 7800X3D, 8 cores / 16 threads |
-| RAM | 125 GiB |
-| Swap | 15 GiB; **0 B free** at Phase 0; **56 KiB free** at `2026-08-29T17:05Z` |
-| Python | CPython 3.13.13 (worktree `.venv`) |
-| SQLite | 3.53.1 |
-| cryptography | 47.0.0 |
+| Python | 3.13.13 |
 | psycopg | 3.3.4 |
-| Go | `go1.26.7-X:nodwarf5 linux/amd64` |
-| Java | OpenJDK 25.0.4.1 |
-| `uv.lock` SHA-256 | `6c26c7df94b53529f4a37fb1417241f3ec163b1238a012a3c563aaf6a149cfd5` |
-| TLC JAR | `/home/martin/.cache/acgs-tlc/tla2tools-v1.7.4.jar` SHA-256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88` |
-| PostgreSQL | 17.10 (Debian 17.10-1.pgdg12+1) `127.0.0.1:55434` |
-| PG durability | `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`, `max_connections=200` |
-| PG `shared_buffers` | **128MB** (frozen plan wanted 4GB) |
-| Leftover PG roles | `apcc_test_aca927aa96486a240e433636_owner`, `…_runtime`; namespaces: `public` only after 366 at `9c37e34` |
+| Go | go1.26.7-X:nodwarf5 linux/amd64 |
+| PostgreSQL | 17.10 at `127.0.0.1:55434` |
+| `shared_buffers` | **128MB** (frozen plan wanted 4GB) |
+| `max_connections` | 200 |
+| SwapTotal / SwapFree at 18:04Z | 16777212 / 221940 kB |
+| SwapFree after v2 perf | 215436 kB |
+| Leftover PG roles | `apcc_test_aca927aa96486a240e433636_{owner,runtime}` |
+| Leftover `apcc_test_%` schemas | none after PG negatives |
+| TLC JAR | `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88` |
+| DSN (redacted) | `postgresql://REDACTED@127.0.0.1:55434/apcc_test` |
 
-Confounders for latency/throughput: swap exhaustion; concurrent PG 366 during
-the live performance window; `shared_buffers=128MB`.
+Confounders for latency/throughput: swap nearly exhausted; `shared_buffers`
+128MB; shared host. Frozen-plan W1 environment was not matched.
 
 ## 7. Experimental protocol
 
-Newly introduced methodology, frozen `2026-08-29T16:00:00Z` before campaign:
+v1 frozen `2026-08-29T16:00:00Z` before measurements at `9c37e34`.
+v2 frozen `2026-08-29T17:55:00Z` in `3d4d9dd` **before** v2 performance.
 
-- `docs/internal/APCC-1-Qualification-Live-Protocol.md`
-- `experiments/apcc-1/qualification-live.v1.json`
-- `experiments/apcc-1/run_qualification_live.py`
-
-Seed: `104729` only (frozen five-seed schedule not executed).
-Warm-up: 3 × 30 s unreported. Measured: 10 × 30 s. Target written: 10/s.
-`MIN_OPS=10000` ⇒ any paced 10/s × 30 s run is `incomplete_run` even if paced.
-Harness defect (committed, not repaired mid-campaign):
-`time.sleep(min(next_beat - now, 0.001))` — 10/s open-loop not enforced.
+v2 change: `time.sleep(next_beat - now)` (no 1 ms cap). Wall time measured.
+Seed: `104729` only. Warm-up 3 × 30 s unreported. Measured 10 × 30 s.
+`MIN_OPS=10000` ⇒ paced 10/s × 30 s remains `incomplete_run`.
 Payloads: `os.urandom(1024/4096)` at import (not derived from seed 104729).
 
-Novelty rubric: incomplete frozen-plan live gates ⇒ overall **UNDETERMINED**.
+Novelty rubric unchanged: incomplete frozen-plan live gates ⇒ overall
+**UNDETERMINED**.
 
 ## 8. B0–B6 definition matrix
 
@@ -132,122 +131,113 @@ Canonical names from `docs/internal/APCC-1-Experiment-Plan.md`. Not renamed.
 | B3 | Signed result log | same | LIVE_READY |
 | B4 | Verify proof, then separate write | same | LIVE_READY |
 | B5 | Existing GCB-1 SQLite | `HistoricalGCBAdapter` @ `6e65db3` | LIVE_READY (init succeeded) |
-| B6 public `execute` | APCC-1 | `B6AuthorityAdapter` | BLOCKED_MISSING_DEPENDENCY (empty capabilities / trusted supervisor) |
-| B6 SQLite store | APCC-1 | `SQLiteAuthorityStore` via test request builder | LIVE_READY for 4 planned negatives + `QL-INDEP-NODE` first-commits |
+| B6 public `execute` | APCC-1 | `B6AuthorityAdapter` | BLOCKED_MISSING_DEPENDENCY (empty capabilities / trusted supervisor). Reconfirmed at `4ef82a2`. No in-tree catalog supervisor. |
+| B6 SQLite store | APCC-1 | `SQLiteAuthorityStore` | LIVE_READY for 4 planned negatives + `QL-INDEP-NODE` first-commits |
+| B6 PostgreSQL store negatives | APCC-1 | `postgres_environment` unwrapped | LIVE_READY for the same 4 case IDs |
 | B6 PostgreSQL performance | APCC-1 | in-tree rate-generator | BLOCKED_MISSING_DEPENDENCY |
-| Empirical ablations | one-at-a-time B6 element removal | none in-tree | BLOCKED_MISSING_DEPENDENCY |
+| Empirical ablations | one-at-a-time B6 element removal | none in-tree | BLOCKED_MISSING_DEPENDENCY (`contract.ABLATION_IDS` present; modules `adapters,artifacts,contract,historical_gcb,scenarios`) |
 | Frozen 102416 cells | experiment plan | no runner | CONTRACT_ONLY / PENDING_MEASUREMENT |
 
 ## 9. B0–B6 live results
 
-Labels used: CONTRACT TESTED / LIVE MEASURED / BLOCKED / THRESHOLD MET /
+Labels: CONTRACT TESTED / LIVE MEASURED / BLOCKED / THRESHOLD MET /
 THRESHOLD NOT MET / INCONCLUSIVE.
 
-| ID | Frozen matrix | Empirical pytest (209) | Scenarios (n=1, seed 104729) | Performance (written 10/s cell) | Security threshold (planned B6-store trials) |
-| --- | --- | --- | --- | --- | --- |
-| B0 | CONTRACT_ONLY / PENDING | CONTRACT TESTED | LIVE MEASURED (23 executed, 16 capability-BLOCKED; 39/39 catalog-match) | INCONCLUSIVE (`TARGET_RATE_NOT_ENFORCED`; 10/10 incomplete) | n/a |
-| B1 | CONTRACT_ONLY / PENDING | CONTRACT TESTED | LIVE MEASURED (same split) | INCONCLUSIVE | n/a |
-| B2 | CONTRACT_ONLY / PENDING | CONTRACT TESTED | LIVE MEASURED (21 compromised, 2 fail-closed, 16 blocked) | INCONCLUSIVE | n/a |
-| B3 | CONTRACT_ONLY / PENDING | CONTRACT TESTED | LIVE MEASURED (same as B0/B1) | INCONCLUSIVE | n/a |
-| B4 | CONTRACT_ONLY / PENDING | CONTRACT TESTED | LIVE MEASURED (22 fail-closed, 16 blocked, 1 compromised=`concurrent-double-commit:default` catalog-expected; sequential, not a live race) | INCONCLUSIVE | n/a |
-| B5 | CONTRACT_ONLY / PENDING | CONTRACT TESTED | LIVE MEASURED (21 fail-closed, 11 not-applicable, 5 recovered, 2 blocked) | INCONCLUSIVE (below written 10/s; incomplete) | n/a |
-| B6 public adapter | CONTRACT_ONLY / PENDING | CONTRACT TESTED | BLOCKED (39/39 `observed=blocked`; `execute` not called) | — | not a store trial |
-| B6 SQLite store | CONTRACT_ONLY / PENDING | CONTRACT TESTED | 4 negatives LIVE MEASURED (see §10) | INCONCLUSIVE (`QL-INDEP-NODE`, not frozen W1; incomplete) | THRESHOLD MET **for those 4 cases only** (`invalid_authoritative_commits=0`) |
-| B6 PostgreSQL | CONTRACT_ONLY / PENDING | — | — | BLOCKED_MISSING_DEPENDENCY | PG file is store-specific conformance, not this threshold |
+### 9a. Catalog and v1 performance (`9c37e34`)
 
-Scenario counts: attempted 273, matched_expected 273, mismatched 0, errors 0,
-b6_blocked 39. Observed overall: blocked 121, compromised 91, fail-closed 45,
-not-applicable 11, recovered 5.
+Unchanged. 273/273 catalog-match; B6 public 39/39 `blocked`.
+v1 performance INCONCLUSIVE (`TARGET_RATE_NOT_ENFORCED`). See prior
+`86baaf2` text for the v1 ops/s table. Do not reuse as the 10/s cell.
 
-Performance measured medians (ops/s, p50/p95/p99 ms; n=10; failures=0;
-incomplete=10/10). These are **not** 10/s open-loop cells.
+### 9b. v2 performance (`3d4d9dd`, `campaign-3d4d9dd-perf`)
 
-| ID | median ops/s | min–max ops/s | median p50 ms | median p95 ms | median p99 ms | completed sum (10×30s) |
-| --- | ---: | --- | ---: | ---: | ---: | ---: |
-| B0 | 43.6167 | 42.6000–44.3667 | 20.878 | 27.558 | 35.881 | 13049 |
-| B1 | 29.1500 | 27.8000–30.4000 | 30.853 | 48.662 | 58.961 | 8727 |
-| B2 | 28.9167 | 28.3667–30.3667 | 30.509 | 50.579 | 59.918 | 8750 |
-| B3 | 29.6500 | 28.8667–30.6000 | 30.998 | 45.062 | 57.960 | 8903 |
-| B4 | 27.7333 | 25.9000–28.6667 | 31.638 | 56.590 | 61.637 | 8266 |
-| B5 | 8.3833 | 7.8333–8.7000 | 117.763 | 159.759 | 183.513 | 2507 |
-| B6 SQLite `QL-INDEP-NODE` | 6.4833 | 6.1667–6.7000 | 151.536 | 183.451 | 213.443 | 1927 (nodes_used 185–201 / 400) |
+91 rows (21 warmup + 70 measured). Failures 0. `incomplete_run` 91/91.
+Pacer `sleep-until-next-beat`. Driver exit 0.
+`17:56:14Z`–`18:42:10Z`. `performance.jsonl` SHA-256
+`8f1882ab7a7cc2a1aa05337e5b302502cfd9cb73360f5944d40e32684f481f70`.
+
+`target_rate_enforced` is hardcoded `True` in `_measure_loop`.
+
+| ID | median ops/s | min–max ops/s | pstdev | median p50 ms | median p95 ms | median p99 ms | completed sum (10×30s) | error rate |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| B0 | 10.0262 | 10.0224–10.0263 | 0.00114 | 21.204 | 24.628 | 33.541 | 3010 | 0 |
+| B1 | 10.0262 | 10.0244–10.0263 | 0.00058 | 21.176 | 26.641 | 34.045 | 3010 | 0 |
+| B2 | 10.0262 | 10.0238–10.0263 | 0.00075 | 21.206 | 27.690 | 33.858 | 3010 | 0 |
+| B3 | 10.0262 | 10.0205–10.0262 | 0.00188 | 21.319 | 29.829 | 35.715 | 3010 | 0 |
+| B4 | 10.0225 | 10.0209–10.0233 | 0.00076 | 30.578 | 39.230 | 49.125 | 3010 | 0 |
+| B5 | 8.8518 | 8.3329–9.2578 | 0.404 | 108.110 | 145.425 | 163.581 | 2655 | 0 |
+| B6 SQLite `QL-INDEP-NODE` | 6.6722 | 6.3824–9.2936 | 0.805 | 147.791 | 172.163 | 209.612 | 2077 | 0 |
+
+B6 `nodes_used` measured: 279, 206, 203, 200, 201, 200, 195, 202, 192, 199.
+
+Classification (do not copy runner `LIVE_MEASURED`):
+
+- B0–B4: **PACED_CEILING** on the v2 written 10/s open-loop (ops/s in
+  [10.0205, 10.0263]; 301 ops / ~30.02 s is a fencepost, not surplus
+  capacity). Not frozen-plan W1.
+- B5 and B6: **RATE_MISS** + `INCOMPLETE_RUN` (all measured ops/s < 10).
+- Frozen-plan W1 10/s cell: **NOT RUN / NOT CLAIMED** (host swap / 128MB
+  buffers / single seed / `MIN_OPS` / not the frozen planner identity /
+  SQLite-only / B6=`QL-INDEP-NODE`).
+- B6-postgresql performance: BLOCKED_MISSING_DEPENDENCY.
+- `target_rate_enforced: true` is hardcoded; ignore it on B5/B6.
 
 No relative difference vs B5 is reported (protocol: omit if incomplete).
 
 ## 10. Adversarial results
 
-Catalog: `default_scenario_catalog()` — 32 `ATTACK_IDS`, 39 variants, 1 trial
-each, B0–B6. Canonical names only.
+Catalog at `9c37e34` unchanged (273/273; B6 public blocked).
 
-B0–B5: live adapter path. Many operational variants (revocation, crash, outbox,
-recovery, status) are capability-BLOCKED on B0–B4 rather than exercised.
-B6 catalog: tautological blocked (empty capabilities; expected hardcoded
-`blocked`).
+B6 store negatives at `4ef82a2` (same four IDs; SQLite and PostgreSQL):
 
-B6 SQLite store negatives (planned list; no post-hoc adds):
-
-| case_id | outcome | notes |
+| case_id | SQLite outcome | PostgreSQL outcome |
 | --- | --- | --- |
-| valid-first-commit | COMMITTED | 4960-byte certificate; digest `NVAO_SrMuCcypLvlx7UofVBcDoNidkIQONqXUSSzh6Y` |
-| exact-replay | COMMITTED | `same_envelope_bytes=true`; `second_authority=false` |
-| commit-id-equivocation | CONFLICTED | `COMMIT_ID_EQUIVOCATION`; `second_authority=false` |
-| invalid-commit-request | DENIED | tampered producer signature; `INVALID_PRODUCER_SIGNATURE` |
+| valid-first-commit | COMMITTED / authoritative / OK / 4960 B / digest `aXN5Yfm9AHVPBHKoB-4BpkRW_I_hBVqmq_Qk0DnSqdE` | COMMITTED / authoritative / OK / 4968 B / digest `l3-FmZzWYqUZJJM-pBngYhQzO_7d9cgGFopAX_iz-9k` |
+| exact-replay | COMMITTED; `same_envelope_bytes=true`; `second_authority=false` | same dispositions |
+| commit-id-equivocation | CONFLICTED / `COMMIT_ID_EQUIVOCATION`; not authoritative | same |
+| invalid-commit-request | DENIED / `INVALID_PRODUCER_SIGNATURE`; not authoritative | same |
 
-Runner counter `invalid_authoritative_commits=0` (exact-replay COMMITTED with
-no second authority is not counted invalid). This is **not** frozen-plan
-30-trial / 100-trial security acceptance.
+Both stores: `invalid_authoritative_commits=0`.
+Certificates are **not** identical (different payload urandom; different
+digests/byte lengths). This is disposition agreement on four planned
+cases, not full-suite storage independence.
 
-Mapping of user-requested categories to catalog names (no duplicate names
-invented). Disposition is catalog-match unless noted:
+Failed harness attempts preserved (not silent-repaired into the pair):
 
-| Requested category | Canonical coverage in this campaign | Live B6 store? |
+| Attempt | Exit | Evidence |
 | --- | --- | --- |
-| stale proof | `stale-cache:*` | no (catalog only; B6 blocked) |
-| substituted proof | `output-substitution`, `input-substitution`, `identity-substitution` | no |
-| payload/proof mismatch | `certificate-truncation:*`, substitutions | no |
-| canonicalization drift | `canonicalization-ambiguity:default` | no |
-| digest mismatch | `certificate-truncation:payload-digest` / `envelope-digest` | no |
-| replay | `cross-node-replay`, `cross-workflow-replay`, `cross-attempt-replay` | exact-replay on SQLite store only |
-| duplicate submission | `response-loss-and-retry:default` (mostly capability-BLOCKED) | exact-replay |
-| idempotent retry | same / B6 exact-replay | yes (4-case set) |
-| concurrent writers | `concurrent-double-commit:default` | sequential catalog; **not** a live race (Reviewer A P1) |
-| conflicting writers | `commit-id-equivocation:default` | yes (SQLite store) |
-| crash before authority commit | `validator-crash:*` (capability-BLOCKED on B0–B4) | no |
-| crash after commit before ack | `response-loss-and-retry:default` | no |
-| outbox replay | `outbox-failure:default` | no |
-| cross-workflow visibility | `cross-workflow-replay:default` | no |
-| unauthorized observation | no dedicated catalog variant | no |
-| storage divergence | not in qualification-live | no |
-| malformed certificate | truncation / unknown-version / oversized | no |
-| verifier disagreement | Python/Go pytest, not scenario catalog | see §14 |
-| unsupported algorithm/version | `unknown-protocol-version:default` | no |
-| partial/corrupt artifact | truncation | no |
-| timeout / dependency failure | `authority-store-transaction-failure:default` | no |
+| Fixture called directly | 1 | `docs/internal/apcc-1-evidence/b6-postgres-fixture-call-fail.txt` |
+| `inspect` missing after unwrap edit | 1 | `…/b6-postgres-unwrap-nameerror.txt` |
+| `relative_to(ROOT)` on pytest tmp | 1 (pytest); cases had already run | `…/b6-postgres-relative-to-fail.txt` |
 
-Unexpected acceptance of stale/substituted/malformed/mismatched/unauthorized
-evidence on a **live B6 store path** was not observed in the 4 planned
-negatives. Catalog B0–B3 `compromised` on missing-proof / substitutions is
-expected for those baselines, not a B6 fail-open.
+B6 public `execute` at `4ef82a2`: `ScenarioExecutionError: B6 execution
+requires trusted supervisor preflight`; capabilities `[]`.
+`execute_trusted` still requires `_SwarmExecutionHandle`. No in-tree
+catalog supervisor. Remains BLOCKED_MISSING_DEPENDENCY.
+
+Postgres `-m security` at `9c37e34`: 366 deselected, exit 5. Historical
+100/266 **not reproduced**.
+
+This is **not** frozen-plan 30-trial / 100-trial security acceptance.
 
 ## 11. Ablation results
 
 | Kind | Status |
 | --- | --- |
-| Implementation empirical ablations (frozen plan: remove one B6 element) | BLOCKED_MISSING_DEPENDENCY — not executed |
-| TLA+ witness/ablation | LIVE at campaign SHA; formal only; see §15 |
-| Passing intact system without degrading ablation | does not establish causation; empirical ablations absent |
+| Implementation empirical ablations | BLOCKED_MISSING_DEPENDENCY — command `ls experiments/apcc-1 scripts \| rg -i ablat` found no runner; IDs exist in `contract.py` |
+| TLA+ witness/ablation | LIVE at `9c37e34`; formal only; see §15 |
+| Passing intact system without degrading ablation | does not establish causation |
 
 ## 12. Performance results
 
-See §9 table. Additional:
+See §9b. Additional:
 
-- CPU, memory, DB connections, outbox backlog, recovery time, txn retry, lock
-  wait: **not instrumented** (not reported as zero).
+- CPU, memory, DB connections, outbox backlog, recovery time, txn retry,
+  lock wait: **not instrumented** (not reported as zero).
 - Bootstrap 10,000 resamples: protocol gap (`bootstrap_resamples: 0`).
-- B6 PostgreSQL performance: BLOCKED_MISSING_DEPENDENCY (no in-tree rate-generator).
-- Reviewer A P0: do not interpret these runs as the written 10/s cell.
-- Reviewer A P1: PG 366 overlapped this window (`16:08:32Z`–`16:48:17Z` vs
-  performance `16:09:54Z`–`16:55:50Z`).
+- B6 PostgreSQL performance: BLOCKED_MISSING_DEPENDENCY.
+- v1 `9c37e34` rows: INCONCLUSIVE; do not mix.
+- P2 confounders: swap exhaustion; `shared_buffers=128MB`.
 
 ## 13. PostgreSQL/SQLite cross-store equivalence
 
@@ -255,156 +245,133 @@ See §9 table. Additional:
 | --- | --- | --- |
 | SQLite APCC file | 383 passed in 34.03s at `9c37e34` | SQLite suite conformance |
 | PostgreSQL APCC file | 366 passed in 2385.52s at `9c37e34` | PostgreSQL suite conformance |
-| Shared canonical vectors, identical external dispositions | **not executed** | **not claimed** |
+| Shared four planned negatives | LIVE at `4ef82a2`; dispositions match; certificates differ | four-case disposition agreement only |
 
 Wording used: two implementations conform to their store-specific test
-contracts. “Storage independent” is **not** claimed.
+contracts; four planned negatives have the same external outcomes.
+“Storage independent” is **not** claimed.
 
 ## 14. Python/Go verifier agreement
 
-Repository closure (`tasks/apcc-1-plan.md`): standalone Go verifier without
-Python reuse; Go unit / **RFC vector** / APCC vector / formatting / vet /
-static checks; Python/Go agreement on every valid and invalid checked-in vector.
+| Check | SHA | Result |
+| --- | --- | --- |
+| `go test -count=1 ./...` + `gofmt -l` empty + `go vet` | `4ef82a2` | exit 0 (`campaign-4ef82a2-go-rfc.log`) |
+| `tests/test_apcc_go_verifier.py` + `tests/test_apcc_verifier.py` | `4ef82a2` | 66 passed in 1.48s |
+| RFC 8785 official text | retrieved | SHA-256 `63d52294eb0e3f0014174288186d388b4ddbf2c67d1ce8af1d9726eb0c3ab240` |
+| Appendix B numbers vs APCC-CJ1 | `3d4d9dd`/`4ef82a2` | `go test` expects `WRONG_JSON_TYPE` — documents the plan gap |
+| Store linearization by offline verifier | — | cannot |
 
-| Check at `9c37e34` | Result |
-| --- | --- |
-| `go test ./...` (cached, then `-count=1`) | exit 0; packages `apcc`, `cj1`, `cli` ok; `cmd/apcc-verify` no tests |
-| `gofmt -l` | empty / exit 0 |
-| `go vet ./...` | exit 0 |
-| `tests/test_apcc_go_verifier.py` + `tests/test_apcc_verifier.py` | 66 passed in 1.38s |
-| IETF RFC 8785 appendix corpus | **missing** — `internal/cj1` is APCC-CJ1 malleability, not RFC appendix |
-| Store linearization by offline verifier | **cannot** (`verifiers/apcc-go/README.md`) |
-
-**Verifier qualification gate: PARTIAL.** Tests at this SHA are green; the
-plan’s RFC-vector criterion is unmet. Historical note that tests alone do not
-automatically close the gate stands.
+**Verifier qualification gate: PARTIAL.** In-tree vectors agree. The
+plan’s RFC-vector / independent JCS criterion is unmet. Appendix B is
+number serialization; CJ1 admits objects/strings only.
 
 ## 15. TLA+ safety and non-vacuity evidence
 
-Command: `.venv/bin/python scripts/run_apcc_tlc.py --tlc-jar /home/martin/.cache/acgs-tlc/tla2tools-v1.7.4.jar --timeout 360`
-SHA: `9c37e34`. Specs unchanged vs `e2e87f9`. JAR pin matched.
-
-| Field | Value |
-| --- | --- |
-| Start | `2026-08-29T17:05:10Z` |
-| End | `2026-08-29T17:09:48Z` |
-| Wall | 278.111 s |
-| Runner exit | 0 |
-| Harness | **32/32 PASS** (this SHA’s `DEFAULT_CONFIGS` has 32 entries; historical “31/31” is not reused) |
-| Safety/liveness `exit=0` | `apcc_safety.cfg`, `apcc_liveness.cfg`, `apcc_causal_safety.cfg`, `apcc_multitenant_safety.cfg` |
-| Witness/ablation `exit=12` | 28 configs; harness-PASS of intended named invariant violations |
-
-Formal pytest wrapper `tests/test_apcc_formal.py`: 6 passed in 0.02s — **not TLC**.
+Unchanged from `9c37e34`: 32/32 harness PASS; 4 safety/liveness exit 0;
+28 witness/ablation exit 12. Specs unchanged. Formal wrapper 6 passed —
+**not TLC**.
 
 ## 16. Static-review findings
 
 Independent static close of frozen pair content `576c0449` / `dff15b7f`:
-`APPROVE-WITH-P2`; P0=0; P1=0. Pair unchanged at campaign SHA; close remains
-associated with that **content**, not with `df30286`.
+`APPROVE-WITH-P2`; P0=0; P1=0. Pair unchanged.
 
-Reviewer A (methodology): P0=1, P1=8 (performance labeling / fairness /
-undersampling / B6 preflight).
-Reviewer B (novelty): P0=3 (claim charts, frozen campaign, hashed archives).
+v1 Reviewer A (methodology): P0=1 (1 ms pacer / 10/s mislabel).
+v1 Reviewer B (novelty): P0=3 (claim charts, frozen campaign, hashed
+archives).
 
-No new frozen-pair code P0/P1. No silent pair repair.
+v2/continue independent lanes (inspect actual artifacts; not asked for GO):
+
+| Lane | Agent | Lane verdict | Candidate (lane) |
+| --- | --- | --- | --- |
+| Correctness / transactional | [Review](b1152987-8880-496e-9ce0-41bafaaa5ede) | REJECT transactional close; P0=0 P1=3 | UNDETERMINED |
+| Security / adversarial / fail-closed | [Review](056bf644-a655-447b-a4df-bc306b394cee) | REJECT frozen-plan security close; P0=0 live fail-open in 4 cases; P1=4 | UNDETERMINED |
+| Evidence / claim-discipline | [Review](fb6a2296-38c5-40fd-bcab-b429ba87e012) | REQUEST CHANGES; COMPLETE forbidden; frozen 10/s = NO | HOLD / UNDETERMINED |
+| Novelty / prior-art | [Review](e3375311-1807-4f8e-b30f-2f9e1158ebec) | UNDETERMINED; ceiling INSUFFICIENT EVIDENCE | n/a |
+
+P1 themes kept visible: `LIVE_MEASURED` is a stamp; four cases are
+return-value-only; four cases ≠ transactional suite or 30/100-trial
+security; `target_rate_enforced` hardcoded; B6 catalog tautological.
+No silent pair repair.
 
 ## 17. Known P2 limitations (frozen pair; remain visible)
 
-1. GCB fingerprint is not threaded through all reader and observation paths
-   (`_POSTGRES_SCHEMA_FINGERPRINT` on readers; GCB writers mutation-gated).
+1. GCB fingerprint is not threaded through all reader and observation paths.
 2. PostgreSQL does not have a native `commit_output_refs` pin.
 3. SQLSTATE 23505 mismatch handling sits outside the retry loop.
-4. Outbox delivery is at-least-once (claim/deliver/finalize are three transactions).
-5. `hashtextextended` advisory-lock collisions are theoretically possible
-   (unique constraints are the backstop).
-
-Additional documented P2s in the B2 close record (schema-manifest trigger names,
-`FOR UPDATE` missing-row, SQLite-only extras, self-referential matrix test)
-remain unresolved.
+4. Outbox delivery is at-least-once.
+5. `hashtextextended` advisory-lock collisions are theoretically possible.
 
 ## 18. Resource-leak and teardown findings
 
-- After PG 366 at `9c37e34`: no leftover `apcc_test_%` schemas; same two orphan
-  roles as Phase 0 (`aca927aa96486a240e433636` owner/runtime). Not attributed
-  as new leakage from the completed 366.
-- Live campaign: SQLite DBs, B5 provisioned venvs under `perf-db/`, WAL files
-  remain on disk; gitignored; no host-wide cleanup.
-- Reviewer A P2: B0–B4 performance adapters are not `close()`d.
-- Auto `MANIFEST.sha256` (7,688,585 bytes) hashes gitignored B5 trees — **not
-  committed**.
+- After PG four-case negatives at `4ef82a2`: no leftover `apcc_test_%`
+  schemas; same two orphan roles as Phase 0.
+- v2 performance: gitignored `perf-db/` remains on disk.
+- Auto `MANIFEST.sha256` under run dirs is **not** committed.
 
 ## 19. Artifact inventory and SHA-256 values
 
-Curated bindable files (`experiments/apcc-1/qualification-live/runs/campaign-9c37e34/CURATED-MANIFEST.sha256`):
+v2 continue curated files:
 
 ```
-2cc9dfa57122646dcf085623900de73df0934fb88bce329a3079118d66147f5c  experiments/apcc-1/qualification-live/runs/campaign-9c37e34-live/summary.json
-969ef867320f2d15a56e61cdbe06c4cef472a5c09b9d40a56ebef8fb730d98a9  experiments/apcc-1/qualification-live/runs/campaign-9c37e34-live/scenarios.jsonl
-3393f752f3a9193ad301ac6cab25d7863c0373d7758dd979292499fefd1f5340  experiments/apcc-1/qualification-live/runs/campaign-9c37e34-live/b6-sqlite-negatives.jsonl
-1a8d7fabb8131802b45466fbbbbaebfc4929254ed364a820e1e266db20e43e40  experiments/apcc-1/qualification-live/runs/campaign-9c37e34-live/performance.jsonl
-6b58237bd27cc933ff0e5b3ea4e23a7c38fc084cb70289112cd5317cd28cbea8  experiments/apcc-1/qualification-live/runs/campaign-9c37e34-live-driver.log
-78cece2beefa8a7a61a8013790269b4156fd0fe6fb8cca933b4b9d566bbcf48d  experiments/apcc-1/qualification-live/runs/campaign-9c37e34/gates/apcc-unit-empirical-formal.log
-f244c5219e206e476e5c49842d112d8db5f158b5e486bfe06552975ff0079240  experiments/apcc-1/qualification-live/runs/campaign-9c37e34/gates/postgres-full.log
-eeadc67c8675ea9c7879ce1a52c3da3c8e06aaed83d63d9f7d3b19a77154540e  experiments/apcc-1/qualification-live/runs/campaign-9c37e34/gates/postgres-security-marker.log
-9242d2783fc5be98c91eb9e37becaaf38ff8a57b36fa0ed94a228e496b46c2dd  experiments/apcc-1/qualification-live/runs/campaign-9c37e34/gates/sqlite-full.log
-54908de7d68e44fd55b3919f3ec52aacfb08315dca608c70a77b6d07d5116c5a  experiments/apcc-1/qualification-live/runs/campaign-9c37e34/gates/tlc.log
-126644ede811f12989474d788ac391ec71d00de0684fc26f49d124c95c000bed  experiments/apcc-1/qualification-live/runs/campaign-9c37e34/gates/verifier-go-count1.log
-cd48d1c72c4d5f39f62ab0534f9a5c67a5a8751d579120ce2fbe80f2e65fbc93  experiments/apcc-1/qualification-live/runs/campaign-9c37e34/gates/verifier.log
-079037d4c99220a6ba71837101704a07a310e9b4bfdfac6d139b2b2a0114083a  experiments/apcc-1/qualification-live/runs/campaign-9c37e34/identity.txt
+8f1882ab7a7cc2a1aa05337e5b302502cfd9cb73360f5944d40e32684f481f70  experiments/apcc-1/qualification-live/runs/campaign-3d4d9dd-perf/performance.jsonl
+1c8f6b7999359617764ec61f3614da5a87cb584a46c9309be6892cac9c549a40  experiments/apcc-1/qualification-live/runs/campaign-3d4d9dd-perf/summary.json
+c30b8b240f767e02a3472cc0441c955782b5a50258ef7cf04767fd51aefcec27  experiments/apcc-1/qualification-live/runs/campaign-3d4d9dd-perf-driver.log
+43185d5913a881669f754c24689aa0f48c91d0e03ea83599cf4ea95e0195d9f5  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-pgneg/b6-postgres-negatives.jsonl
+aed5601aa7e1f05ec19e52b0965e358578846f0c12dfa1f088fe26ea9289fa64  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-pgneg/summary.json
+eaf0b2160211322a6ff8508a917898fd400183b1d2181f181eb71d9d68835a8f  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-pgneg-driver.log
+f96e7a1c458ebbf905c8a7386c232a6fb2b2b7135984a980314e74071df360a7  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-pgneg-pytest.log
+dd2b1bf73f7ec3005d0eead586039079bf0760b12d97bc9b3c98ac9981ab7a8f  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-sqlite-neg/b6-sqlite-negatives.jsonl
+8320eff8b5d8683a1930b170da80b70928e63a9cbbfbdf9a961bf9386d7557bc  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-sqlite-neg/summary.json
+3416cf5e7ca219c2558b6a24cc524cbb2aee57d20c72d0f1fe68d34c6ccba076  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-sqlite-neg-driver.log
+0bb1c7cbb6819b7f45218d0213043d21faa2137315bfe2a0b3fd48954f73a62c  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-go-rfc.log
 ```
 
-Do not commit: `MANIFEST.sha256`, `*.db`, `perf-db/`, `scenario-db/`,
-`perf-b6-sqlite/`, `b6-sqlite/`.
+v1 curated hashes remain in
+`experiments/apcc-1/qualification-live/runs/campaign-9c37e34/CURATED-MANIFEST.sha256`.
+
+Do not commit: auto `MANIFEST.sha256`, `*.db`, `perf-db/`, `scenario-db/`,
+`ql-smoke-b6{,b,c}/`.
 
 ## 20. Reproduction commands
 
-Pin `git -C` to the worktree. Campaign SHA must be `9c37e34` to reproduce
-these artifacts (later evidence commits do not re-run measurements).
+Pin `git -C` to the worktree. Use the SHA that produced the artifact.
 
 ```bash
 WT=/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit
-git -C "$WT" rev-parse HEAD   # measurements were taken at 9c37e34
 export APCC_POSTGRES_DSN='postgresql://apcc@127.0.0.1:55434/apcc_test'
-"$WT/.venv/bin/python" -m pytest tests/test_apcc_postgres.py --import-mode=importlib -q --tb=line
-"$WT/.venv/bin/python" -m pytest tests/test_apcc_sqlite.py --import-mode=importlib -q --tb=line
-"$WT/.venv/bin/python" -m pytest tests/test_apcc_empirical_adapters.py tests/test_apcc_empirical_artifacts.py tests/test_apcc_empirical_contract.py tests/test_apcc_empirical_historical_gcb.py tests/test_apcc_empirical_scenarios.py --import-mode=importlib -q
-"$WT/.venv/bin/python" -m pytest tests/test_apcc_formal.py --import-mode=importlib -q
-"$WT/.venv/bin/python" -m pytest tests/test_apcc_model.py tests/test_apcc_codec.py tests/test_apcc_service.py tests/test_apcc_observation.py tests/test_apcc_observation_semantics.py tests/test_apcc_architecture.py tests/test_apcc_authority_backend.py tests/test_apcc_authority_service.py tests/test_apcc_gcb_projection_contract.py --import-mode=importlib -q
-( cd "$WT/verifiers/apcc-go" && go test -count=1 ./... && test -z "$(gofmt -l .)" && go vet ./... )
-"$WT/.venv/bin/python" -m pytest tests/test_apcc_go_verifier.py tests/test_apcc_verifier.py --import-mode=importlib -q
-"$WT/.venv/bin/python" "$WT/scripts/run_apcc_tlc.py" --tlc-jar /home/martin/.cache/acgs-tlc/tla2tools-v1.7.4.jar --timeout 360
-"$WT/.venv/bin/python" "$WT/experiments/apcc-1/run_qualification_live.py" --run-id reproduce-check
+# v2 performance (SHA 3d4d9dd)
+git -C "$WT" rev-parse HEAD   # was 3d4d9dd when campaign-3d4d9dd-perf ran
+"$WT/.venv/bin/python" "$WT/experiments/apcc-1/run_qualification_live.py" --performance --run-id reproduce-v2-perf
+# four-case PG + SQLite (SHA 4ef82a2)
+"$WT/.venv/bin/python" "$WT/experiments/apcc-1/run_qualification_live.py" --b6-postgres --run-id reproduce-pgneg
+"$WT/.venv/bin/python" "$WT/experiments/apcc-1/run_qualification_live.py" --b6-sqlite --run-id reproduce-sqlite-neg
+"$WT/.venv/bin/python" -m pytest tests/test_apcc_ql_b6_store_negatives.py --import-mode=importlib -q
 ```
 
-Re-running qualification-live will **not** reproduce payload bytes (urandom)
-or 10/s pacing (1 ms sleep cap still in `9c37e34` harness).
+Re-running uses new urandom payloads; dispositions—not certificate
+digests—are the comparable field.
 
 ## 21. Prior-art comparison
 
-`docs/internal/APCC-1-Prior-Art.md` (cut-off 2026-08-28): mechanism novelty
-**INSUFFICIENT EVIDENCE**; ceiling **SYSTEMS ABSTRACTION**. No local hashed
-archives. No claim charts for CCF/IA-CCF, Corda, Fabric, TCT, Authenticated
-Workflows, PoE, CommitGuard. Qualification-live does not change that record.
-Reviewer B: prior art is not shown to subsume the four-part conjunction and
-not shown to be absent. Strongest adverse reading remains predictable
-composition.
+Unchanged: `docs/internal/APCC-1-Prior-Art.md` (cut-off 2026-08-28):
+mechanism novelty **INSUFFICIENT EVIDENCE**; ceiling **SYSTEMS ABSTRACTION**.
+No local hashed archives. No claim charts. v2 measurements do not change
+that record.
 
 ## 22. Novelty analysis
 
-Rubric precommitted in `APCC-1-Qualification-Live-Protocol.md` **before**
-outcomes. Overall GO/CONDITIONAL/NO-GO only after required **frozen-plan** live
-gates. Those gates are incomplete ⇒ overall **UNDETERMINED**.
+Overall **UNDETERMINED**. Passing store tests and a held 10/s pacer on
+B0–B4 experiment adapters do not move mechanism novelty off INSUFFICIENT
+EVIDENCE.
 
 | Axis | Verdict | Basis |
 | --- | --- | --- |
-| Mechanism novelty | UNDETERMINED | charts + frozen live cells missing; not NO-GO (subsumption unproven); not GO |
-| Systems-architecture | CONDITIONAL | qualification-live subset only; do not raise SYSTEMS ABSTRACTION ceiling |
-| Implementation assurance | CONDITIONAL | SHA-bound stores/formal/unit gates; RFC 8785 appendix missing; P2s open |
-| Empirical utility | CONDITIONAL | subset only; 4 B6 SQLite negatives held planned counter; frozen cells incomplete |
+| Mechanism novelty | UNDETERMINED | charts + frozen live cells missing |
+| Systems-architecture | CONDITIONAL | qualification-live subset only |
+| Implementation assurance | CONDITIONAL | SHA-bound stores; RFC appendix unmet; P2s open |
+| Empirical utility | CONDITIONAL | 4+4 negatives held planned counter; frozen cells incomplete |
 | Operational applicability | not claimed | rubric default |
-
-A large passing unit-test count does not move mechanism novelty off
-INSUFFICIENT EVIDENCE.
 
 ## 23. Unsupported or rejected claims
 
@@ -413,45 +380,51 @@ INSUFFICIENT EVIDENCE.
 - Empirical pytest 209 as live B0–B6
 - Formal wrapper 6 as TLC
 - Independent green SQLite 383 + PG 366 as storage independence
-- Historical postgres `-m security` 100 passed / 266 deselected at this SHA
-  (actual: 366 deselected, exit 5)
-- Target rate 10/s enforced; performance `LIVE_MEASURED` as the §C cell
-- Throughput/latency superiority or 25% overhead vs B5
-- Mechanism novelty GO / primitive novelty
+- Four-case disposition match as full storage independence
+- Historical postgres `-m security` 100/266 at `9c37e34`
+- v1 performance as the written 10/s cell
+- v2 performance as the frozen-plan W1 cell
+- `target_rate_enforced: true` as proof B5/B6 achieved 10/s
+- Throughput/latency superiority vs B5
+- Mechanism novelty GO
 - Production readiness
 - TLC exit 12 as ordinary safety success
-- RFC 8785 appendix conformance
+- RFC 8785 appendix / independent JCS conformance
 - Empirical ablation non-vacuity
+- CANDIDATE PASS of the frozen-plan APCC-1 qualification
 
 ## 24. Final qualification table
 
 | Gate | SHA | Status |
 | --- | --- | --- |
-| Frozen pair integrity | `9c37e34` content `576c0449`/`dff15b7f` | intact; P2s open |
-| Independent static B2 | pair content | APPROVE-WITH-P2; not re-run (pair unchanged) |
+| Frozen pair integrity | content `576c0449`/`dff15b7f` | intact; P2s open |
 | PostgreSQL 366 | `9c37e34` | 366 passed in 2385.52s, exit 0 |
-| Postgres `-m security` | `9c37e34` | 366 deselected, exit 5; historical 100/266 **not reproduced** |
+| Postgres `-m security` | `9c37e34` | 366 deselected, exit 5 |
 | SQLite APCC 383 | `9c37e34` | 383 passed in 34.03s, exit 0 |
-| Empirical contract 209 | `9c37e34` | 209 passed in 84.79s — CONTRACT ONLY |
-| Remaining 9 APCC files | `9c37e34` | 269 passed in 64.07s (not historical 331; different selection) |
-| Formal wrapper | `9c37e34` | 6 passed in 0.02s — not TLC |
-| TLC harness | `9c37e34` | 32/32 PASS; 4 safety exit 0; 28 witness/ablation exit 12 |
-| Go + Python agreement | `9c37e34` | tests green; RFC appendix **missing** ⇒ verifier PARTIAL |
-| Cross-store shared vectors | — | not executed |
-| B0–B6 frozen matrix | — | PENDING / CONTRACT_ONLY |
-| B0–B6 qualification-live scenarios | `9c37e34` | 273/273 catalog-match; B6 public BLOCKED |
-| B6 SQLite 4 negatives | `9c37e34` | LIVE; planned counter 0 |
-| B0–B6 performance 10/s cell | `9c37e34` | INCONCLUSIVE (P0 labeling / rate) |
+| Empirical contract 209 | `9c37e34` | CONTRACT ONLY |
+| TLC harness | `9c37e34` | 32/32 PASS; 28 witness exit 12 |
+| v1 scenarios | `9c37e34` | 273/273 catalog-match; B6 public BLOCKED |
+| v1 performance 10/s | `9c37e34` | INCONCLUSIVE |
+| v2 performance B0–B4 10/s | `3d4d9dd` | PACED_CEILING (v2 subset); not frozen W1 |
+| v2 performance B5/B6 | `3d4d9dd` | RATE_MISS + INCOMPLETE_RUN |
+| Frozen-plan W1 cell | — | NOT CLAIMED |
+| B6 SQLite 4 negatives | `4ef82a2` | LIVE; planned counter 0 |
+| B6 PostgreSQL 4 negatives | `4ef82a2` | LIVE; planned counter 0; dispositions match SQLite |
+| B6 public execute | `4ef82a2` | BLOCKED_MISSING_DEPENDENCY |
+| B6 PG performance | — | BLOCKED_MISSING_DEPENDENCY |
 | Empirical ablations | — | BLOCKED_MISSING_DEPENDENCY |
-| Independent reviews | this file | A + B complete; both refuse mechanism GO |
+| Verifier RFC appendix | `4ef82a2` | PARTIAL |
+| Python/Go 66 | `4ef82a2` | 66 passed in 1.48s |
+| Frozen matrix | — | PENDING / CONTRACT_ONLY |
 | Novelty | — | UNDETERMINED |
+| Candidate | — | VERDICT UNDETERMINED |
 | Production readiness | — | NOT CLAIMED |
 
 ## 25. Commit and push status
 
-Campaign SHA (measurements): `9c37e34a9a1971057d304dab1bc4b893dafc17a6`.
-Evidence checkpoint: `c5be1d49eea7b779378182fd2db4df2255c65df1`.
-Results/novelty checkpoint: this commit (see `git log -1`).
+v2 pacer: `3d4d9dd4bf8b6f6071fd823e17fb96110c11ccd1`.
+PG unwrap + pytest: `4ef82a21af884e749cee31e79b9ee6360ad3cfa8`.
+Results checkpoint: this commit after reviews.
 **Push not performed**; no upstream; no fetch.
 
 ## 26. Production-readiness statement
@@ -459,31 +432,29 @@ Results/novelty checkpoint: this commit (see `git log -1`).
 **PRODUCTION READINESS NOT CLAIMED.**
 
 No operator runbook, multi-host durability campaign, or production-like
-`shared_buffers`/swap-free host was used. Known P2s remain. B6 public execute
-path is inert.
+`shared_buffers`/swap-free host was used. Known P2s remain. B6 public
+execute path is inert.
 
-## Compact evidence table (commands)
+## Compact evidence table (new this continue)
 
-| Command | SHA | Start UTC | End UTC | Exit | Summary | Artifact | SHA-256 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `pytest tests/test_apcc_postgres.py -q --tb=line` | `9c37e34` | 2026-08-29T16:08:32Z | 2026-08-29T16:48:17Z | 0 | 366 passed in 2385.52s | `…/gates/postgres-full.log` | `f244c5219e206e476e5c49842d112d8db5f158b5e486bfe06552975ff0079240` |
-| `pytest tests/test_apcc_postgres.py -m security` | `9c37e34` | 2026-08-29T17:05:25Z | 2026-08-29T17:05:25Z | 5 | 366 deselected | `…/gates/postgres-security-marker.log` | `eeadc67c8675ea9c7879ce1a52c3da3c8e06aaed83d63d9f7d3b19a77154540e` |
-| `pytest tests/test_apcc_sqlite.py -q` | `9c37e34` | 2026-08-29T16:08:36Z | 2026-08-29T16:09:11Z | 0 | 383 passed in 34.03s | `…/gates/sqlite-full.log` | `9242d2783fc5be98c91eb9e37becaaf38ff8a57b36fa0ed94a228e496b46c2dd` |
-| empirical 5 files | `9c37e34` | 2026-08-29T16:08:46Z | (in combined log) | 0 | 209 passed in 84.79s | `…/gates/apcc-unit-empirical-formal.log` | `78cece2beefa8a7a61a8013790269b4156fd0fe6fb8cca933b4b9d566bbcf48d` |
-| remaining 9 files | `9c37e34` | same log | 2026-08-29T16:11:15Z | 0 | 269 passed in 64.07s | same | same |
-| `test_apcc_formal.py` | `9c37e34` | same log | same | 0 | 6 passed in 0.02s | same | same |
-| `go test`/`gofmt`/`go vet` + 66 pytest | `9c37e34` | 2026-08-29T16:08:42Z | 2026-08-29T16:08:45Z | 0 | 66 passed in 1.38s; go cached | `…/gates/verifier.log` | `cd48d1c72c4d5f39f62ab0534f9a5c67a5a8751d579120ce2fbe80f2e65fbc93` |
-| `go test -count=1 ./...` | `9c37e34` | 2026-08-29T16:16:44Z | 2026-08-29T16:16:44Z | 0 | apcc 0.022s, cj1 0.002s, cli 0.109s | `…/gates/verifier-go-count1.log` | `126644ede811f12989474d788ac391ec71d00de0684fc26f49d124c95c000bed` |
-| `run_apcc_tlc.py` 32 configs | `9c37e34` | 2026-08-29T17:05:10Z | 2026-08-29T17:09:48Z | 0 | 32/32 harness PASS | `…/gates/tlc.log` | `54908de7d68e44fd55b3919f3ec52aacfb08315dca608c70a77b6d07d5116c5a` |
-| `run_qualification_live.py --run-id campaign-9c37e34-live` | `9c37e34` | 2026-08-29T16:08:46Z | 2026-08-29T16:55:55Z | 0 | 273/273; 4 B6 negatives; perf INCONCLUSIVE | driver + jsonl | driver `6b58237bd27cc933ff0e5b3ea4e23a7c38fc084cb70289112cd5317cd28cbea8` |
+| Command | SHA | Start UTC | End UTC | Exit | Summary |
+| --- | --- | --- | --- | --- | --- |
+| `run_qualification_live.py --performance --run-id campaign-3d4d9dd-perf` | `3d4d9dd` | 2026-08-29T17:56:14Z | 2026-08-29T18:42:11Z | 0 | 91 rows; B0–B4 ~10.02/s; B5/B6 <10; all incomplete |
+| `pytest tests/test_apcc_ql_b6_store_negatives.py` | `4ef82a2` | 2026-08-29T18:02:06Z | 2026-08-29T18:02:24Z | 0 | 2 passed in 17.98s |
+| `run_qualification_live.py --b6-postgres --run-id campaign-4ef82a2-pgneg` | `4ef82a2` | 2026-08-29T18:02:24Z | 2026-08-29T18:02:43Z | 0 | 4 cases; invalid_authoritative_commits=0 |
+| `run_qualification_live.py --b6-sqlite --run-id campaign-4ef82a2-sqlite-neg` | `4ef82a2` | 2026-08-29T18:04:06Z | 2026-08-29T18:04:07Z | 0 | 4 cases; dispositions match PG |
+| `go test -count=1 ./...` + gofmt + vet | `4ef82a2` | 2026-08-29T18:04:07Z | 2026-08-29T18:04:07Z | 0 | packages ok; RFC B expects WRONG_JSON_TYPE |
+| `pytest tests/test_apcc_go_verifier.py tests/test_apcc_verifier.py` | `4ef82a2` | 2026-08-29T18:04:41Z | 2026-08-29T18:04:43Z | 0 | 66 passed in 1.48s |
+| `--b6-postgres` fixture-direct | `3d4d9dd` | 2026-08-29T17:56:15Z | 2026-08-29T17:56:15Z | 1 | preserved |
+| PG 366 (kept) | `9c37e34` | 2026-08-29T16:08:32Z | 2026-08-29T16:48:17Z | 0 | 366 passed in 2385.52s |
 
 ## Next action if incomplete
 
 1. Do not relabel qualification-live as `apcc-1.matrix.v1`.
-2. Optional: fix 1 ms sleep cap in a **new** protocol checkpoint; rerun
-   **performance only** on the new SHA; do not mix with `9c37e34` rows.
-3. Required for a stronger novelty verdict: claim-chart archive; frozen live
-   B0–B6 cells or a newly frozen smaller matrix **before** measurement; live
-   B6 adapter; empirical ablations; shared SQLite/PG vectors; RFC 8785 appendix
-   corpus; five-seed / 30-trial cardinalities.
+2. Do not claim frozen-plan W1 from v2 B0–B4 10/s.
+3. Required for a stronger novelty or candidate pass: claim-chart archive;
+   frozen live B0–B6 cells or a newly frozen smaller matrix **before**
+   measurement; live B6 adapter; empirical ablation runner; RFC 8785
+   independent JCS; five-seed / 30-trial cardinalities; host matching the
+   frozen environment.
 4. Do not push from this worktree unless a human requests it.

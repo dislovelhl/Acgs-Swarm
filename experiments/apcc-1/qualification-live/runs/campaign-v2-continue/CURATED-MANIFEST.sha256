@@ -1,0 +1,12 @@
+8f1882ab7a7cc2a1aa05337e5b302502cfd9cb73360f5944d40e32684f481f70  experiments/apcc-1/qualification-live/runs/campaign-3d4d9dd-perf/performance.jsonl
+1c8f6b7999359617764ec61f3614da5a87cb584a46c9309be6892cac9c549a40  experiments/apcc-1/qualification-live/runs/campaign-3d4d9dd-perf/summary.json
+c30b8b240f767e02a3472cc0441c955782b5a50258ef7cf04767fd51aefcec27  experiments/apcc-1/qualification-live/runs/campaign-3d4d9dd-perf-driver.log
+43185d5913a881669f754c24689aa0f48c91d0e03ea83599cf4ea95e0195d9f5  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-pgneg/b6-postgres-negatives.jsonl
+aed5601aa7e1f05ec19e52b0965e358578846f0c12dfa1f088fe26ea9289fa64  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-pgneg/summary.json
+eaf0b2160211322a6ff8508a917898fd400183b1d2181f181eb71d9d68835a8f  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-pgneg-driver.log
+f96e7a1c458ebbf905c8a7386c232a6fb2b2b7135984a980314e74071df360a7  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-pgneg-pytest.log
+dd2b1bf73f7ec3005d0eead586039079bf0760b12d97bc9b3c98ac9981ab7a8f  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-sqlite-neg/b6-sqlite-negatives.jsonl
+8320eff8b5d8683a1930b170da80b70928e63a9cbbfbdf9a961bf9386d7557bc  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-sqlite-neg/summary.json
+3416cf5e7ca219c2558b6a24cc524cbb2aee57d20c72d0f1fe68d34c6ccba076  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-sqlite-neg-driver.log
+0bb1c7cbb6819b7f45218d0213043d21faa2137315bfe2a0b3fd48954f73a62c  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-go-rfc.log
+0cf295198e6e5117d88db3640c148976cc78d0c9649b95e6364027da5c429459  experiments/apcc-1/qualification-live/runs/campaign-4ef82a2-py-go-verifier.log
