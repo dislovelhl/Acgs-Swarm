@@ -1,0 +1,22 @@
+start=2026-08-29T17:56:15Z
+HEAD=3d4d9dd4bf8b6f6071fd823e17fb96110c11ccd1
+Traceback (most recent call last):
+  File "/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/experiments/apcc-1/run_qualification_live.py", line 1002, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/experiments/apcc-1/run_qualification_live.py", line 978, in main
+    report["b6_postgres_negatives"] = run_b6_postgres_negatives(run_dir, git_sha)
+                                      ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/experiments/apcc-1/run_qualification_live.py", line 574, in run_b6_postgres_negatives
+    env_gen = pg_tests.postgres_environment()
+  File "/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1299, in __call__
+    fail(message, pytrace=False)
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit/.venv/lib/python3.13/site-packages/_pytest/outcomes.py", line 163, in __call__
+    raise Failed(msg=reason, pytrace=pytrace)
+Failed: Fixture "postgres_environment" called directly. Fixtures are not meant to be called directly,
+but are created automatically when test functions request them as parameters.
+See https://docs.pytest.org/en/stable/explanation/fixtures.html for more information about fixtures, and
+https://docs.pytest.org/en/stable/deprecations.html#calling-fixtures-directly
+exit=1
+end=2026-08-29T17:56:15Z

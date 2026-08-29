@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import statistics
@@ -91,6 +92,13 @@ def _git_sha() -> str:
 def _append(path: Path, record: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _artifact_ref(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
 
 
 def run_scenarios(run_dir: Path, git_sha: str) -> dict[str, Any]:
@@ -187,7 +195,7 @@ def run_scenarios(run_dir: Path, git_sha: str) -> dict[str, Any]:
     return {
         "start_utc": start,
         "end_utc": _utc(),
-        "artifact": str(out.relative_to(ROOT)),
+        "artifact": _artifact_ref(out),
         "counts": counts,
     }
 
@@ -422,7 +430,7 @@ def run_b6_sqlite_negatives(run_dir: Path, git_sha: str) -> dict[str, Any]:
     return {
         "start_utc": start,
         "end_utc": _utc(),
-        "artifact": str(out.relative_to(ROOT)),
+        "artifact": _artifact_ref(out),
         "cases": [record.get("case_id") for record in records],
         "invalid_authoritative_commits": invalid_authority,
         "records": records,
@@ -571,7 +579,13 @@ def run_b6_postgres_negatives(run_dir: Path, git_sha: str) -> dict[str, Any]:
     sqlite_tests, RequestOutcome, Signature, ReplayCommitRequest, _ = _b6_helpers()
     import tests.test_apcc_postgres as pg_tests
 
-    env_gen = pg_tests.postgres_environment()
+    env_fn = inspect.unwrap(pg_tests.postgres_environment)
+    if not inspect.isgeneratorfunction(env_fn):
+        raise TypeError(
+            "postgres_environment unwrap is not a generator: "
+            f"{type(pg_tests.postgres_environment)!r} -> {type(env_fn)!r}"
+        )
+    env_gen = env_fn()
     store = None
     records: list[dict[str, Any]] = []
     try:
@@ -626,7 +640,7 @@ def run_b6_postgres_negatives(run_dir: Path, git_sha: str) -> dict[str, Any]:
         "end_utc": _utc(),
         "status": "LIVE_MEASURED",
         "store": "postgresql",
-        "artifact": str(out.relative_to(ROOT)),
+        "artifact": _artifact_ref(out),
         "cases": [record.get("case_id") for record in records],
         "invalid_authoritative_commits": invalid_authority,
         "records": records,
@@ -936,7 +950,7 @@ def run_performance(run_dir: Path, git_sha: str) -> dict[str, Any]:
     return {
         "start_utc": start,
         "end_utc": _utc(),
-        "artifact": str(out.relative_to(ROOT)),
+        "artifact": _artifact_ref(out),
         "summary": summary,
     }
 

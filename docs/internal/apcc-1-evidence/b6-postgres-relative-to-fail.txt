@@ -1,0 +1,20 @@
+start=2026-08-29T17:59:34Z
+HEAD=3d4d9dd4bf8b6f6071fd823e17fb96110c11ccd1
+inspect_import=14:import inspect
+F.                                                                       [100%]
+=================================== FAILURES ===================================
+__________________ test_ql_b6_postgres_four_planned_negatives __________________
+tests/test_apcc_ql_b6_store_negatives.py:37: in test_ql_b6_postgres_four_planned_negatives
+    report = runner.run_b6_postgres_negatives(tmp_path, "pytest-ql-b6-pg")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+experiments/apcc-1/run_qualification_live.py:636: in run_b6_postgres_negatives
+    "artifact": str(out.relative_to(ROOT)),
+                    ^^^^^^^^^^^^^^^^^^^^^
+/home/martin/.local/share/uv/python/cpython-3.13.13-linux-x86_64-gnu/lib/python3.13/pathlib/_local.py:385: in relative_to
+    raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
+E   ValueError: '/tmp/pytest-of-martin/pytest-1725/test_ql_b6_postgres_four_plann0/b6-postgres-negatives.jsonl' is not in the subpath of '/home/martin/Documents/Codex/2026-08-26/acgs-swarm-multi-agent-systems-distributed/work/Acgs-Swarm-public-main/.worktrees/apcc-1-atomic-proof-carrying-commit'
+=========================== short test summary info ============================
+FAILED tests/test_apcc_ql_b6_store_negatives.py::test_ql_b6_postgres_four_planned_negatives
+1 failed, 1 passed in 18.70s
+pytest_exit=1
+end=2026-08-29T17:59:53Z
