@@ -49,6 +49,9 @@ def test_b0_through_b4_are_isolated_sqlite_experiments_with_exact_guarantees(
         assert control.authoritative_outcome == "committed"
         assert adapter.snapshot().accepted_count == 1
 
+
+@pytest.mark.slow
+def test_b5_is_the_pinned_historical_gcb_adapter(tmp_path: Path) -> None:
     b5 = create_baseline_adapter("B5", tmp_path / "b5.db")
     assert isinstance(b5, HistoricalGCBAdapter)
     try:

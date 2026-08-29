@@ -36,6 +36,8 @@ from constitutional_swarm.apcc_empirical.scenarios import (
     default_scenario_catalog,
 )
 
+pytestmark = pytest.mark.slow
+
 
 def test_b5_extracts_and_verifies_the_exact_historical_source(tmp_path: Path) -> None:
     adapter = create_baseline_adapter("B5", tmp_path / "historical.sqlite3")
