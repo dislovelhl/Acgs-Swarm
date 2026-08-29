@@ -7,7 +7,6 @@ writer process and is never persisted.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -18,7 +17,6 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
-from enum import Enum
 from pathlib import Path
 from threading import Lock
 from typing import Iterator, Protocol, cast
@@ -28,6 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .codec import (
     canonical_statement,
+    decode_authority_status,
     decode_certificate,
     decode_envelope,
     encode_authority_status_body,
@@ -42,6 +41,25 @@ from .crypto import (
     predecessor_root,
     sha256_digest,
     verify_detached,
+)
+from .gcb_projection import (
+    _GCBAgentFacts,
+    _GCBAtomicCommitRequest,
+    _GCBNodeFacts,
+    _GCBPredecessorFacts,
+    _GCBProjectionCheckpoint,
+    _GCBProjectionDenied,
+    _GCBProjectionFacts,
+    _GCBProjectionFault,
+    _GCBProjectionPlan,
+    _GCBStagedArtifactFacts,
+    _GCBWorkflowFacts,
+    _ValidatedGCBProjection as _PureValidatedGCBProjection,
+    _gcb_exact_int,
+    _gcb_material_object,
+    _gcb_string_list,
+    _validate_gcb_projection,
+    _validate_gcb_projection_identity,
 )
 from .model import (
     AuthorityStatus,
@@ -65,11 +83,18 @@ from .model import (
     Signature,
     SupersessionValue,
 )
+from .observation import (
+    AuthorityObservationRequest,
+    AuthorityObservationSnapshot,
+    AuthorityObservationSnapshotChanged,
+    AuthorityObservationState,
+)
 from .ports import (
     APCCAuthorityConfig,
     AssembleEvidenceRequest,
     AssembleEvidenceResult,
     AtomicCommitRequest,
+    AuthorityObservationStatusSigner,
     AuthorityRuntime,
     AuthorityClock,
     AuthoritySigningRole,
@@ -113,7 +138,7 @@ from .verifier import (
 )
 
 _APPLICATION_ID = 0x41504343  # ASCII "APCC"
-_AUTHORITY_SCHEMA_VERSION = "2"
+_AUTHORITY_SCHEMA_VERSION = "3"
 _SCHEMA_VERSION = int(_AUTHORITY_SCHEMA_VERSION)
 _MAX_STATUS_BATCH_SIZE = 1000
 _MAX_CERTIFICATE_CACHE_PAYLOAD_BYTES = 4 * 1024 * 1024
@@ -148,47 +173,6 @@ class _AuthorityConnection(Protocol):
     def close(self) -> None: ...
 
 
-class _GCBProjectionCheckpoint(Enum):
-    """Fixed, raise-only test checkpoints in the closed GCB projection."""
-
-    BEFORE_LEGACY_WRITE = "before_legacy_write"
-    AFTER_NODE_WRITE = "after_node_write"
-    AFTER_WORKFLOW_WRITE = "after_workflow_write"
-    AFTER_DECISION_WRITE = "after_decision_write"
-    AFTER_EVIDENCE_WRITE = "after_evidence_write"
-    AFTER_OUTBOX_WRITE = "after_outbox_write"
-    AFTER_CHILD_UNLOCK = "after_child_unlock"
-    AFTER_ATTESTATION = "after_attestation"
-
-
-@dataclass(frozen=True, slots=True)
-class _GCBProjectionPlan:
-    """Immutable semantic values for the one built-in legacy projection.
-
-    This record intentionally contains no SQL, operations, connections, or
-    callables.  Every value is checked against the APCC request and locked GCB
-    rows before the store executes its own fixed statements.  This is a closed
-    trusted-host boundary, not a Python sandbox: same-UID reflection or process
-    compromise remains outside the host threat model.
-    """
-
-    workflow_id: str
-    node_id: str
-    attempt_id: str
-    agent_id: str
-    commit_id: str
-    nonce: str
-    expected_node_version: int
-    committed_node_version: int
-    expected_workflow_state_version: int
-    policy_digest: str
-    request_hash: str
-    receipt_material: str
-    receipt_digest: str
-    verdict_material: str
-    verdict_digest: str
-
-
 @dataclass(frozen=True, slots=True)
 class _SemanticSnapshot:
     """Validated certificate facts produced by one full store attestation."""
@@ -203,23 +187,6 @@ class _CausalBatchFacts:
     closure: frozenset[str]
     depth: int
     error: FailureCode | None
-
-
-@dataclass(frozen=True, slots=True)
-class _GCBAtomicCommitRequest(AtomicCommitRequest):
-    """Internal APCC request carrying only an immutable GCB semantic plan."""
-
-    _gcb_projection_plan: _GCBProjectionPlan
-
-
-class _GCBProjectionDenied(RuntimeError):
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
-class _GCBProjectionFault(RuntimeError):
-    pass
 
 
 def _semantic_checkpoint_body(
@@ -592,76 +559,6 @@ def _loads(value: str) -> object:
     return json.loads(value)
 
 
-_GCB_RECEIPT_PROFILE = "acgs-swarm/gcb-receipt/v1"
-_GCB_SIGNATURE_ALGORITHM = "Ed25519"
-_GCB_COMMIT_INTENT = "governed_commit"
-_GCB_VERDICT_DOMAIN = b"ACGS-SWARM\x00GCB\x00VERDICT\x00V1\x00"
-
-
-def _gcb_material_object(value: str, *, label: str) -> dict[str, object]:
-    if not isinstance(value, str) or len(value.encode("utf-8")) > 1_048_576:
-        raise _GCBProjectionDenied(f"invalid_{label}_material")
-
-    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, item in items:
-            if key in result:
-                raise _GCBProjectionDenied(f"invalid_{label}_material")
-            result[key] = item
-        return result
-
-    def number(_: str) -> object:
-        raise _GCBProjectionDenied(f"invalid_{label}_material")
-
-    try:
-        parsed = json.loads(
-            value,
-            object_pairs_hook=pairs,
-            parse_constant=number,
-        )
-    except (json.JSONDecodeError, UnicodeError) as error:
-        raise _GCBProjectionDenied(f"invalid_{label}_material") from error
-    if not isinstance(parsed, dict) or _json(parsed) != value:
-        raise _GCBProjectionDenied(f"invalid_{label}_material")
-    return parsed
-
-
-def _gcb_exact_int(value: object, *, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise _GCBProjectionDenied(f"invalid_{label}")
-    return value
-
-
-def _gcb_decimal(value: object, *, label: str) -> int:
-    if not isinstance(value, str) or (
-        not value.isascii()
-        or not value.isdecimal()
-        or (len(value) > 1 and value.startswith("0"))
-    ):
-        raise _GCBProjectionDenied(f"invalid_{label}")
-    return int(value)
-
-
-def _gcb_seconds(statement: object, field: str) -> int:
-    if not isinstance(statement, Mapping):
-        raise _GCBProjectionDenied("projection_request_mismatch")
-    milliseconds = _gcb_decimal(statement.get(field), label=field)
-    if milliseconds % 1000:
-        raise _GCBProjectionDenied("projection_request_mismatch")
-    return milliseconds // 1000
-
-
-def _gcb_string_list(value: object, *, label: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or any(
-        not isinstance(item, str) or not item for item in value
-    ):
-        raise _GCBProjectionDenied(f"invalid_{label}")
-    items = tuple(value)
-    if len(set(items)) != len(items):
-        raise _GCBProjectionDenied(f"invalid_{label}")
-    return items
-
-
 def _gcb_revoked_closure(
     connection: sqlite3.Connection, workflow_id: str, node_id: str
 ) -> bool:
@@ -691,58 +588,12 @@ def _gcb_revoked_closure(
     return False
 
 
-@dataclass(frozen=True, slots=True)
-class _ValidatedGCBProjection:
-    legacy_node_version: int
-    next_workflow_state_version: int
-    artifact_json: str
-
-
-def _validate_gcb_projection_plan(
+def _load_gcb_projection_facts(
     connection: sqlite3.Connection,
-    config: APCCAuthorityConfig,
     clock: AuthorityClock,
-    request: AtomicCommitRequest,
     plan: _GCBProjectionPlan,
-) -> _ValidatedGCBProjection:
-    string_fields = (
-        plan.workflow_id,
-        plan.node_id,
-        plan.attempt_id,
-        plan.agent_id,
-        plan.commit_id,
-        plan.nonce,
-        plan.policy_digest,
-        plan.request_hash,
-        plan.receipt_material,
-        plan.receipt_digest,
-        plan.verdict_material,
-        plan.verdict_digest,
-    )
-    if any(not isinstance(value, str) or not value for value in string_fields):
-        raise _GCBProjectionDenied("projection_plan_type_mismatch")
-    expected_node_version = _gcb_exact_int(
-        plan.expected_node_version, label="expected_node_version"
-    )
-    committed_node_version = _gcb_exact_int(
-        plan.committed_node_version, label="committed_node_version"
-    )
-    workflow_state_version = _gcb_exact_int(
-        plan.expected_workflow_state_version, label="workflow_state_version"
-    )
-    if (
-        plan.workflow_id != request.subject.workflow_id
-        or plan.node_id != request.subject.node_id
-        or plan.attempt_id != request.subject.attempt_id
-        or plan.agent_id != request.subject.agent_id
-        or plan.commit_id != request.commit_id
-        or plan.nonce != request.nonce
-        or str(expected_node_version) != request.bindings.expected_node_version
-        or committed_node_version != expected_node_version + 1
-        or str(committed_node_version) != request.bindings.committed_node_version
-    ):
-        raise _GCBProjectionDenied("projection_request_mismatch")
-
+) -> _GCBProjectionFacts:
+    """Load the fixed GCB rows while the authority write transaction is held."""
     workflow = connection.execute(
         "SELECT generation,policy_version,policy_digest,policy_epoch,"
         "verifier_policy_id,authority_root,authority_epoch,"
@@ -776,72 +627,9 @@ def _validate_gcb_projection_plan(
     assert staged is not None
     assert seal is not None
 
-    legacy_predecessors = _gcb_string_list(
-        json.loads(str(node[4])), label="predecessors"
-    )
-    legacy_node_version = _gcb_exact_int(node[1], label="legacy_node_version")
-    if (
-        node[0] != "result_produced"
-        or legacy_node_version != 2 + bool(legacy_predecessors)
-        or node[2] != request.subject.input_digest
-        or node[5] != plan.attempt_id
-        or node[6] != plan.agent_id
-        or node[7] != request.subject.output_digest
-        or node[8] != 0
-        or staged[1] != request.subject.output_digest
-        or agent[1] != request.signatures.producer.key_id
-        or agent[3] != workflow[6]
-        or agent[4] != int(request.context.agent_revocation_generation)
-        or agent[5] != 0
-        or workflow[2] != plan.policy_digest
-        or workflow[8] != workflow_state_version
-    ):
-        raise _GCBProjectionDenied("stale_or_mismatched_projection_state")
-    if _gcb_revoked_closure(connection, plan.workflow_id, plan.node_id):
-        raise _GCBProjectionDenied("node_tainted_by_revocation")
-    required = set(
-        _gcb_string_list(json.loads(str(node[3])), label="required_capabilities")
-    )
-    capabilities = set(
-        _gcb_string_list(json.loads(str(agent[2])), label="agent_capabilities")
-    )
-    if not required.issubset(capabilities):
-        raise _GCBProjectionDenied("authority_or_capability_denied")
-
-    producer_binding = next(
-        (
-            binding
-            for binding in config.producer_trust
-            if binding.key_id == agent[1]
-            and binding.public_key == bytes(agent[0])
-            and binding.scope
-            == (
-                plan.agent_id,
-                request.subject.actor_authority,
-                request.context.authority_root,
-            )
-        ),
-        None,
-    )
-    if producer_binding is None:
-        raise _GCBProjectionDenied("authority_or_capability_denied")
-    if (
-        request.context.policy_version != workflow[1]
-        or int(request.context.policy_epoch) != workflow[3]
-        or request.context.policy_id != workflow[4]
-        or request.context.authority_root != workflow[5]
-        or int(request.context.authority_epoch) != workflow[6]
-        or int(request.context.workflow_revocation_generation) != workflow[7]
-        or int(request.context.workflow_epoch) != workflow[0]
-    ):
-        raise _GCBProjectionDenied("stale_or_mismatched_projection_context")
-
-    predecessor_by_node = {item.node_id: item for item in request.bindings.predecessors}
-    if set(predecessor_by_node) != set(legacy_predecessors) or any(
-        item.workflow_id != plan.workflow_id for item in predecessor_by_node.values()
-    ):
-        raise _GCBProjectionDenied("predecessor_binding_mismatch")
-    for predecessor_id in legacy_predecessors:
+    predecessors = _gcb_string_list(json.loads(str(node[4])), label="predecessors")
+    predecessor_facts: list[_GCBPredecessorFacts] = []
+    for predecessor_id in predecessors:
         predecessor = connection.execute(
             "SELECT status,commit_id,result_digest,tainted FROM nodes "
             "WHERE workflow_id=? AND node_id=?",
@@ -852,187 +640,56 @@ def _validate_gcb_projection_plan(
             "WHERE workflow_id=? AND node_id=?",
             (plan.workflow_id, predecessor_id),
         ).fetchone()
-        binding = predecessor_by_node[predecessor_id]
-        if (
-            predecessor is None
-            or logical is None
-            or predecessor[0] != "governed_committed"
-            or predecessor[1] != binding.commit_id
-            or predecessor[2] != binding.output_digest
-            or predecessor[3] != 0
-            or logical[0] != binding.committed_node_version
-            or logical[1] != binding.certificate_digest
-        ):
+        if predecessor is None or logical is None:
             raise _GCBProjectionDenied("predecessor_binding_mismatch")
-
-    producer = request.evidence.producer_statement
-    issued_at = _gcb_seconds(producer, "issued_at_ms")
-    expires_at = _gcb_seconds(producer, "expires_at_ms")
-    receipt_signature = base64.b64encode(
-        b64u_decode(request.signatures.producer.signature_b64u, expected_length=64)
-    ).decode("ascii")
-    predecessor_bindings = [
-        {
-            "node_id": item.node_id,
-            "node_version": int(item.committed_node_version),
-            "commit_id": item.commit_id,
-            "receipt_digest": item.certificate_digest,
-            "authoritative_result_digest": item.output_digest,
-        }
-        for item in sorted(request.bindings.predecessors, key=lambda item: item.node_id)
-    ]
-    receipt_payload: dict[str, object] = {
-        "profile": _GCB_RECEIPT_PROFILE,
-        "signature_algorithm": _GCB_SIGNATURE_ALGORITHM,
-        "key_id": request.signatures.producer.key_id,
-        "issued_at": issued_at,
-        "expires_at": expires_at,
-        "intent": _GCB_COMMIT_INTENT,
-        "verifier_policy_id": request.context.policy_id,
-        "workflow_id": plan.workflow_id,
-        "node_id": plan.node_id,
-        "attempt_id": plan.attempt_id,
-        "agent_id": plan.agent_id,
-        "input_digest": request.subject.input_digest,
-        "output_digest": request.subject.output_digest,
-        "predecessor_bindings": predecessor_bindings,
-        "predecessor_root": request.bindings.predecessor_root,
-        "policy_version": request.context.policy_version,
-        "policy_digest": plan.policy_digest,
-        "policy_epoch": int(request.context.policy_epoch),
-        "authority_snapshot_digest": request.subject.actor_authority,
-        "authority_root": request.context.authority_root,
-        "authority_epoch": int(request.context.authority_epoch),
-        "agent_revocation_epoch": int(request.context.agent_revocation_generation),
-        "workflow_revocation_generation": int(
-            request.context.workflow_revocation_generation
-        ),
-        "workflow_generation": int(request.context.workflow_epoch),
-        "state_version": workflow_state_version,
-        "expected_node_state_version": expected_node_version,
-        "nonce": plan.nonce,
-        "commit_id": plan.commit_id,
-    }
-    receipt_body = _gcb_material_object(plan.receipt_material, label="receipt")
-    if receipt_body != {"payload": receipt_payload, "signature": receipt_signature}:
-        raise _GCBProjectionDenied("projection_receipt_mismatch")
-    if (
-        hashlib.sha256(plan.receipt_material.encode()).hexdigest()
-        != plan.receipt_digest
-    ):
-        raise _GCBProjectionDenied("projection_receipt_digest_mismatch")
-
-    verdict = _gcb_material_object(plan.verdict_material, label="verdict")
-    expected_verdict_keys = {
-        "decision",
-        "store_id",
-        "verifier_policy_id",
-        "policy_id",
-        "policy_version",
-        "verifier_key_id",
-        "receipt_digest",
-        "workflow_id",
-        "node_id",
-        "attempt_id",
-        "agent_id",
-        "expected_node_state_version",
-        "policy_epoch",
-        "authority_epoch",
-        "agent_revocation_epoch",
-        "workflow_revocation_generation",
-        "workflow_generation",
-        "issued_at",
-        "expires_at",
-        "reason",
-        "signature",
-    }
-    if set(verdict) != expected_verdict_keys:
-        raise _GCBProjectionDenied("projection_verdict_mismatch")
-    policy_binding = next(
-        (
-            binding
-            for binding in config.policy_trust
-            if binding.scope
-            == (
-                request.context.policy_id,
-                request.context.policy_version,
-                request.context.policy_epoch,
+        predecessor_facts.append(
+            _GCBPredecessorFacts(
+                predecessor_id,
+                cast(str, predecessor[0]),
+                cast(str | None, predecessor[1]),
+                cast(str, predecessor[2]),
+                cast(int, predecessor[3]),
+                cast(str, logical[0]),
+                cast(str | None, logical[1]),
             )
-        ),
-        None,
-    )
-    if policy_binding is None:
-        raise _GCBProjectionDenied("untrusted_policy_binding")
-    verdict_issued = _gcb_exact_int(verdict["issued_at"], label="verdict_issued_at")
-    verdict_expires = _gcb_exact_int(verdict["expires_at"], label="verdict_expires_at")
-    expected_verdict = {
-        "decision": "allow",
-        "store_id": seal[0],
-        "verifier_policy_id": request.context.policy_id,
-        "policy_id": request.context.policy_id,
-        "policy_version": request.context.policy_version,
-        "verifier_key_id": policy_binding.key_id,
-        "receipt_digest": plan.receipt_digest,
-        "workflow_id": plan.workflow_id,
-        "node_id": plan.node_id,
-        "attempt_id": plan.attempt_id,
-        "agent_id": plan.agent_id,
-        "expected_node_state_version": expected_node_version,
-        "policy_epoch": int(request.context.policy_epoch),
-        "authority_epoch": int(request.context.authority_epoch),
-        "agent_revocation_epoch": int(request.context.agent_revocation_generation),
-        "workflow_revocation_generation": int(
-            request.context.workflow_revocation_generation
-        ),
-        "workflow_generation": int(request.context.workflow_epoch),
-    }
-    if any(verdict.get(key) != value for key, value in expected_verdict.items()):
-        raise _GCBProjectionDenied("projection_verdict_mismatch")
-    now_seconds = _trusted_now(clock) // 1000
-    signature = verdict["signature"]
-    if (
-        not isinstance(verdict["reason"], str)
-        or not isinstance(signature, str)
-        or verdict_issued > now_seconds + 30
-        or verdict_expires < now_seconds
-        or verdict_expires <= verdict_issued
-    ):
-        raise _GCBProjectionDenied("invalid_projection_verdict")
-    unsigned_verdict = {
-        key: value for key, value in verdict.items() if key != "signature"
-    }
-    try:
-        Ed25519PublicKey.from_public_bytes(policy_binding.public_key).verify(
-            base64.b64decode(signature, validate=True),
-            _GCB_VERDICT_DOMAIN
-            + json.dumps(
-                unsigned_verdict, sort_keys=True, separators=(",", ":")
-            ).encode("ascii"),
         )
-    except (InvalidSignature, ValueError, TypeError) as error:
-        raise _GCBProjectionDenied("invalid_projection_verdict_signature") from error
-    if (
-        hashlib.sha256(plan.verdict_material.encode()).hexdigest()
-        != plan.verdict_digest
-    ):
-        raise _GCBProjectionDenied("projection_verdict_digest_mismatch")
-    request_hash = hashlib.sha256(
-        json.dumps(
-            {
-                "payload": receipt_payload,
-                "signature": receipt_signature,
-                "verdict": verdict,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
-    if request_hash != plan.request_hash:
-        raise _GCBProjectionDenied("projection_request_hash_mismatch")
-    return _ValidatedGCBProjection(
-        legacy_node_version,
-        workflow_state_version + 1,
-        str(staged[0]),
+
+    return _GCBProjectionFacts(
+        _GCBWorkflowFacts(
+            cast(int, workflow[0]),
+            cast(str, workflow[1]),
+            cast(str, workflow[2]),
+            cast(int, workflow[3]),
+            cast(str, workflow[4]),
+            cast(str, workflow[5]),
+            cast(int, workflow[6]),
+            cast(int, workflow[7]),
+            cast(int, workflow[8]),
+        ),
+        _GCBNodeFacts(
+            cast(str, node[0]),
+            cast(int, node[1]),
+            cast(str, node[2]),
+            _gcb_string_list(json.loads(str(node[3])), label="required_capabilities"),
+            predecessors,
+            cast(str, node[5]),
+            cast(str, node[6]),
+            cast(str, node[7]),
+            cast(int, node[8]),
+        ),
+        _GCBAgentFacts(
+            bytes(agent[0]),
+            cast(str, agent[1]),
+            _gcb_string_list(json.loads(str(agent[2])), label="agent_capabilities"),
+            cast(int, agent[3]),
+            cast(int, agent[4]),
+            cast(int, agent[5]),
+        ),
+        _GCBStagedArtifactFacts(str(staged[0]), cast(str, staged[1])),
+        cast(str, seal[0]),
+        tuple(predecessor_facts),
+        _gcb_revoked_closure(connection, plan.workflow_id, plan.node_id),
+        _trusted_now(clock) // 1000,
     )
 
 
@@ -1041,7 +698,7 @@ def _attest_gcb_projection(
     request: AtomicCommitRequest,
     result: CommitResult,
     plan: _GCBProjectionPlan,
-    validated: _ValidatedGCBProjection,
+    validated: _PureValidatedGCBProjection,
     unlocked_children: tuple[tuple[str, int], ...],
 ) -> None:
     if result.certificate_digest is None:
@@ -1552,11 +1209,68 @@ def _canonical_nonnegative_decimal(value: object, *, maximum: int) -> int:
     return _canonical_positive_decimal(value, maximum=maximum)
 
 
+def _observation_effective_revoked(
+    connection: _AuthorityConnection,
+    certificate_digest: str,
+    *,
+    active: set[str] | None = None,
+    cache: dict[str, bool] | None = None,
+) -> bool:
+    """Resolve guarded transitive revocation inside an observation snapshot."""
+    active_digests = set() if active is None else active
+    resolved = {} if cache is None else cache
+    cached = resolved.get(certificate_digest)
+    if cached is not None:
+        return cached
+    if (
+        certificate_digest in active_digests
+        or len(active_digests) + len(resolved) >= CausalClosureLimits().max_certificates
+    ):
+        return True
+    active_digests.add(certificate_digest)
+    row = connection.execute(
+        "SELECT certificate_json FROM certificates WHERE certificate_digest=?",
+        (certificate_digest,),
+    ).fetchone()
+    disposition = _latest_disposition(connection, certificate_digest)
+    if row is None or disposition is None:
+        active_digests.remove(certificate_digest)
+        resolved[certificate_digest] = True
+        return True
+    certificate = decode_certificate(_row_bytes(row[0]))
+    if (
+        disposition is CertificateDisposition.REVOKED
+        or _has_later_generation_revocation(connection, certificate)
+    ):
+        active_digests.remove(certificate_digest)
+        resolved[certificate_digest] = True
+        return True
+    revoked = any(
+        _observation_effective_revoked(
+            connection,
+            predecessor.certificate_digest,
+            active=active_digests,
+            cache=resolved,
+        )
+        for predecessor in certificate.bindings.predecessors
+    )
+    active_digests.remove(certificate_digest)
+    resolved[certificate_digest] = revoked
+    return revoked
+
+
 class _AuthorityReaderCore:
     """Storage-neutral APCC read operations over a transactional DB-API port."""
 
-    def __init__(self, authority_store_id: str) -> None:
+    _config: APCCAuthorityConfig
+
+    def __init__(
+        self,
+        authority_store_id: str,
+        status_signer: AuthorityObservationStatusSigner | None = None,
+    ) -> None:
         self.authority_store_id = authority_store_id
+        self._observation_status_signer = status_signer
 
     def _read_transaction(
         self,
@@ -1655,25 +1369,388 @@ class _AuthorityReaderCore:
                 not bool(row[3]),
             )
 
+    def observe_authority(
+        self, request: AuthorityObservationRequest
+    ) -> AuthorityObservationSnapshot:
+        """Retry the complete read transaction after a status-snapshot race."""
+        for attempt in range(3):
+            try:
+                return self._observe_authority_once(request)
+            except AuthorityObservationSnapshotChanged:
+                if attempt == 2:
+                    raise
+        raise AssertionError("unreachable observation retry state")
+
+    def _observe_authority_once(
+        self, request: AuthorityObservationRequest
+    ) -> AuthorityObservationSnapshot:
+        """Observe one complete authority tuple in one attested DB snapshot."""
+        if request.authority_store_id != self.authority_store_id:
+            raise ValueError("authority observation store binding mismatch")
+        with self._read_transaction() as connection:
+            logical_row = connection.execute(
+                "SELECT version,certificate_digest FROM logical_nodes "
+                "WHERE workflow_id=? AND node_id=?",
+                (request.workflow_id, request.node_id),
+            ).fetchone()
+            logical = (
+                LogicalNodeState(request.workflow_id, request.node_id, "0", None)
+                if logical_row is None
+                else LogicalNodeState(
+                    request.workflow_id,
+                    request.node_id,
+                    _row_text(logical_row[0]),
+                    _row_optional_text(logical_row[1]),
+                )
+            )
+            indexed = connection.execute(
+                "SELECT request_digest,workflow_id,request_json FROM commit_index "
+                "WHERE commit_id=?",
+                (request.expected_commit_id,),
+            ).fetchone()
+            if indexed is None:
+                return AuthorityObservationSnapshot(
+                    request,
+                    AuthorityObservationState.ABSENT,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    logical,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    False,
+                )
+            authoritative_digest = _row_text(indexed[0])
+            indexed_workflow = _row_text(indexed[1])
+            persisted_operation_bytes = _row_text(indexed[2]).encode("utf-8")
+            persisted_request, persisted_supersession = _operation_from_json(
+                _row_text(indexed[2])
+            )
+            if (
+                _operation_identity(persisted_request, persisted_supersession)
+                != authoritative_digest
+            ):
+                raise ValueError("authority observation operation digest mismatch")
+            public_row = connection.execute(
+                "SELECT request_digest FROM request_index WHERE commit_id=?",
+                (request.expected_commit_id,),
+            ).fetchone()
+            if public_row is None:
+                raise ValueError("authority observation lacks public request binding")
+            authoritative_public_digest = _row_text(public_row[0])
+            if _public_request_digest(persisted_request) != authoritative_public_digest:
+                raise ValueError("authority observation public request digest mismatch")
+            if (
+                indexed_workflow != request.workflow_id
+                or persisted_request.subject.workflow_id != request.workflow_id
+                or persisted_request.subject.node_id != request.node_id
+                or persisted_request.subject.attempt_id != request.attempt_id
+                or persisted_request.commit_id != request.expected_commit_id
+                or authoritative_digest != request.expected_operation_digest
+                or authoritative_public_digest != request.public_request_digest
+            ):
+                conflict = connection.execute(
+                    "SELECT audit_event_id,original_workflow_id,original_node_id,"
+                    "original_attempt_id,original_request_digest,"
+                    "original_public_request_digest,conflicting_workflow_id,"
+                    "conflicting_node_id,conflicting_attempt_id,"
+                    "conflicting_request_digest,conflicting_public_request_digest "
+                    "FROM commit_conflicts "
+                    "WHERE commit_id=? AND "
+                    "conflicting_workflow_id=? AND conflicting_node_id=? AND "
+                    "conflicting_attempt_id=? AND conflicting_request_digest=? AND "
+                    "conflicting_public_request_digest=?",
+                    (
+                        request.expected_commit_id,
+                        request.workflow_id,
+                        request.node_id,
+                        request.attempt_id,
+                        request.expected_operation_digest,
+                        request.public_request_digest,
+                    ),
+                ).fetchone()
+                if conflict is None:
+                    raise ValueError("authority observation target binding mismatch")
+                audit_id = _row_text(conflict[0])
+                audit = connection.execute(
+                    "SELECT event_json FROM audit_events WHERE audit_event_id=?",
+                    (audit_id,),
+                ).fetchone()
+                if audit is None:
+                    raise ValueError("authority conflict lacks audit evidence")
+                conflict_claim = _json(
+                    {
+                        "commit_id": request.expected_commit_id,
+                        "original_workflow_id": _row_text(conflict[1]),
+                        "original_node_id": _row_text(conflict[2]),
+                        "original_attempt_id": _row_text(conflict[3]),
+                        "original_request_digest": _row_text(conflict[4]),
+                        "original_public_request_digest": _row_text(conflict[5]),
+                        "conflicting_workflow_id": _row_text(conflict[6]),
+                        "conflicting_node_id": _row_text(conflict[7]),
+                        "conflicting_attempt_id": _row_text(conflict[8]),
+                        "conflicting_request_digest": _row_text(conflict[9]),
+                        "conflicting_public_request_digest": _row_text(conflict[10]),
+                    }
+                ).encode("ascii")
+                return AuthorityObservationSnapshot(
+                    request,
+                    AuthorityObservationState.CONFLICTED,
+                    authoritative_digest,
+                    authoritative_public_digest,
+                    FailureCode.COMMIT_ID_EQUIVOCATION.value,
+                    audit_id,
+                    _row_text(audit[0]).encode(),
+                    logical,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    False,
+                    persisted_operation_bytes,
+                    conflict_claim,
+                )
+            decision = connection.execute(
+                "SELECT outcome,reason,audit_event_id,certificate_digest "
+                "FROM apcc_decisions WHERE commit_id=?",
+                (request.expected_commit_id,),
+            ).fetchone()
+            if decision is None:
+                raise ValueError("authority commit index has no durable decision")
+            outcome = AuthorityObservationState(_row_text(decision[0]))
+            reason = _row_text(decision[1])
+            audit_id = _row_text(decision[2])
+            audit = connection.execute(
+                "SELECT event_json FROM audit_events WHERE audit_event_id=?",
+                (audit_id,),
+            ).fetchone()
+            if audit is None:
+                raise ValueError("authority decision lacks audit evidence")
+            audit_bytes = _row_text(audit[0]).encode()
+            if outcome is not AuthorityObservationState.COMMITTED:
+                return AuthorityObservationSnapshot(
+                    request,
+                    outcome,
+                    authoritative_digest,
+                    authoritative_public_digest,
+                    reason,
+                    audit_id,
+                    audit_bytes,
+                    logical,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    False,
+                    persisted_operation_bytes,
+                )
+            certificate = connection.execute(
+                "SELECT certificate_json,envelope,certificate_digest,workflow_id,node_id,sequence "
+                "FROM certificates WHERE commit_id=?",
+                (request.expected_commit_id,),
+            ).fetchone()
+            if certificate is None:
+                raise ValueError("committed observation lacks certificate")
+            certificate_digest = _row_text(certificate[2])
+            if (
+                _row_text(certificate[3]) != request.workflow_id
+                or _row_text(certificate[4]) != request.node_id
+                or certificate_digest != _row_optional_text(decision[3])
+            ):
+                raise ValueError("committed observation certificate binding mismatch")
+            payload = _row_bytes(certificate[0])
+            envelope = _row_bytes(certificate[1])
+            decoded = decode_certificate(payload)
+            disposition_row = connection.execute(
+                "SELECT disposition FROM certificate_dispositions "
+                "WHERE certificate_digest=? ORDER BY event_sequence DESC LIMIT 1",
+                (certificate_digest,),
+            ).fetchone()
+            if disposition_row is None:
+                raise ValueError("committed observation lacks disposition")
+            effectively_revoked = _observation_effective_revoked(
+                connection, certificate_digest
+            )
+            supersession = connection.execute(
+                "SELECT new_digest FROM supersession_edges WHERE old_digest=?",
+                (certificate_digest,),
+            ).fetchone()
+            superseded_by = None if supersession is None else _row_text(supersession[0])
+            current_status = "revoked" if effectively_revoked else "current"
+            pointer_current = logical.current_certificate_digest == certificate_digest
+            status_signer = self._observation_status_signer
+            if status_signer is None:
+                raise ValueError("authority observation requires status signer")
+            trust_row = connection.execute(
+                "SELECT sequence,entry_digest FROM trust_log "
+                "ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            trust_sequence, trust_head = (
+                ("0", sha256_digest(b"APCC-1/trust-log/genesis"))
+                if trust_row is None
+                else (str(trust_row[0]), _row_text(trust_row[1]))
+            )
+            facts = {
+                "authority_store_id": self.authority_store_id,
+                "status_key_id": self._config.status_trust.key_id,
+                "request_nonce": request.request_nonce,
+                "certificate_digest": certificate_digest,
+                "certificate_sequence": str(certificate[5]),
+                "trust_log_sequence": trust_sequence,
+                "trust_log_head": trust_head,
+                "status": current_status,
+                "actor_revocation_generation": decoded.context.agent_revocation_generation,
+                "workflow_revocation_generation": decoded.context.workflow_revocation_generation,
+                "superseded": (
+                    SupersessionValue.YES.value
+                    if superseded_by is not None
+                    else SupersessionValue.NO.value
+                ),
+            }
+            status_evidence = status_signer.current_status(
+                certificate_digest, request.request_nonce
+            )
+            signed_status = decode_authority_status(status_evidence)
+            if signed_status.body_object() | {} != {
+                "protocol_version": "APCC-1.0-draft",
+                "statement_type": "apcc.authority-status",
+                **facts,
+                "this_update_ms": signed_status.this_update_ms,
+                "next_update_ms": signed_status.next_update_ms,
+            }:
+                raise AuthorityObservationSnapshotChanged(
+                    "authority status snapshot changed during observation"
+                )
+            body = encode_authority_status_body(signed_status)
+            if not verify_detached(
+                self._config.status_trust.public_key,
+                AUTHORITY_STATUS_DOMAIN,
+                body,
+                signed_status.signature.signature_b64u,
+            ):
+                raise ValueError("authority observation status signature invalid")
+            if int(signed_status.this_update_ms) > int(
+                signed_status.next_update_ms
+            ) or (
+                int(signed_status.next_update_ms) - int(signed_status.this_update_ms)
+                != int(self._config.freshness.issued_status_lifetime_ms)
+            ):
+                raise ValueError("authority observation status validity invalid")
+            outbox = connection.execute(
+                "SELECT event_sequence,event_id,event_kind,operation_id,event_json,"
+                "audit_event_id,trust_sequence,state,lease_token,lease_claimed_ms,"
+                "lease_until_ms,delivered FROM apcc_outbox "
+                "WHERE event_kind='COMMIT' AND operation_id=?",
+                (request.expected_commit_id,),
+            ).fetchone()
+            if outbox is None:
+                raise ValueError("committed observation lacks outbox evidence")
+            output = connection.execute(
+                "SELECT r.output_digest,r.output_size,c.result "
+                "FROM commit_output_refs r JOIN candidates c ON "
+                "c.workflow_id=r.workflow_id AND c.node_id=r.node_id "
+                "AND c.attempt_id=r.attempt_id WHERE r.commit_id=?",
+                (request.expected_commit_id,),
+            ).fetchone()
+            if output is None:
+                raise ValueError("committed observation lacks output binding")
+            output_bytes = _row_bytes(output[2])
+            if (
+                _row_text(output[0]) != decoded.subject.output_digest
+                or _row_int(output[1]) != len(output_bytes)
+                or sha256_digest(output_bytes) != decoded.subject.output_digest
+            ):
+                raise ValueError("committed observation output binding mismatch")
+            outbox_record = _json(
+                {
+                    "event_sequence": str(outbox[0]),
+                    "event_id": _row_text(outbox[1]),
+                    "event_kind": _row_text(outbox[2]),
+                    "operation_id": _row_text(outbox[3]),
+                    "event_payload_sha256": sha256_digest(_row_bytes(outbox[4])),
+                    "audit_event_id": _row_text(outbox[5]),
+                    "trust_sequence": str(outbox[6]),
+                    "state": _row_text(outbox[7]),
+                    "lease_token": outbox[8],
+                    "lease_claimed_ms": (None if outbox[9] is None else str(outbox[9])),
+                    "lease_until_ms": (None if outbox[10] is None else str(outbox[10])),
+                    "delivered": str(outbox[11]),
+                }
+            ).encode("utf-8")
+            visible = (
+                pointer_current
+                and current_status == "current"
+                and superseded_by is None
+            )
+            return AuthorityObservationSnapshot(
+                request,
+                outcome,
+                authoritative_digest,
+                authoritative_public_digest,
+                reason,
+                audit_id,
+                audit_bytes,
+                logical,
+                payload,
+                envelope,
+                certificate_digest,
+                status_evidence,
+                _row_text(outbox[1]),
+                _row_bytes(outbox[4]),
+                _row_text(outbox[7]),
+                decoded.subject.output_digest,
+                visible,
+                persisted_operation_bytes,
+                None,
+                output_bytes,
+                outbox_record,
+            )
+
 
 class SQLiteAuthorityReader(_AuthorityReaderCore):
     """Signer-free SQLite APCC reader.  It never opens a writer transaction."""
 
-    def __init__(self, path: Path, config: APCCAuthorityConfig) -> None:
-        super().__init__(config.authority_store_id)
+    def __init__(
+        self,
+        path: Path,
+        config: APCCAuthorityConfig,
+        status_signer: AuthorityObservationStatusSigner | None = None,
+    ) -> None:
+        super().__init__(config.authority_store_id, status_signer)
         self.database_path = Path(path)
         self._config = config
         self._attested_read_connections: set[sqlite3.Connection] = set()
 
     @classmethod
-    def open(cls, path: Path) -> SQLiteAuthorityReader:
+    def open(
+        cls,
+        path: Path,
+        *,
+        status_signer: AuthorityObservationStatusSigner | None = None,
+    ) -> SQLiteAuthorityReader:
         connection = _connect_reader(path)
         try:
             connection.execute("BEGIN")
             config_text = _validate_schema(connection)
             config = _config_from_object(_loads(config_text))
             connection.commit()
-            return cls(Path(path), config)
+            return cls(Path(path), config, status_signer)
         except ValueError:
             raise
         except sqlite3.DatabaseError as error:
@@ -1991,6 +2068,8 @@ class _AuthorityStoreCore(_AuthorityReaderCore):
                     request_digest,
                     _public_request_digest(request),
                     request.subject.workflow_id,
+                    request.subject.node_id,
+                    request.subject.attempt_id,
                     _json(
                         {
                             "kind": "atomic",
@@ -2100,6 +2179,31 @@ class _AuthorityStoreCore(_AuthorityReaderCore):
                 ),
             )
             self._hit(f"after_{prefix}certificate_write")
+            output_row = connection.execute(
+                "SELECT result FROM candidates WHERE workflow_id=? AND node_id=? "
+                "AND attempt_id=?",
+                (
+                    request.subject.workflow_id,
+                    request.subject.node_id,
+                    request.subject.attempt_id,
+                ),
+            ).fetchone()
+            if output_row is None or output_row[0] is None:
+                raise ValueError("committed APCC operation lacks staged output")
+            output_bytes = _row_bytes(output_row[0])
+            if sha256_digest(output_bytes) != request.subject.output_digest:
+                raise ValueError("committed APCC output digest mismatch")
+            connection.execute(
+                "INSERT INTO commit_output_refs VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    request.commit_id,
+                    request.subject.workflow_id,
+                    request.subject.node_id,
+                    request.subject.attempt_id,
+                    request.subject.output_digest,
+                    len(output_bytes),
+                ),
+            )
             if request.bindings.predecessors:
                 self._hit(f"before_{prefix}predecessor_edges")
                 for predecessor in request.bindings.predecessors:
@@ -2435,13 +2539,43 @@ class _AuthorityStoreCore(_AuthorityReaderCore):
         digest: str,
         public_request_digest: str,
         conflicting_workflow_id: str,
+        conflicting_node_id: str,
+        conflicting_attempt_id: str,
         conflict_claim_json: str,
         supersede_old: str | None = None,
     ) -> CommitResult:
         audit = _audit_id("conflict", commit_id, digest)
+        original = connection.execute(
+            "SELECT request_digest,workflow_id,request_json FROM commit_index "
+            "WHERE commit_id=?",
+            (commit_id,),
+        ).fetchone()
+        if original is None:
+            raise ValueError("APCC conflict lacks an original operation")
+        original_request, _original_old = _operation_from_json(_row_text(original[2]))
+        original_public = connection.execute(
+            "SELECT request_digest FROM request_index WHERE commit_id=?", (commit_id,)
+        ).fetchone()
+        if original_public is None:
+            raise ValueError("APCC conflict lacks an original public request")
+        if not conflicting_workflow_id:
+            conflicting_workflow_id = original_request.subject.workflow_id
+            conflicting_node_id = original_request.subject.node_id
+            conflicting_attempt_id = original_request.subject.attempt_id
+        identity = (
+            commit_id,
+            conflicting_workflow_id,
+            conflicting_node_id,
+            conflicting_attempt_id,
+            digest,
+            public_request_digest,
+        )
         existing = connection.execute(
-            "SELECT audit_event_id FROM commit_conflicts WHERE commit_id=? AND conflicting_request_digest=?",
-            (commit_id, digest),
+            "SELECT audit_event_id FROM commit_conflicts WHERE commit_id=? AND "
+            "conflicting_workflow_id=? AND conflicting_node_id=? AND "
+            "conflicting_attempt_id=? AND conflicting_request_digest=? AND "
+            "conflicting_public_request_digest=?",
+            identity,
         ).fetchone()
         if existing is not None:
             return CommitResult(
@@ -2455,22 +2589,23 @@ class _AuthorityStoreCore(_AuthorityReaderCore):
                 None,
                 _row_text(existing[0]),
             )
-        original = connection.execute(
-            "SELECT request_digest, workflow_id FROM commit_index WHERE commit_id=?",
-            (commit_id,),
-        ).fetchone()
         sequence = connection.execute(
             "SELECT COUNT(*) FROM commit_conflicts WHERE commit_id=?", (commit_id,)
         ).fetchone()
         connection.execute(
-            "INSERT INTO commit_conflicts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO commit_conflicts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 commit_id,
-                str(original[0]) if original else "",
+                _row_text(original[0]),
+                _row_text(original_public[0]),
+                original_request.subject.workflow_id,
+                original_request.subject.node_id,
+                original_request.subject.attempt_id,
                 digest,
                 public_request_digest,
-                str(original[1]) if original else "",
                 conflicting_workflow_id,
+                conflicting_node_id,
+                conflicting_attempt_id,
                 _row_int(sequence[0]) + 1 if sequence else 1,
                 audit,
                 conflict_claim_json,
@@ -3130,6 +3265,8 @@ class _AuthorityStoreCore(_AuthorityReaderCore):
                     request.request_digest,
                     request.request_digest,
                     "",
+                    "",
+                    "",
                     _json(
                         {
                             "kind": "recovery",
@@ -3460,6 +3597,36 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
     def _connection(self) -> sqlite3.Connection:
         return _connect_reader(self.database_path)
 
+    def _observation_current_status(
+        self, certificate_digest: str, request_nonce: str
+    ) -> AuthorityStatus:
+        """Issue status under a dedicated guard without mutating the checkpoint."""
+        request = CurrentStatusRequest(certificate_digest, request_nonce)
+        connection = _connect(self.database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._validate_mutation_checkpoint(connection)
+            self._attested_read_connections.add(connection)
+            semantic_snapshot = self._attest_batch_snapshot(
+                connection, (certificate_digest,)
+            )
+            status, _commit_id = self._current_status_at(
+                connection,
+                request,
+                self._trust_head(connection),
+                semantic_snapshot,
+                {},
+                {},
+            )
+            connection.commit()
+            return status
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            self._attested_read_connections.discard(connection)
+            connection.close()
+
     @contextmanager
     def _read_transaction(self) -> Iterator[sqlite3.Connection]:
         connection = self._connection()
@@ -3565,9 +3732,9 @@ class SQLiteAuthorityStore(_AuthorityStoreCore):
             raise _GCBProjectionDenied("gcb_projection_requires_attached_store")
         if not isinstance(connection, sqlite3.Connection):
             raise TypeError("SQLite APCC projection requires a SQLite transaction")
-        validated = _validate_gcb_projection_plan(
-            connection, self._config, self._runtime.clock, request, plan
-        )
+        _validate_gcb_projection_identity(request, plan)
+        facts = _load_gcb_projection_facts(connection, self._runtime.clock, plan)
+        validated = _validate_gcb_projection(self._config, request, plan, facts)
         self._gcb_checkpoint(_GCBProjectionCheckpoint.BEFORE_LEGACY_WRITE)
         changed = connection.execute(
             "UPDATE nodes SET status='governed_committed',version=version+1,"
@@ -3818,6 +3985,7 @@ _SEMANTIC_CHECKPOINT_GUARDED_TABLES = (
     "control_events",
     "apcc_outbox",
     "commit_conflicts",
+    "commit_output_refs",
 )
 
 
@@ -3853,6 +4021,7 @@ _SCHEMA_STATEMENTS = (
     "CREATE TABLE nonce_ledger (nonce TEXT PRIMARY KEY NOT NULL, commit_id TEXT NOT NULL UNIQUE REFERENCES commit_index(commit_id))",
     "CREATE TABLE evidence_refs (commit_id TEXT PRIMARY KEY REFERENCES commit_index(commit_id), producer_digest TEXT NOT NULL, policy_digest TEXT NOT NULL, authority_digest TEXT NOT NULL)",
     f"CREATE TABLE certificates (certificate_digest TEXT PRIMARY KEY NOT NULL, commit_id TEXT UNIQUE NOT NULL REFERENCES commit_index(commit_id), certificate_json BLOB NOT NULL, envelope BLOB NOT NULL, workflow_id TEXT NOT NULL, node_id TEXT NOT NULL, sequence INTEGER NOT NULL UNIQUE CHECK(typeof(sequence)='integer' AND sequence BETWEEN 1 AND {_MAX_SAFE_INTEGER}))",
+    f"CREATE TABLE commit_output_refs (commit_id TEXT PRIMARY KEY NOT NULL REFERENCES certificates(commit_id), workflow_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, output_digest TEXT NOT NULL, output_size INTEGER NOT NULL CHECK(typeof(output_size)='integer' AND output_size BETWEEN 0 AND {_MAX_SAFE_INTEGER}), FOREIGN KEY(workflow_id,node_id,attempt_id) REFERENCES candidates(workflow_id,node_id,attempt_id))",
     "CREATE TABLE audit_events (audit_event_id TEXT PRIMARY KEY NOT NULL, event_json TEXT NOT NULL)",
     "CREATE TABLE apcc_decisions (commit_id TEXT PRIMARY KEY NOT NULL REFERENCES commit_index(commit_id), outcome TEXT NOT NULL CHECK(outcome IN ('COMMITTED','DENIED','CONFLICTED')), reason TEXT NOT NULL, audit_event_id TEXT NOT NULL UNIQUE REFERENCES audit_events(audit_event_id), certificate_digest TEXT REFERENCES certificates(certificate_digest) DEFERRABLE INITIALLY DEFERRED, nonce TEXT NOT NULL, nonce_owner_commit_id TEXT NOT NULL REFERENCES commit_index(commit_id) DEFERRABLE INITIALLY DEFERRED, CHECK((outcome='COMMITTED')=(certificate_digest IS NOT NULL)))",
     "CREATE TABLE certificate_dispositions (certificate_digest TEXT NOT NULL REFERENCES certificates(certificate_digest), event_sequence INTEGER NOT NULL CHECK(event_sequence IN (1,2)), disposition TEXT NOT NULL CHECK(disposition IN ('CURRENT','REVOKED','SUPERSEDED')), PRIMARY KEY(certificate_digest,event_sequence))",
@@ -3863,7 +4032,11 @@ _SCHEMA_STATEMENTS = (
     f"CREATE TABLE trust_log (sequence INTEGER PRIMARY KEY CHECK(typeof(sequence)='integer' AND sequence BETWEEN 1 AND {_MAX_SAFE_INTEGER}), audit_event_id TEXT NOT NULL UNIQUE REFERENCES audit_events(audit_event_id), prior_digest TEXT NOT NULL, entry_digest TEXT NOT NULL UNIQUE, entry_json TEXT NOT NULL)",
     "CREATE TABLE control_events (operation_id TEXT PRIMARY KEY, scope TEXT NOT NULL CHECK(scope IN ('CERTIFICATE','ACTOR','WORKFLOW')), workflow_id TEXT NOT NULL, target_id TEXT NOT NULL, generation TEXT, claimed_generation TEXT NOT NULL, reason TEXT NOT NULL, audit_event_id TEXT NOT NULL UNIQUE REFERENCES audit_events(audit_event_id), payload BLOB NOT NULL, payload_digest TEXT NOT NULL UNIQUE, CHECK((scope='CERTIFICATE')=(generation IS NULL)))",
     f"CREATE TABLE apcc_outbox (event_sequence INTEGER PRIMARY KEY CHECK(typeof(event_sequence)='integer' AND event_sequence BETWEEN 1 AND {_MAX_SAFE_INTEGER}), event_id TEXT NOT NULL UNIQUE, event_kind TEXT NOT NULL CHECK(event_kind IN ('COMMIT','CONTROL')), operation_id TEXT NOT NULL, event_json BLOB NOT NULL, audit_event_id TEXT NOT NULL UNIQUE REFERENCES audit_events(audit_event_id), trust_sequence INTEGER NOT NULL UNIQUE REFERENCES trust_log(sequence), state TEXT NOT NULL CHECK(state IN ('PENDING','CLAIMED','DELIVERED')), lease_token TEXT, lease_claimed_ms INTEGER CHECK(lease_claimed_ms IS NULL OR (typeof(lease_claimed_ms)='integer' AND lease_claimed_ms BETWEEN 0 AND {_MAX_SAFE_INTEGER})), lease_until_ms INTEGER CHECK(lease_until_ms IS NULL OR (typeof(lease_until_ms)='integer' AND lease_until_ms BETWEEN 0 AND {_MAX_SAFE_INTEGER})), delivered INTEGER NOT NULL CHECK(delivered IN (0,1)), UNIQUE(event_kind,operation_id), CHECK((state='PENDING' AND delivered=0 AND lease_token IS NULL AND lease_claimed_ms IS NULL AND lease_until_ms IS NULL) OR (state='CLAIMED' AND delivered=0 AND lease_token IS NOT NULL AND lease_claimed_ms IS NOT NULL AND lease_until_ms IS NOT NULL AND lease_until_ms>=lease_claimed_ms) OR (state='DELIVERED' AND delivered=1 AND lease_token IS NULL AND lease_claimed_ms IS NULL AND lease_until_ms IS NULL)))",
-    "CREATE TABLE commit_conflicts (commit_id TEXT NOT NULL, original_request_digest TEXT NOT NULL, conflicting_request_digest TEXT NOT NULL, conflicting_public_request_digest TEXT NOT NULL, original_workflow_id TEXT NOT NULL, conflicting_workflow_id TEXT NOT NULL, observation_sequence INTEGER NOT NULL, audit_event_id TEXT NOT NULL, conflict_claim_json TEXT NOT NULL, PRIMARY KEY(commit_id, conflicting_request_digest))",
+    "CREATE TABLE commit_conflicts (commit_id TEXT NOT NULL, original_request_digest TEXT NOT NULL, original_public_request_digest TEXT NOT NULL, original_workflow_id TEXT NOT NULL, original_node_id TEXT NOT NULL, original_attempt_id TEXT NOT NULL, conflicting_request_digest TEXT NOT NULL, conflicting_public_request_digest TEXT NOT NULL, conflicting_workflow_id TEXT NOT NULL, conflicting_node_id TEXT NOT NULL, conflicting_attempt_id TEXT NOT NULL, observation_sequence INTEGER NOT NULL, audit_event_id TEXT NOT NULL, conflict_claim_json TEXT NOT NULL, PRIMARY KEY(commit_id, conflicting_workflow_id, conflicting_node_id, conflicting_attempt_id, conflicting_request_digest, conflicting_public_request_digest))",
+    "CREATE TRIGGER commit_output_refs_no_update BEFORE UPDATE ON commit_output_refs BEGIN SELECT RAISE(ABORT, 'commit output refs are immutable'); END",
+    "CREATE TRIGGER commit_output_refs_no_delete BEFORE DELETE ON commit_output_refs BEGIN SELECT RAISE(ABORT, 'commit output refs are immutable'); END",
+    "CREATE TRIGGER committed_candidate_no_update BEFORE UPDATE ON candidates WHEN EXISTS (SELECT 1 FROM commit_output_refs WHERE workflow_id=OLD.workflow_id AND node_id=OLD.node_id AND attempt_id=OLD.attempt_id) AND (NEW.workflow_id<>OLD.workflow_id OR NEW.node_id<>OLD.node_id OR NEW.attempt_id<>OLD.attempt_id OR NEW.result IS NOT OLD.result OR NEW.subject_json<>OLD.subject_json) BEGIN SELECT RAISE(ABORT, 'committed candidate output is immutable'); END",
+    "CREATE TRIGGER committed_candidate_no_delete BEFORE DELETE ON candidates WHEN EXISTS (SELECT 1 FROM commit_output_refs WHERE workflow_id=OLD.workflow_id AND node_id=OLD.node_id AND attempt_id=OLD.attempt_id) BEGIN SELECT RAISE(ABORT, 'committed candidate output is immutable'); END",
     "CREATE TRIGGER certificate_dispositions_no_update BEFORE UPDATE ON certificate_dispositions BEGIN SELECT RAISE(ABORT, 'certificate dispositions are append-only'); END",
     "CREATE TRIGGER certificate_dispositions_no_delete BEFORE DELETE ON certificate_dispositions BEGIN SELECT RAISE(ABORT, 'certificate dispositions are append-only'); END",
     "CREATE TRIGGER certificate_dispositions_validate_insert BEFORE INSERT ON certificate_dispositions WHEN NOT ((NEW.event_sequence=1 AND NEW.disposition='CURRENT' AND NOT EXISTS (SELECT 1 FROM certificate_dispositions WHERE certificate_digest=NEW.certificate_digest)) OR (NEW.event_sequence=2 AND NEW.disposition IN ('REVOKED','SUPERSEDED') AND EXISTS (SELECT 1 FROM certificate_dispositions WHERE certificate_digest=NEW.certificate_digest AND event_sequence=1 AND disposition='CURRENT') AND NOT EXISTS (SELECT 1 FROM certificate_dispositions WHERE certificate_digest=NEW.certificate_digest AND event_sequence=2))) BEGIN SELECT RAISE(ABORT, 'invalid certificate disposition transition'); END",
@@ -3877,6 +4050,7 @@ _SCHEMA_STATEMENTS = (
     "CREATE INDEX idx_apcc_outbox_pending ON apcc_outbox(state,lease_until_ms,event_sequence)",
     "CREATE INDEX idx_apcc_outbox_head ON apcc_outbox(event_sequence) WHERE state<>'DELIVERED'",
     "CREATE INDEX idx_nonce_ledger_nonce ON nonce_ledger(nonce)",
+    "CREATE INDEX idx_commit_conflicts_exact ON commit_conflicts(commit_id,conflicting_workflow_id,conflicting_node_id,conflicting_attempt_id,conflicting_request_digest,conflicting_public_request_digest)",
     "CREATE INDEX idx_supersession_new_digest ON supersession_edges(new_digest)",
 )
 
@@ -4561,6 +4735,47 @@ def _validate_semantic_integrity(
         != committed_ids
     ):
         raise invalid
+    output_refs = {
+        _row_text(row[0]): (
+            _row_text(row[1]),
+            _row_text(row[2]),
+            _row_text(row[3]),
+            _row_text(row[4]),
+            _row_int(row[5]),
+        )
+        for row in connection.execute(
+            "SELECT commit_id,workflow_id,node_id,attempt_id,output_digest,"
+            "output_size FROM commit_output_refs"
+        )
+    }
+    if set(output_refs) != committed_ids:
+        raise invalid
+    for commit_id, output_ref in output_refs.items():
+        request = commit_index[commit_id][2]
+        candidate = connection.execute(
+            "SELECT result FROM candidates WHERE workflow_id=? AND node_id=? "
+            "AND attempt_id=?",
+            (
+                request.subject.workflow_id,
+                request.subject.node_id,
+                request.subject.attempt_id,
+            ),
+        ).fetchone()
+        if candidate is None or candidate[0] is None:
+            raise invalid
+        result_bytes = _row_bytes(candidate[0])
+        if (
+            output_ref
+            != (
+                request.subject.workflow_id,
+                request.subject.node_id,
+                request.subject.attempt_id,
+                request.subject.output_digest,
+                len(result_bytes),
+            )
+            or sha256_digest(result_bytes) != request.subject.output_digest
+        ):
+            raise invalid
 
     superseded_new: set[str] = set()
     outgoing: dict[str, str] = {}
@@ -4825,15 +5040,24 @@ def _validate_semantic_integrity(
     for (
         commit_id,
         original,
+        original_public,
+        original_workflow,
+        original_node,
+        original_attempt,
         conflicting,
         public,
-        original_workflow,
         conflicting_workflow,
+        conflicting_node,
+        conflicting_attempt,
         sequence,
         audit,
         claim_json,
     ) in connection.execute(
-        "SELECT commit_id,original_request_digest,conflicting_request_digest,conflicting_public_request_digest,original_workflow_id,conflicting_workflow_id,observation_sequence,audit_event_id,conflict_claim_json FROM commit_conflicts"
+        "SELECT commit_id,original_request_digest,original_public_request_digest,"
+        "original_workflow_id,original_node_id,original_attempt_id,"
+        "conflicting_request_digest,conflicting_public_request_digest,"
+        "conflicting_workflow_id,conflicting_node_id,conflicting_attempt_id,"
+        "observation_sequence,audit_event_id,conflict_claim_json FROM commit_conflicts"
     ):
         indexed = commit_index.get(str(commit_id))
         try:
@@ -4852,6 +5076,8 @@ def _validate_semantic_integrity(
                 )
                 expected_public = _public_request_digest(conflict_request)
                 conflict_workflow_expected = conflict_request.subject.workflow_id
+                conflict_node_expected = conflict_request.subject.node_id
+                conflict_attempt_expected = conflict_request.subject.attempt_id
                 supersede_old = claim["supersede_old"]
             elif claim.get("kind") == "recovery" and set(claim) == {
                 "kind",
@@ -4860,7 +5086,11 @@ def _validate_semantic_integrity(
             }:
                 expected_conflicting = str(claim["request_digest"])
                 expected_public = expected_conflicting
-                conflict_workflow_expected = ""
+                if indexed is None:
+                    raise ValueError("recovery conflict lacks original operation")
+                conflict_workflow_expected = indexed[2].subject.workflow_id
+                conflict_node_expected = indexed[2].subject.node_id
+                conflict_attempt_expected = indexed[2].subject.attempt_id
                 supersede_old = None
             else:
                 raise ValueError("invalid conflict claim")
@@ -4881,10 +5111,15 @@ def _validate_semantic_integrity(
         if (
             indexed is None
             or original != indexed[0]
+            or original_public != public_by_commit.get(str(commit_id))
             or original_workflow != indexed[1]
+            or original_node != indexed[2].subject.node_id
+            or original_attempt != indexed[2].subject.attempt_id
             or conflicting != expected_conflicting
             or public != expected_public
             or conflicting_workflow != conflict_workflow_expected
+            or conflicting_node != conflict_node_expected
+            or conflicting_attempt != conflict_attempt_expected
             or audit != expected_audit
             or audits.get(str(audit)) != expected_audit_json
             or not isinstance(sequence, int)
@@ -5065,9 +5300,15 @@ def _replay(
     if row[0] != request_digest and public_replay is None:
         conflict = connection.execute(
             "SELECT audit_event_id FROM commit_conflicts WHERE commit_id=? "
-            "AND (conflicting_request_digest=? OR conflicting_public_request_digest=?)",
-            (commit_id, request_digest, request_digest),
+            "AND conflicting_request_digest=?",
+            (commit_id, request_digest),
         ).fetchone()
+        if conflict is None:
+            conflict = connection.execute(
+                "SELECT audit_event_id FROM commit_conflicts WHERE commit_id=? "
+                "AND conflicting_public_request_digest=?",
+                (commit_id, request_digest),
+            ).fetchone()
         return CommitResult(
             CommitDecision(
                 commit_id, RequestOutcome.CONFLICTED, FailureCode.COMMIT_ID_EQUIVOCATION

@@ -1306,6 +1306,7 @@ _COMMIT_WRITE_TABLES = frozenset(
         "audit_events",
         "evidence_refs",
         "certificates",
+        "commit_output_refs",
         "decisions",
         "certificate_dispositions",
         "logical_nodes",
@@ -2053,7 +2054,7 @@ def test_sqlite_open_never_creates_an_unprovisioned_path_and_reader_is_read_only
         "unexpected-index",
     ),
 )
-def test_sqlite_open_validates_v2_schema_without_mutating_failed_store(
+def test_sqlite_open_validates_v3_schema_without_mutating_failed_store(
     tmp_path: Path, tamper: str
 ) -> None:
     path = tmp_path / f"schema-{tamper}.db"
@@ -2065,10 +2066,10 @@ def test_sqlite_open_validates_v2_schema_without_mutating_failed_store(
     )
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA application_id").fetchone() == (0x41504343,)
-        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("2",)
+        ).fetchone() == ("3",)
         fingerprint = connection.execute(
             "SELECT value FROM metadata WHERE key='schema_fingerprint'"
         ).fetchone()
@@ -2842,7 +2843,7 @@ def test_sqlite_status_signer_output_is_verified_before_return(
     assert _snapshot(store) == before
 
 
-def test_sqlite_status_reads_a_consistent_ro_snapshot_while_writer_is_reserved(
+def test_sqlite_status_guard_does_not_read_through_a_reserved_writer(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "status-ro-snapshot.db"
@@ -2854,8 +2855,8 @@ def test_sqlite_status_reads_a_consistent_ro_snapshot_while_writer_is_reserved(
     writer = sqlite3.connect(path, isolation_level=None)
     try:
         writer.execute("BEGIN IMMEDIATE")
-        status = store.current_status(committed.certificate_digest, _nonce(246))
-        assert status.certificate_digest == committed.certificate_digest
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            store._observation_current_status(committed.certificate_digest, _nonce(246))
     finally:
         writer.rollback()
         writer.close()
