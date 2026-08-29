@@ -13,9 +13,9 @@ from .ports import (
     AssembleEvidenceRequest,
     AssembleEvidenceResult,
     AtomicCommitRequest,
+    AuthorityExecutionStore,
     AuthorityRuntime,
     AuthoritySigningRole,
-    AuthorityStore,
     CommitResult,
     ProposeCommitRequest,
     ProposeCommitResult,
@@ -25,12 +25,12 @@ from .ports import (
 
 
 class APCCCommitService:
-    """Validate authority identity and delegate to one :class:`AuthorityStore`."""
+    """Validate authority identity and delegate through execution capability."""
 
     def __init__(
         self,
         *,
-        store: AuthorityStore,
+        store: AuthorityExecutionStore,
         config: APCCAuthorityConfig,
         runtime: AuthorityRuntime,
     ) -> None:

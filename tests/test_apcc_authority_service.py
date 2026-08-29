@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import importlib
+import errno
+import ctypes
 import json
+import multiprocessing
 import os
 import socket
 import sqlite3
 import struct
 import pickle
+import resource
+import signal
 import threading
+import time
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -42,6 +50,82 @@ from tests.gcb_apcc_support import (
 )
 
 
+def _probe_process_access(pid: int, result: object) -> None:
+    probes: dict[str, int] = {}
+    for name, path, flags in (
+        ("environ", f"/proc/{pid}/environ", os.O_RDONLY),
+        ("mem", f"/proc/{pid}/mem", os.O_RDONLY),
+        ("fd", f"/proc/{pid}/fd", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
+    ):
+        try:
+            descriptor = os.open(path, flags | os.O_CLOEXEC)
+        except OSError as error:
+            probes[name] = error.errno
+        else:
+            os.close(descriptor)
+            probes[name] = 0
+    libc = ctypes.CDLL(None, use_errno=True)
+    ptrace_result = libc.ptrace(16, pid, 0, 0)
+    probes["ptrace"] = 0 if ptrace_result == 0 else ctypes.get_errno()
+    if ptrace_result == 0:
+        os.waitpid(pid, 0)
+        libc.ptrace(17, pid, 0, 0)
+
+    class IOVec(ctypes.Structure):
+        _fields_ = [("base", ctypes.c_void_p), ("length", ctypes.c_size_t)]
+
+    local_byte = ctypes.c_char()
+    local = IOVec(ctypes.addressof(local_byte), 1)
+    remote = IOVec(0, 1)
+    process_vm_result = libc.process_vm_readv(
+        pid, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0
+    )
+    probes["process_vm_readv"] = 0 if process_vm_result >= 0 else ctypes.get_errno()
+    pidfd = (
+        os.pidfd_open(pid) if hasattr(os, "pidfd_open") else libc.syscall(434, pid, 0)
+    )
+    if pidfd >= 0:
+        try:
+            duplicated = libc.syscall(438, pidfd, 0, 0)
+            probes["pidfd_getfd"] = 0 if duplicated >= 0 else ctypes.get_errno()
+            if duplicated >= 0:
+                os.close(duplicated)
+        finally:
+            os.close(pidfd)
+    else:
+        probes["pidfd_getfd"] = ctypes.get_errno()
+    result.send(probes)
+    result.close()
+
+
+def _plain_dumpable_target(path: str, readiness: object) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        readiness.send((os.getpid(), descriptor))
+        readiness.recv()
+    finally:
+        os.close(descriptor)
+        readiness.close()
+
+
+def _stubborn_child(readiness: object) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    readiness.send(os.getpid())
+    readiness.close()
+    while True:
+        time.sleep(1)
+
+
+def _wait_for_process_sentinel(process: Any) -> None:
+    from multiprocessing.connection import wait
+
+    descriptor = os.dup(process.sentinel)
+    try:
+        assert wait([descriptor], timeout=2) == [descriptor]
+    finally:
+        os.close(descriptor)
+
+
 def test_spawned_pathless_authority_is_authenticated_and_dies_closed(tmp_path) -> None:
     from constitutional_swarm.authority_service import start_authority
 
@@ -51,14 +135,126 @@ def test_spawned_pathless_authority_is_authenticated_and_dies_closed(tmp_path) -
     assert pickle.loads(pickle.dumps(config)) == config
     handle = start_authority(config)
     try:
+        assert not os.path.lexists(config.key_source.location)
+        assert handle.controlled_boot.profile == "linux-controlled-boot-v1"
+        assert not handle.controlled_boot.tcb_ready
+        assert handle.controlled_boot.authority_source_consumed
+        assert not handle.controlled_boot.publishable_evidence
+        assert handle.controlled_boot.positive_assumptions == (
+            "dedicated_trusted_supervisor_precedes_untrusted_scheduler",
+            "privileged_children_use_verified_spawn_entrypoints",
+            "supervisor_hardening_is_process_lifetime_irreversible",
+        )
+        assert handle.controlled_boot.residual_exclusions == (
+            "pre_existing_attacker",
+            "root_or_cap_sys_ptrace",
+            "denial_of_service",
+        )
+        libc = ctypes.CDLL(None, use_errno=True)
+        assert libc.prctl(3, 0, 0, 0, 0) == 0
+        assert libc.prctl(39, 0, 0, 0, 0) == 1
+        assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
         assert handle.pid is not None and handle.pid != os.getpid()
         assert handle.health() == {"authority_pid": handle.pid}
         assert handle.admin_client.health() == {"authority_pid": handle.pid}
     finally:
-        handle.terminate()
-        handle.join(2)
+        handle.close()
+    assert handle.controlled_boot.phase == "closed"
+    assert not handle.controlled_boot.tcb_ready
     with pytest.raises(GovernanceBypassDenied, match="authority_unavailable"):
         handle.health()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="Linux procfs required")
+def test_nondumpable_supervisor_and_authority_deny_same_uid_proc_access(
+    tmp_path,
+) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    canary = tmp_path / "negative-control.secret"
+    canary.write_bytes(b"negative-control")
+    canary.chmod(0o600)
+    context = multiprocessing.get_context("spawn")
+    control_parent, control_child = context.Pipe(duplex=True)
+    control = context.Process(
+        target=_plain_dumpable_target, args=(str(canary), control_child)
+    )
+    control.start()
+    control_child.close()
+    control_pid, control_fd = control_parent.recv()
+    assert os.readlink(f"/proc/{control_pid}/fd/{control_fd}") == str(canary)
+    control_parent.send(None)
+    control.join(2)
+    control.close()
+
+    config = authority_child_config(tmp_path / "proc.db", tmp_path / "proc.keys")
+    handle = start_authority(config)
+    try:
+        for target in (os.getpid(), handle.pid):
+            assert target is not None
+            probe_parent, probe_child = context.Pipe(duplex=False)
+            probe = context.Process(
+                target=_probe_process_access, args=(target, probe_child)
+            )
+            probe.start()
+            probe_child.close()
+            results = probe_parent.recv()
+            probe_parent.close()
+            probe.join(2)
+            assert results["environ"] in {errno.EACCES, errno.EPERM}
+            assert results["mem"] in {errno.EACCES, errno.EPERM}
+            assert results["fd"] in {errno.EACCES, errno.EPERM}
+            assert results["ptrace"] == errno.EPERM
+            assert results["process_vm_readv"] == errno.EPERM
+            if "pidfd_getfd" in results:
+                assert results["pidfd_getfd"] == errno.EPERM
+    finally:
+        handle.close()
+
+
+def test_hardening_failure_prevents_authority_and_scheduler_start(
+    tmp_path, monkeypatch
+) -> None:
+    import constitutional_swarm.authority_service as service
+    from constitutional_swarm.authority_isolation import IsolationUnavailable
+
+    config = authority_child_config(tmp_path / "fail.db", tmp_path / "fail.keys")
+    before = {child.pid for child in multiprocessing.active_children()}
+
+    def unavailable() -> None:
+        raise IsolationUnavailable("ISOLATION_UNAVAILABLE: injected")
+
+    monkeypatch.setattr(service, "harden_current_process", unavailable)
+    with pytest.raises(IsolationUnavailable, match="ISOLATION_UNAVAILABLE"):
+        service.start_authority(config)
+    assert os.path.exists(config.key_source.location)
+    assert {child.pid for child in multiprocessing.active_children()} == before
+
+
+def test_isolation_predicate_is_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    import constitutional_swarm.authority_isolation as isolation
+
+    def mutation_forbidden() -> None:
+        raise AssertionError("isolation predicate attempted to mutate process state")
+
+    monkeypatch.setattr(isolation, "harden_current_process", mutation_forbidden)
+    assert type(isolation.isolation_is_active()) is bool
+
+
+def test_abort_process_escalates_to_kill_joins_and_closes() -> None:
+    from constitutional_swarm.authority_service import _abort_process
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(target=_stubborn_child, args=(child,))
+    process.start()
+    child.close()
+    pid = parent.recv()
+    parent.close()
+    _abort_process(process)
+    with pytest.raises(ValueError, match="closed"):
+        _ = process.pid
+    assert not os.path.exists(f"/proc/{pid}")
 
 
 def test_execution_channel_denies_admin_operation_without_dying(tmp_path) -> None:
@@ -103,7 +299,7 @@ def test_insecure_or_symlinked_key_bundle_fails_closed_before_readiness(
         tmp_path / "insecure.db", tmp_path / "insecure.keys"
     )
     os.chmod(insecure.key_source.location, 0o644)
-    with pytest.raises(RuntimeError, match="mode 0600"):
+    with pytest.raises(PermissionError, match="mode 0600"):
         start_authority(insecure)
 
     secure = authority_child_config(tmp_path / "symlink.db", tmp_path / "secure.keys")
@@ -117,11 +313,21 @@ def test_insecure_or_symlinked_key_bundle_fails_closed_before_readiness(
             secure.key_source.expected_identity_public_key,
         ),
     )
-    with pytest.raises(RuntimeError, match="startup failed"):
+    with pytest.raises(PermissionError, match="unsafe authority key bundle source"):
         start_authority(linked)
 
+    hardlinked = authority_child_config(
+        tmp_path / "hardlink.db", tmp_path / "hardlink.keys"
+    )
+    os.link(hardlinked.key_source.location, tmp_path / "hardlink-copy.keys")
+    with pytest.raises(PermissionError, match="unsafe authority key bundle source"):
+        start_authority(hardlinked)
 
-def test_restart_rotates_ephemeral_ipc_identity(tmp_path) -> None:
+
+def test_restart_requires_rebootstrap_and_rotates_ephemeral_ipc_identity(
+    tmp_path,
+) -> None:
+    from constitutional_swarm.authority_isolation import IsolationUnavailable
     from constitutional_swarm.authority_service import start_authority
 
     database = tmp_path / "authority.db"
@@ -130,7 +336,12 @@ def test_restart_rotates_ephemeral_ipc_identity(tmp_path) -> None:
     first_identity = (first._session_id, first._ipc_public_key)
     first.terminate()
     first.join(2)
-    second = start_authority(replace(config, provision=False))
+    with pytest.raises(IsolationUnavailable, match="rebootstrap required"):
+        start_authority(replace(config, provision=False))
+    second_config = authority_child_config(
+        database, tmp_path / "authority-rebootstrap.keys", provision=False
+    )
+    second = start_authority(second_config)
     try:
         assert (second._session_id, second._ipc_public_key) != first_identity
         assert second.health()["authority_pid"] == second.pid
@@ -1118,6 +1329,84 @@ def test_supported_executor_is_composed_only_by_trusted_authority_handle(
         handle.close()
 
 
+def test_spawn_executor_is_gated_on_controlled_boot_and_consumed_source(
+    tmp_path,
+) -> None:
+    from constitutional_swarm.authority_isolation import ControlledBootPhase
+    from constitutional_swarm.authority_service import (
+        _controlled_boot_result,
+        start_authority,
+    )
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "gate.db", tmp_path / "gate.keys")
+    )
+    try:
+        handle._controlled_boot = _controlled_boot_result(
+            ControlledBootPhase.OBSERVER_STARTING
+        )
+        with pytest.raises(GovernanceBypassDenied, match="observer_starting"):
+            handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+        assert not handle._executors
+        handle._controlled_boot = _controlled_boot_result(
+            ControlledBootPhase.AUTHORITY_READY
+        )
+        Path(handle._authority_source_path).write_bytes(b"recreated-path-canary")
+        with pytest.raises(GovernanceBypassDenied, match="ISOLATION_UNAVAILABLE"):
+            handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+        assert not handle._executors
+    finally:
+        handle.close()
+
+
+def test_scheduler_post_transfer_failure_requires_rebootstrap(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from constitutional_swarm import authority_service as service
+    from constitutional_swarm.authority_isolation import IsolationUnavailable
+
+    handle = service.start_authority(
+        authority_child_config(tmp_path / "scheduler-ready.db", tmp_path / "keys")
+    )
+    authority_pid = handle.pid
+    scheduler_pid = handle._scheduler_worker.pid
+    original = service._verify_scheduler_signed_message
+
+    def fail_active_readiness(*args, **kwargs):
+        if kwargs.get("domain") == service._SCHEDULER_ACTIVE_DOMAIN:
+            raise IsolationUnavailable(
+                "ISOLATION_UNAVAILABLE: injected scheduler readiness"
+            )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        service,
+        "_verify_scheduler_signed_message",
+        fail_active_readiness,
+    )
+    try:
+        with pytest.raises(IsolationUnavailable, match="injected scheduler readiness"):
+            handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+        assert handle._execution_channel is None
+        assert handle.controlled_boot.phase == "failed"
+        with pytest.raises(GovernanceBypassDenied, match="authority_unavailable"):
+            handle.health()
+        with pytest.raises(GovernanceBypassDenied, match="authority_unavailable"):
+            handle.admin_client.health()
+        with pytest.raises(GovernanceBypassDenied, match="authority_unavailable"):
+            handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+        assert authority_pid is not None and not os.path.exists(
+            f"/proc/{authority_pid}"
+        )
+        assert scheduler_pid is not None and not os.path.exists(
+            f"/proc/{scheduler_pid}"
+        )
+        handle.close()
+        assert handle.controlled_boot.phase == "failed"
+    finally:
+        handle.close()
+
+
 def test_forged_scheduler_cannot_enter_supported_composition_or_mutate_authority(
     tmp_path,
 ) -> None:
@@ -1280,17 +1569,441 @@ def test_separately_spawned_executor_receives_only_restricted_channel(tmp_path) 
         assert committed is not None and committed.artifact_id == "artifact"
         executor_pid = executor.pid
         assert executor_pid is not None
-        fd_targets = []
-        descriptor_root = f"/proc/{executor_pid}/fd"
-        if os.path.isdir(descriptor_root):
-            for descriptor in os.listdir(descriptor_root):
-                try:
-                    fd_targets.append(os.readlink(f"{descriptor_root}/{descriptor}"))
-                except OSError:
-                    pass
-        forbidden_values = {config.database_path, config.key_source.location}
-        assert not forbidden_values.intersection(fd_targets)
+        context = multiprocessing.get_context("spawn")
+        probe_parent, probe_child = context.Pipe(duplex=False)
+        probe = context.Process(
+            target=_probe_process_access, args=(executor_pid, probe_child)
+        )
+        probe.start()
+        probe_child.close()
+        results = probe_parent.recv()
+        probe_parent.close()
+        probe.join(2)
+        assert results["environ"] in {errno.EACCES, errno.EPERM}
+        assert results["mem"] in {errno.EACCES, errno.EPERM}
+        assert results["fd"] in {errno.EACCES, errno.EPERM}
+        assert results["ptrace"] == errno.EPERM
+        assert results["process_vm_readv"] == errno.EPERM
+        assert results["pidfd_getfd"] == errno.EPERM
     finally:
         if handle.is_alive():
             handle.terminate()
         handle.join(2)
+
+
+def test_scheduler_worker_is_born_before_secret_consumption_and_activation_spawns_nothing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from constitutional_swarm import authority_service as service
+
+    observed_before_secret: list[tuple[int | None, str]] = []
+    original_consume = service.consume_secret_file
+
+    def observe_children(location: str, *, maximum_bytes: int, label: str):
+        if label == "authority key bundle":
+            observed_before_secret.extend(
+                (child.pid, child.name) for child in multiprocessing.active_children()
+            )
+        return original_consume(location, maximum_bytes=maximum_bytes, label=label)
+
+    monkeypatch.setattr(service, "consume_secret_file", observe_children)
+    handle = service.start_authority(
+        authority_child_config(tmp_path / "preborn.db", tmp_path / "preborn.keys")
+    )
+    try:
+        assert any(
+            name == "apcc-dormant-scheduler-child" for _, name in observed_before_secret
+        )
+        assert not handle.controlled_boot.tcb_ready
+        children_before_activation = {
+            child.pid for child in multiprocessing.active_children()
+        }
+        executor = handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+        assert {
+            child.pid for child in multiprocessing.active_children()
+        } == children_before_activation
+        assert executor.pid in children_before_activation
+        assert handle.controlled_boot.tcb_ready
+    finally:
+        handle.close()
+
+
+def test_terminate_join_is_whole_handle_and_reaps_dormant_scheduler(tmp_path) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "terminate.db", tmp_path / "terminate.keys")
+    )
+    authority_pid = handle.pid
+    scheduler_pid = handle._scheduler_worker.pid
+    handle.terminate()
+    handle.join(2)
+    handle.terminate()
+    handle.join(0)
+    assert handle.controlled_boot.phase == "closed"
+    assert authority_pid is not None and not os.path.exists(f"/proc/{authority_pid}")
+    assert scheduler_pid is not None and not os.path.exists(f"/proc/{scheduler_pid}")
+
+
+def test_close_reaps_every_lifecycle_watcher_and_sentinel_fd(tmp_path) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "watchers.db", tmp_path / "watchers.keys")
+    )
+    watchers = tuple(handle._watchers)
+    descriptors = set(handle._watcher_fds)
+    assert len(watchers) == len(descriptors) == 2
+    handle.close()
+    assert not handle._watcher_fds
+    assert all(not watcher.is_alive() for watcher in watchers)
+    for descriptor in descriptors:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(descriptor)
+
+
+def test_scheduler_ancillary_rejects_malformed_extra_and_truncated_descriptors() -> (
+    None
+):
+    import array
+
+    from constitutional_swarm.authority_service import _decode_scheduler_ancillary
+
+    with pytest.raises(ValueError, match="descriptor envelope"):
+        _decode_scheduler_ancillary([], 0)
+    read_fd, write_fd = os.pipe()
+    try:
+        extra = [os.dup(read_fd) for _ in range(3)]
+        with pytest.raises(ValueError, match="descriptor envelope"):
+            _decode_scheduler_ancillary(
+                [
+                    (
+                        socket.SOL_SOCKET,
+                        socket.SCM_RIGHTS,
+                        array.array("i", extra).tobytes(),
+                    )
+                ],
+                0,
+            )
+        truncated = [os.dup(read_fd), os.dup(read_fd)]
+        with pytest.raises(ValueError, match="truncated"):
+            _decode_scheduler_ancillary(
+                [
+                    (
+                        socket.SOL_SOCKET,
+                        socket.SCM_RIGHTS,
+                        array.array("i", truncated).tobytes(),
+                    )
+                ],
+                socket.MSG_CTRUNC,
+            )
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.parametrize("flag_name", ["MSG_TRUNC", "MSG_CTRUNC"])
+def test_invalid_scheduler_ancillary_closes_every_received_right(
+    flag_name: str,
+) -> None:
+    import array
+
+    from constitutional_swarm.authority_service import _decode_scheduler_ancillary
+
+    first_read, first_write = os.pipe()
+    second_read, second_write = os.pipe()
+    received = [os.dup(first_read), os.dup(second_read)]
+    try:
+        raw = array.array("i", received).tobytes()
+        with pytest.raises(ValueError, match="truncated"):
+            _decode_scheduler_ancillary(
+                [(socket.SOL_SOCKET, socket.SCM_RIGHTS, raw)],
+                getattr(socket, flag_name),
+            )
+        for descriptor in received:
+            with pytest.raises(OSError, match="Bad file descriptor"):
+                os.fstat(descriptor)
+    finally:
+        for descriptor in (first_read, first_write, second_read, second_write):
+            os.close(descriptor)
+
+
+def test_scheduler_ancillary_rejects_wrong_kind_and_multiple_cmsgs_without_fd_leak() -> (
+    None
+):
+    import array
+
+    from constitutional_swarm.authority_service import _decode_scheduler_ancillary
+
+    read_fd, write_fd = os.pipe()
+    received = [os.dup(read_fd), os.dup(read_fd)]
+    try:
+        raw = array.array("i", received).tobytes()
+        with pytest.raises(ValueError, match="descriptor envelope"):
+            _decode_scheduler_ancillary(
+                [
+                    (socket.SOL_SOCKET, socket.SCM_RIGHTS, raw[:4]),
+                    (socket.SOL_SOCKET, socket.SCM_RIGHTS, raw[4:]),
+                ],
+                0,
+            )
+        for descriptor in received:
+            with pytest.raises(OSError, match="Bad file descriptor"):
+                os.fstat(descriptor)
+        with pytest.raises(ValueError, match="descriptor envelope"):
+            _decode_scheduler_ancillary([(socket.SOL_SOCKET, 0, raw)], 0)
+        with pytest.raises(ValueError, match="descriptor envelope"):
+            _decode_scheduler_ancillary([(0, socket.SCM_RIGHTS, b"")], 0)
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_scheduler_activation_received_descriptors_are_cloexec() -> None:
+    import array
+
+    from constitutional_swarm.authority_service import (
+        _receive_scheduler_activation,
+        canonical_json,
+    )
+
+    control_send, control_recv = socket.socketpair(
+        socket.AF_UNIX, socket.SOCK_SEQPACKET
+    )
+    scheduler_send, scheduler_recv = socket.socketpair(socket.AF_UNIX)
+    authority_send, authority_recv = socket.socketpair(socket.AF_UNIX)
+    body = {
+        "stage": "ACTIVATE_SCHEDULER",
+        "launch_nonce": "nonce",
+        "scheduler_session": "scheduler",
+        "authority_session": "authority",
+        "authority_pid": os.getpid(),
+        "ipc_public_key": "a" * 43,
+        "max_frame_bytes": 16_384,
+        "policy_version": "1",
+        "registry_snapshot": {},
+    }
+    try:
+        descriptors = array.array(
+            "i", [scheduler_send.fileno(), authority_send.fileno()]
+        )
+        control_send.sendmsg(
+            [canonical_json(body)],
+            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, descriptors)],
+        )
+        decoded, scheduler, authority = _receive_scheduler_activation(
+            control_recv, 16_384
+        )
+        try:
+            assert decoded == body
+            assert not os.get_inheritable(scheduler.fileno())
+            assert not os.get_inheritable(authority.fileno())
+        finally:
+            scheduler.close()
+            authority.close()
+    finally:
+        for connection in (
+            control_send,
+            control_recv,
+            scheduler_send,
+            scheduler_recv,
+            authority_send,
+            authority_recv,
+        ):
+            connection.close()
+
+
+def test_unexpected_authority_death_revokes_fresh_controlled_boot(tmp_path) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "authority-death.db", tmp_path / "keys")
+    )
+    scheduler_pid = handle._scheduler_worker.pid
+    try:
+        authority_pid = handle.pid
+        assert authority_pid is not None
+        authority_watcher = next(
+            watcher
+            for watcher in handle._watchers
+            if watcher.name == "apcc-authority-lifecycle-watcher"
+        )
+        os.kill(authority_pid, signal.SIGKILL)
+        authority_watcher.join(5)
+        assert not authority_watcher.is_alive()
+        assert handle._controlled_boot.phase == "failed"
+        result = handle.controlled_boot
+        assert result.phase == "failed"
+        assert not result.observer_ready
+        assert not result.tcb_ready
+        assert not result.publishable_evidence
+        assert scheduler_pid is not None and not os.path.exists(
+            f"/proc/{scheduler_pid}"
+        )
+    finally:
+        handle.close()
+
+
+def test_unexpected_dormant_scheduler_death_revokes_fresh_controlled_boot(
+    tmp_path,
+) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "dormant-death.db", tmp_path / "keys")
+    )
+    authority_pid = handle.pid
+    try:
+        scheduler_pid = handle._scheduler_worker.pid
+        assert scheduler_pid is not None
+        os.kill(scheduler_pid, signal.SIGKILL)
+        _wait_for_process_sentinel(handle._scheduler_worker.process)
+        result = handle.controlled_boot
+        assert result.phase == "failed"
+        assert not result.tcb_ready
+        assert not result.publishable_evidence
+        assert authority_pid is not None and not os.path.exists(
+            f"/proc/{authority_pid}"
+        )
+    finally:
+        handle.close()
+
+
+def test_unexpected_activated_scheduler_death_revokes_publishable_claim(
+    tmp_path,
+) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "scheduler-death.db", tmp_path / "keys")
+    )
+    executor = handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+    authority_pid = handle.pid
+    try:
+        scheduler_pid = executor.pid
+        assert scheduler_pid is not None
+        os.kill(scheduler_pid, signal.SIGKILL)
+        _wait_for_process_sentinel(handle._scheduler_worker.process)
+        result = handle.controlled_boot
+        assert result.phase == "failed"
+        assert not result.tcb_ready
+        assert not result.publishable_evidence
+        with pytest.raises(GovernanceBypassDenied, match="authority_unavailable"):
+            executor.health()
+        assert authority_pid is not None and not os.path.exists(
+            f"/proc/{authority_pid}"
+        )
+    finally:
+        handle.close()
+
+
+def test_failing_executor_rpc_concurrent_with_authority_close_has_no_lock_cycle(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from constitutional_swarm import authority_service as service_module
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "rpc-close.db", tmp_path / "keys")
+    )
+    executor = handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+    rpc_entered = threading.Event()
+    release_rpc = threading.Event()
+    close_entered = threading.Event()
+    rpc_failures: list[BaseException] = []
+    original_recv = service_module.recv_authenticated_frame
+    original_close = type(executor).close
+
+    def fail_executor_recv(connection, maximum_bytes):
+        if connection is executor._socket:
+            rpc_entered.set()
+            assert release_rpc.wait(3)
+            raise OSError("injected scheduler receive failure")
+        return original_recv(connection, maximum_bytes)
+
+    def mark_executor_close(current):
+        if current is executor:
+            close_entered.set()
+        return original_close(current)
+
+    monkeypatch.setattr(service_module, "recv_authenticated_frame", fail_executor_recv)
+    monkeypatch.setattr(type(executor), "close", mark_executor_close)
+
+    def fail_rpc() -> None:
+        try:
+            executor.health()
+        except BaseException as error:
+            rpc_failures.append(error)
+
+    rpc_thread = threading.Thread(target=fail_rpc)
+    close_thread = threading.Thread(target=handle.close)
+    rpc_thread.start()
+    assert rpc_entered.wait(2)
+    close_thread.start()
+    assert close_entered.wait(2)
+    release_rpc.set()
+    rpc_thread.join(5)
+    close_thread.join(5)
+    assert not rpc_thread.is_alive()
+    assert not close_thread.is_alive()
+    assert len(rpc_failures) == 1
+    assert isinstance(rpc_failures[0], GovernanceBypassDenied)
+    assert handle.controlled_boot.phase == "closed"
+
+
+def test_close_waits_for_scheduler_activation_and_wins_terminal_state(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "close-race.db", tmp_path / "keys")
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    close_done = threading.Event()
+    original = handle._scheduler_worker.activate
+
+    def delayed_activate(_worker, *args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(type(handle._scheduler_worker), "activate", delayed_activate)
+    executor_result: list[object] = []
+
+    def activate() -> None:
+        executor_result.append(
+            handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+        )
+
+    scheduler_thread = threading.Thread(target=activate)
+    close_thread = threading.Thread(target=lambda: (handle.close(), close_done.set()))
+    scheduler_thread.start()
+    assert entered.wait(2)
+    close_thread.start()
+    assert not close_done.wait(0.2)
+    release.set()
+    scheduler_thread.join(5)
+    close_thread.join(5)
+    assert not scheduler_thread.is_alive() and not close_thread.is_alive()
+    assert handle.controlled_boot.phase == "closed"
+    assert executor_result
+    with pytest.raises(ValueError):
+        executor_result[0]._process.is_alive()
+
+
+def test_executor_close_revokes_final_admission_claim(tmp_path) -> None:
+    from constitutional_swarm.authority_service import start_authority
+
+    handle = start_authority(
+        authority_child_config(tmp_path / "executor-close.db", tmp_path / "keys")
+    )
+    try:
+        executor = handle.spawn_executor(CapabilityRegistry(), policy_version="1")
+        assert handle.controlled_boot.tcb_ready
+        executor.close()
+        assert handle.controlled_boot.phase == "failed"
+        assert not handle.controlled_boot.tcb_ready
+    finally:
+        handle.close()

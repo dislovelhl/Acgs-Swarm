@@ -8,7 +8,6 @@ import os
 import secrets
 import select
 import socket
-import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +40,7 @@ from constitutional_swarm.governed_commit import TrustedGovernanceBootstrap
 class KeySourceRef:
     """Public reference and pinned public identity for child-held signing keys."""
 
-    kind: Literal["file", "kms", "pkcs11"]
+    kind: Literal["file", "kms", "pkcs11", "consumed"]
     location: str
     expected_identity_public_key: bytes
 
@@ -153,20 +152,9 @@ class _LoadedKeys:
     identity: Ed25519PrivateKey
 
 
-def _load_file_keys(reference: KeySourceRef) -> _LoadedKeys:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(reference.location, flags)
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
-            raise PermissionError("unsafe authority key bundle owner or type")
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise PermissionError("authority key bundle must have mode 0600")
-        raw = os.read(descriptor, 1_048_577)
-        if len(raw) > 1_048_576:
-            raise ValueError("authority key bundle too large")
-    finally:
-        os.close(descriptor)
+def _load_file_keys_raw(raw: bytes | bytearray, reference: KeySourceRef) -> _LoadedKeys:
+    if len(raw) > 1_048_576:
+        raise ValueError("authority key bundle too large")
     body = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
     if not isinstance(body, dict) or set(body) != {
         "policy",
@@ -206,12 +194,6 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("duplicate authority key")
         result[key] = value
     return result
-
-
-def _load_keys(reference: KeySourceRef) -> _LoadedKeys:
-    if reference.kind == "file":
-        return _load_file_keys(reference)
-    raise RuntimeError(f"unsupported key source: {reference.kind}")
 
 
 def _validate_keys(config: APCCAuthorityConfig, keys: _LoadedKeys) -> None:
@@ -257,17 +239,33 @@ def authority_child_main(
     config: AuthorityChildConfig,
     execution: socket.socket,
     admin_channel: socket.socket,
+    status_channel: socket.socket,
     readiness: Any,
 ) -> None:
     """Load authority secrets after spawn and serve two exclusive channels."""
-    from constitutional_swarm.authority_service import (
-        _handle_admin_request,
-        _handle_execution_request,
-        _recover_outbox,
+    from constitutional_swarm.authority_isolation import (
+        erase_secret,
+        harden_current_process,
     )
 
     try:
-        keys = _load_keys(config.key_source)
+        harden_current_process()
+        from constitutional_swarm.authority_service import (
+            _handle_admin_request,
+            _handle_execution_request,
+            _handle_status_sign_request,
+            _recover_outbox,
+        )
+
+        readiness.send({"stage": "HARDENED_READY", "pid": os.getpid(), "dumpable": 0})
+        try:
+            raw_keys = bytearray(readiness.recv_bytes(1_048_577))
+        except (EOFError, OSError) as error:
+            raise RuntimeError("authority bootstrap secret unavailable") from error
+        try:
+            keys = _load_file_keys_raw(raw_keys, config.key_source)
+        finally:
+            erase_secret(raw_keys)
         bootstrap = _bootstrap(config, keys)
         path = Path(config.database_path)
         admin = (
@@ -294,8 +292,13 @@ def authority_child_main(
         readiness.close()
         execution.settimeout(2.0)
         admin_channel.settimeout(2.0)
-        channels = {execution: "execution", admin_channel: "admin"}
-        sequences = {"execution": 0, "admin": 0}
+        status_channel.settimeout(2.0)
+        channels = {
+            execution: "execution",
+            admin_channel: "admin",
+            status_channel: "status-signing",
+        }
+        sequences = {"execution": 0, "admin": 0, "status-signing": 0}
         last_recovery = time.monotonic()
         while channels:
             readable, _, _ = select.select(list(channels), [], [], 0.25)
@@ -338,17 +341,20 @@ def authority_child_main(
                 sequences[channel] += 1
                 request_digest = digest(request)
                 try:
-                    result = (
-                        _handle_execution_request(admin, request)
-                        if channel == "execution"
-                        else _handle_admin_request(admin, request)
-                    )
+                    if channel == "execution":
+                        result = _handle_execution_request(admin, request)
+                    elif channel == "admin":
+                        result = _handle_admin_request(admin, request)
+                    else:
+                        result = _handle_status_sign_request(request, admin)
                 except Exception as exc:
                     if isinstance(exc, LookupError):
                         code = (
                             "unknown_operation"
                             if channel == "execution"
                             else "unknown_admin_operation"
+                            if channel == "admin"
+                            else "unknown_status_signing_operation"
                         )
                     elif isinstance(exc, (TypeError, ValueError)):
                         code = "invalid_request"

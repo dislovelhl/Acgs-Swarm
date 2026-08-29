@@ -26,6 +26,28 @@ FORBIDDEN_IMPORTS = (
 )
 
 
+def test_controlled_boot_result_rejects_impossible_publishable_state() -> None:
+    from constitutional_swarm.authority_isolation import (
+        CONTROLLED_BOOT_POSITIVE_ASSUMPTIONS,
+        CONTROLLED_BOOT_RESIDUAL_EXCLUSIONS,
+        ControlledBootEvidence,
+        ControlledBootPhase,
+        ControlledBootResult,
+    )
+
+    with pytest.raises(ValueError, match="phase/evidence mismatch"):
+        ControlledBootResult(
+            profile="linux-controlled-boot-v1",
+            phase=ControlledBootPhase.SCHEDULER_STARTED_PUBLISHABLE,
+            evidence=ControlledBootEvidence.NONPUBLISHABLE,
+            authority_source_consumed=True,
+            controller_source_consumed=True,
+            observer_ready=True,
+            positive_assumptions=CONTROLLED_BOOT_POSITIVE_ASSUMPTIONS,
+            residual_exclusions=CONTROLLED_BOOT_RESIDUAL_EXCLUSIONS,
+        )
+
+
 def _imports(module: ModuleType) -> set[str]:
     tree = ast.parse(inspect.getsource(module))
     return {
@@ -67,6 +89,8 @@ def test_authority_store_is_abstract_and_commit_id_lookup_is_store_global() -> N
         "replay_commit",
         "get_certificate",
         "current_status",
+        "current_status_batch",
+        "logical_node_status_batch",
         "revoke",
         "supersede",
         "recover",
@@ -345,3 +369,40 @@ def test_core_has_no_backend_specific_linearization_primitives() -> None:
 def test_removed_ambiguous_state_aliases_are_not_public() -> None:
     assert not hasattr(model, "NodeLifecycle")
     assert not hasattr(model, "NodeState")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("profile", 1),
+        ("phase", "authority_ready"),
+        ("evidence", "nonpublishable"),
+        ("authority_source_consumed", 1),
+        ("controller_source_consumed", 0),
+        ("observer_ready", 0),
+        ("positive_assumptions", ["assumption"]),
+        ("residual_exclusions", ("valid", 1)),
+    ],
+)
+def test_controlled_boot_result_enforces_exact_runtime_types(field, value) -> None:
+    from constitutional_swarm.authority_isolation import (
+        CONTROLLED_BOOT_POSITIVE_ASSUMPTIONS,
+        CONTROLLED_BOOT_RESIDUAL_EXCLUSIONS,
+        ControlledBootEvidence,
+        ControlledBootPhase,
+        ControlledBootResult,
+    )
+
+    values = {
+        "profile": "linux-controlled-boot-v1",
+        "phase": ControlledBootPhase.AUTHORITY_READY,
+        "evidence": ControlledBootEvidence.NONPUBLISHABLE,
+        "authority_source_consumed": True,
+        "controller_source_consumed": False,
+        "observer_ready": False,
+        "positive_assumptions": CONTROLLED_BOOT_POSITIVE_ASSUMPTIONS,
+        "residual_exclusions": CONTROLLED_BOOT_RESIDUAL_EXCLUSIONS,
+    }
+    values[field] = value
+    with pytest.raises((TypeError, ValueError)):
+        ControlledBootResult(**values)

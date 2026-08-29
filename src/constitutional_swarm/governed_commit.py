@@ -62,14 +62,14 @@ from constitutional_swarm.apcc.ports import (
     StageResultRequest,
 )
 from constitutional_swarm.apcc.service import APCCCommitService
-from constitutional_swarm.apcc.sqlite_store import (
-    SQLiteAuthorityStore,
+from constitutional_swarm.apcc.gcb_projection import (
     _GCBAtomicCommitRequest,
     _GCBProjectionCheckpoint,
     _GCBProjectionDenied,
     _GCBProjectionFault,
     _GCBProjectionPlan,
 )
+from constitutional_swarm.apcc.sqlite_store import SQLiteAuthorityStore
 from constitutional_swarm.artifact import Artifact, ArtifactStore
 from constitutional_swarm.governance_errors import GovernanceBypassDenied
 

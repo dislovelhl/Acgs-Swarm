@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
-from typing import cast, get_type_hints
+from typing import Never, get_type_hints
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -22,6 +22,7 @@ from constitutional_swarm.apcc.ports import (
     APCCAuthorityConfig,
     AtomicCommitRequest,
     AuthorityClock,
+    AuthorityExecutionStore,
     AuthorityKeyProvider,
     AuthorityOutboxSink,
     AuthorityReader,
@@ -397,6 +398,7 @@ def test_service_delegates_one_commit_to_the_store_once() -> None:
     assert annotations["request"] is AtomicCommitRequest
     assert annotations["return"] is CommitResult
     store = _SnapshotStore()
+    assert isinstance(store, AuthorityExecutionStore)
     service = _service(store=store, config=_config(), runtime=_runtime())
     marker = _typed_request()
     assert service.commit(marker) is store.result
@@ -430,17 +432,54 @@ class _SnapshotStore:
         self.calls += 1
         return self.result
 
+    @staticmethod
+    def _unexpected(operation: str) -> Never:
+        raise AssertionError(f"unexpected execution-store operation: {operation}")
+
+    def read_commit_context(self, request: object) -> Never:
+        self._unexpected("read_commit_context")
+
+    def read_logical_node(self, workflow_id: object, node_id: object) -> Never:
+        self._unexpected("read_logical_node")
+
+    def replay_commit(self, request: object) -> Never:
+        self._unexpected("replay_commit")
+
+    def get_certificate(self, commit_id: object) -> Never:
+        self._unexpected("get_certificate")
+
+    def get_outbox_event(self, commit_id: object) -> Never:
+        self._unexpected("get_outbox_event")
+
+    def stage_result(self, request: object) -> Never:
+        self._unexpected("stage_result")
+
+    def assemble_evidence(self, request: object) -> Never:
+        self._unexpected("assemble_evidence")
+
+    def propose_commit(self, request: object) -> Never:
+        self._unexpected("propose_commit")
+
+    def current_status(
+        self, certificate_digest: object, request_nonce: object
+    ) -> Never:
+        self._unexpected("current_status")
+
+    def current_status_batch(self, requests: object) -> Never:
+        self._unexpected("current_status_batch")
+
+    def logical_node_status_batch(self, requests: object) -> Never:
+        self._unexpected("logical_node_status_batch")
+
 
 def _service(
     *,
-    store: _SnapshotStore,
+    store: AuthorityExecutionStore,
     config: APCCAuthorityConfig,
     runtime: AuthorityRuntime,
 ) -> APCCCommitService:
     """Construct the service while keeping the deliberately narrow test double."""
-    return APCCCommitService(
-        store=cast(AuthorityStore, store), config=config, runtime=runtime
-    )
+    return APCCCommitService(store=store, config=config, runtime=runtime)
 
 
 def _committed_result() -> CommitResult:
