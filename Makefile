@@ -19,7 +19,10 @@ EXTRAS ?= dev transport
 SYNC_FLAGS ?= --no-sources $(addprefix --extra ,$(EXTRAS))
 # Test selection: skip slow/network/research/bittensor by default (matches CI).
 TEST_MARKERS ?= not slow and not benchmark and not e2e and not research and not bittensor
-PYTEST = $(UV) run --no-sync pytest tests/ --import-mode=importlib
+# Live PostgreSQL contracts run in CI job test-postgres (requires APCC_POSTGRES_DSN
+# + [postgres]). Default verify must not import psycopg via that frozen suite.
+TEST_IGNORE ?= --ignore=tests/test_apcc_postgres.py
+PYTEST = $(UV) run --no-sync pytest tests/ --import-mode=importlib $(TEST_IGNORE)
 TLA2TOOLS_JAR ?=
 TLC_TIMEOUT ?= 180
 TLC_LOG ?= tlc-gcb-witness.log
