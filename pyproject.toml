@@ -50,7 +50,7 @@ dev = [
 ]
 # Observability for testnet/eval scripts only (scripts/testnet_deploy.py).
 # Not imported by the runtime; pytest still disables the plugin via addopts.
-braintrust = ["braintrust==0.31.0"]
+braintrust = ["braintrust==0.35.0"]
 # bittensor bounded below 11: v11 removed the miner/validator networking stack
 # (axon/dendrite/synapse) that synapse_adapter.py, axon_server.py, and
 # dendrite_client.py build on (bt.Synapse access raises AttributeError).
